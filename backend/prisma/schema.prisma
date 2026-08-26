@@ -1,0 +1,1005 @@
+// Hospital Management System — data model
+// See ../../docs/technical-design.md §5 for the reasoning behind these changes.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────────── enums ─────────────────────────────
+
+enum UserRole {
+  ADMIN
+  DOCTOR
+  NURSE
+  RECEPTIONIST
+  PHARMACIST
+  BILLING_STAFF
+}
+
+enum AppointmentStatus {
+  SCHEDULED
+  CHECKED_IN
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum InvoiceStatus {
+  PENDING
+  PAID
+  PARTIALLY_PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum AllergySeverity {
+  MILD
+  MODERATE
+  SEVERE
+  LIFE_THREATENING
+}
+
+enum PrescriptionStatus {
+  ISSUED
+  PARTIALLY_DISPENSED
+  DISPENSED
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  BANK_TRANSFER
+  CHEQUE
+  INSURANCE
+  OTHER
+}
+
+enum AuditOutcome {
+  SUCCESS
+  FAILURE
+}
+
+enum AdmissionStatus {
+  ADMITTED
+  DISCHARGED
+}
+
+/// Why a scheduled dose did not simply happen.
+/// REFUSED and WITHHELD are clinically distinct and must not be merged:
+/// the patient declined, versus a clinician decided against giving it.
+enum DoseStatus {
+  DUE
+  GIVEN
+  MISSED
+  REFUSED
+  WITHHELD
+}
+
+// ───────────────────────────── tenancy ─────────────────────────────
+
+/// One hospital organisation — the entity that signs the contract and the BAA.
+///
+/// NOT a site or a building. A hospital group with three campuses sharing one
+/// patient index is ONE tenant, because a patient treated at one campus must be
+/// visible at another. Multi-site is a dimension inside a tenant, added later if
+/// needed. Getting this backwards is expensive to undo: splitting one tenant in
+/// two means splitting a patient index, and merging two means reconciling one.
+///
+/// Every model below that holds patient-derived data carries `tenantId`, and
+/// every one of those tables has a Postgres RLS policy keyed on it. The column
+/// is what the application filters by; the policy is what makes a forgotten
+/// filter return nothing instead of another hospital's records.
+/// See docs/adr-001-multi-tenancy.md.
+model Tenant {
+  id   Int    @id @default(autoincrement())
+  /// URL-safe identifier used to disambiguate login when one email address
+  /// exists at more than one hospital. Safe to expose: it is a lookup key, and
+  /// authentication still requires the right password for that (tenant, email).
+  slug String @unique
+  name String
+
+  /// Set instead of deleting. An offboarded hospital's rows must survive for
+  /// the retention period; a deactivated tenant simply cannot authenticate.
+  isActive  Boolean  @default(true)
+
+  // ── the clinic day ──────────────────────────────────────────────────────
+  //
+  // These are behaviour, not preferences. Together they generate the booking
+  // grid: which slots exist, how long each is, and what "today" means. A
+  // hospital with the wrong timezone here gets a clinic day that ends before
+  // its staff arrive — the appointment page silently offers only past slots.
+  //
+  // Defaults match what these were as hard-coded constants, so an existing
+  // tenant keeps behaving exactly as it did.
+
+  /// IANA zone, e.g. "America/Chicago". The hospital's wall clock, and what
+  /// day boundaries and clinic hours are measured against.
+  timezone String @default("UTC")
+
+  /// Minutes per appointment slot. A GP practice may run 10, a walk-in clinic
+  /// 5, a surgical outpatient department 30.
+  slotMinutes Int @default(30)
+
+  /// ISO 4217 code — GBP, USD, INR. Display only: amounts are stored as
+  /// Decimal(10,2) and carried as strings, and no conversion happens anywhere.
+  /// A hospital that changes this is relabelling its existing figures, not
+  /// converting them, which is why the settings screen says so.
+  currency String @default("GBP")
+
+  /// Clinic opening hours in the hospital's own zone, 0–23. End is exclusive:
+  /// 9–17 means the last slot begins before 17:00.
+  clinicStartHour Int @default(9)
+  clinicEndHour   Int @default(17)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users                      User[]
+  doctors                    Doctor[]
+  departments                Department[]
+  patients                   Patient[]
+  wards                      Ward[]
+  beds                       Bed[]
+  medicines                  Medicine[]
+  stockBatches               StockBatch[]
+  invoices                   Invoice[]
+  appointments               Appointment[]
+  prescriptions              Prescription[]
+  admissions                 Admission[]
+  medicalRecords             MedicalRecord[]
+  auditLogs                  AuditLog[]
+  allergies                  Allergy[]
+  prescriptionItems          PrescriptionItem[]
+  vitals                     Vital[]
+  medicationAdministrations  MedicationAdministration[]
+  dispenseEvents             DispenseEvent[]
+  dispenseLines              DispenseLine[]
+  payments                   Payment[]
+  invoiceItems               InvoiceItem[]
+  roleAssignments            UserRoleAssignment[]
+  breakGlassGrants           BreakGlassGrant[]
+
+  @@map("tenants")
+}
+
+// ───────────────────────────── platform ─────────────────────────────
+
+/// A member of the vendor's own staff. NOT a hospital user.
+///
+/// WHY A SEPARATE MODEL AND NOT A ROLE
+/// -----------------------------------
+/// The obvious shortcut is adding SUPER_ADMIN to `UserRole`. It is a trap: a
+/// hospital's `User` row carries `tenantId`, so a platform account would have
+/// to belong to one hospital while acting on others, and every existing
+/// `@Roles(ADMIN)` decision point would silently widen the moment a set
+/// comparison saw a new value.
+///
+/// So platform staff are a different kind of principal entirely. They have no
+/// tenant, hold no `UserRole`, and cannot reach a single clinical endpoint —
+/// `RolesGuard` compares against `UserRole` and a platform token carries none.
+model PlatformUser {
+  id           Int      @id @default(autoincrement())
+  email        String   @unique
+  passwordHash String
+  fullName     String
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  grants        BreakGlassGrant[] @relation("GrantHolder")
+  grantsCreated BreakGlassGrant[] @relation("GrantCreator")
+
+  @@map("platform_users")
+}
+
+/// Time-boxed permission for one platform user to look at one hospital.
+///
+/// Standing access for a vendor over other people's patient records is the
+/// thing to avoid; this is the alternative. A grant names a hospital, a reason
+/// and an expiry, and it stops working when the expiry passes — nobody has to
+/// remember to close it.
+///
+/// Every grant, and every request made under one, is written to *that
+/// hospital's* audit log. A hospital must be able to answer "who from the
+/// vendor looked at our data, when, and why" without asking the vendor.
+model BreakGlassGrant {
+  id       Int    @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+
+  holder         PlatformUser @relation("GrantHolder", fields: [platformUserId], references: [id])
+  platformUserId Int
+
+  /// Free text, required. A grant with no stated reason is not auditable, and
+  /// "why was the vendor in our records" is the question this exists to answer.
+  reason String
+
+  /// Ticket or incident reference, when there is one.
+  ticketRef String?
+
+  /// Short by default. A grant that outlives the incident is standing access
+  /// with extra steps.
+  expiresAt DateTime
+  revokedAt DateTime?
+
+  createdAt          DateTime @default(now())
+  createdBy          PlatformUser @relation("GrantCreator", fields: [createdById], references: [id])
+  createdById        Int
+
+  @@index([tenantId])
+  @@index([platformUserId, expiresAt])
+  @@map("break_glass_grants")
+}
+
+// ───────────────────────────── identity ─────────────────────────────
+
+model User {
+  id           Int      @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  email        String
+  passwordHash String
+  fullName     String
+
+  /// The role this person lands in after signing in.
+  ///
+  /// Kept alongside UserRoleAssignment rather than replaced by it. Every
+  /// existing query, report and test reads `role`, and a migration that
+  /// removed it would touch far more than it needed to; this stays the
+  /// *default*, and the assignments say what else the person may switch to.
+  /// The default is always one of the assigned roles — assertRolesConsistent
+  /// pins that.
+  role         UserRole
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Login lockout — see AuthService.login
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
+  lastLoginAt         DateTime?
+
+  /// Set when an admin creates the account or resets the password. The login
+  /// response signals it and the client cannot proceed until it is cleared —
+  /// an admin-chosen password is known to at least two people, which is one
+  /// too many for a credential that reads patient records.
+  mustChangePassword  Boolean   @default(false)
+
+  /// Every role this person may act as. See UserRoleAssignment.
+  roleAssignments      UserRoleAssignment[]
+
+  doctorProfile        Doctor?
+  auditLogs            AuditLog[]
+  refreshTokens        RefreshToken[]
+  devices              Device[]
+  dispensedPrescriptions Prescription[] @relation("DispensedBy")
+  recordedVitals       Vital[]         @relation("VitalsRecordedBy")
+  administeredDoses    MedicationAdministration[] @relation("DosesGivenBy")
+  dispenseEvents       DispenseEvent[] @relation("DispensedEvents")
+  paymentsReceived     Payment[]       @relation("PaymentsReceived")
+
+  @@index([tenantId])
+  @@unique([tenantId, email])
+  @@map("users")
+}
+
+/// A role this person is permitted to act as.
+///
+/// WHY A TABLE AND NOT AN ARRAY ON USER
+/// ------------------------------------
+/// In a small hospital the owner is often also the treating doctor, and
+/// sometimes covers reception. Two accounts for one human is the alternative,
+/// and it breaks the audit trail: "what did Dr Smith do today" cannot be
+/// answered without someone knowing that two logins are the same person.
+///
+/// ONE ROLE IS ACTIVE AT A TIME — the union is deliberately NOT granted.
+///
+/// `CLAUDE.md` puts ADMIN outside clinical access entirely, and
+/// `access-matrix.spec.ts` found four violations of that the day it was
+/// written. A user holding ADMIN *and* DOCTOR simultaneously would make the
+/// admin surface a clinical one and quietly retire minimum-necessary. So the
+/// session carries one active role, `RolesGuard` keeps comparing against a
+/// single value, and switching is an explicit, audited act.
+///
+/// The audit consequence is the point: `AuditLog.actorRole` records the role
+/// in use, so the trail reads "Dr Smith, acting as ADMIN, viewed the
+/// dashboard" — which is the sentence a compliance review needs.
+model UserRoleAssignment {
+  id     Int      @id @default(autoincrement())
+  tenant Tenant   @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  user   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId Int
+  role   UserRole
+
+  /// Who granted it and when. Granting oneself ADMIN is the interesting row.
+  grantedAt DateTime @default(now())
+  grantedById Int?
+
+  /// One row per role per user — assigning DOCTOR twice is a no-op, not a
+  /// second grant.
+  @@unique([userId, role])
+  @@index([tenantId])
+  @@index([userId])
+  @@map("user_role_assignments")
+}
+
+/// A phone registered for push notifications.
+///
+/// One row per device, not per user — a doctor with a phone and a tablet
+/// should be alerted on both. Tokens are removed on logout and whenever Expo
+/// reports them as no longer valid, because a token left registered after a
+/// device is wiped keeps receiving alerts intended for a clinician.
+model Device {
+  id         Int      @id @default(autoincrement())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId     Int
+  pushToken  String   @unique
+  platform   String?
+  lastSeenAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@map("devices")
+}
+
+/// Rotating refresh tokens. Stored as a SHA-256 hash, never in plaintext.
+/// `familyId` groups a rotation chain — presenting an already-used token is a
+/// replay, and revokes the whole family.
+model RefreshToken {
+  id        Int       @id @default(autoincrement())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int
+  tokenHash String    @unique
+  familyId  String
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([familyId])
+  @@map("refresh_tokens")
+}
+
+model Doctor {
+  id             Int         @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  user           User        @relation(fields: [userId], references: [id])
+  userId         Int         @unique
+  fullName       String
+  specialization String
+  departmentId   Int?
+  department     Department? @relation(fields: [departmentId], references: [id])
+  phone          String?
+  registrationNo String?
+  createdAt      DateTime    @default(now())
+
+  appointments   Appointment[]
+  prescriptions  Prescription[]
+  medicalRecords MedicalRecord[]
+
+  @@index([departmentId])
+  @@index([tenantId])
+  @@map("doctors")
+}
+
+model Department {
+  id      Int      @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  name    String
+  doctors Doctor[]
+
+  @@index([tenantId])
+  @@unique([tenantId, name])
+  @@map("departments")
+}
+
+// ───────────────────────────── clinical ─────────────────────────────
+
+model Patient {
+  id                    Int      @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  fullName              String
+  dob                   DateTime
+  gender                Gender
+  phone                 String?
+  email                 String?
+  address               String?
+  bloodGroup            String?
+  emergencyContactName  String?
+  emergencyContactPhone String?
+
+  /// Billing-relevant, not clinical. Surfaced to BILLING_STAFF and reception;
+  /// deliberately absent from a doctor's response, which has no use for it.
+  insurerName           String?
+  insurancePolicyNumber String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  appointments   Appointment[]
+  prescriptions  Prescription[]
+  medicalRecords MedicalRecord[]
+  invoices       Invoice[]
+  allergies      Allergy[]
+  admissions     Admission[]
+  vitals         Vital[]
+
+  // Powers ⌘K search. Tenant-prefixed because every query under RLS is
+  // `tenant_id = X AND full_name …` — a bare index on the name alone no
+  // longer matches the query shape, and the leftmost prefix still serves
+  // plain tenant lookups, so no separate @@index([tenantId]) is needed.
+  @@index([tenantId, fullName])
+  @@index([tenantId, phone])
+  @@map("patients")
+}
+
+/// Surfaced on every patient view in the UI and cross-checked when prescribing.
+model Allergy {
+  id        Int             @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  patient   Patient         @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  patientId Int
+  substance String
+  severity  AllergySeverity
+  notes     String?
+  createdAt DateTime        @default(now())
+
+  @@index([patientId])
+  @@index([tenantId])
+  @@map("allergies")
+}
+
+model MedicalRecord {
+  id          Int      @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  patient     Patient  @relation(fields: [patientId], references: [id])
+  patientId   Int
+  doctor      Doctor?  @relation(fields: [doctorId], references: [id])
+  doctorId    Int?
+  visitDate   DateTime @default(now())
+  diagnosis   String
+  notes       String?
+  attachments String?
+  createdAt   DateTime @default(now())
+
+  @@index([patientId, visitDate])
+  @@index([doctorId])
+  @@index([tenantId])
+  @@map("medical_records")
+}
+
+model Appointment {
+  id          Int               @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  patient     Patient           @relation(fields: [patientId], references: [id])
+  patientId   Int
+  doctor      Doctor            @relation(fields: [doctorId], references: [id])
+  doctorId    Int
+  scheduledAt DateTime
+  status      AppointmentStatus @default(SCHEDULED)
+  reason      String?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  prescription Prescription?
+
+  // A doctor cannot be double-booked for the same slot. Enforced in the
+  // database as well as the service — a race between two receptionists
+  // clicking "book" at the same moment would slip past an application check.
+  @@unique([doctorId, scheduledAt], name: "doctor_slot_unique")
+  @@index([doctorId, scheduledAt])
+  @@index([patientId, scheduledAt])
+  @@index([status, scheduledAt])
+  @@index([tenantId])
+  @@map("appointments")
+}
+
+model Prescription {
+  id            Int                @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  patient       Patient            @relation(fields: [patientId], references: [id])
+  patientId     Int
+  doctor        Doctor             @relation(fields: [doctorId], references: [id])
+  doctorId      Int
+  appointment   Appointment?       @relation(fields: [appointmentId], references: [id])
+  appointmentId Int?               @unique
+  issuedAt      DateTime           @default(now())
+  notes         String?
+
+  // Gives the "cannot be edited once dispensed" rule something to check.
+  status        PrescriptionStatus @default(ISSUED)
+  dispensedAt   DateTime?
+  dispensedBy   User?              @relation("DispensedBy", fields: [dispensedById], references: [id])
+  dispensedById Int?
+
+  items          PrescriptionItem[]
+  dispenseEvents DispenseEvent[]
+
+  @@index([patientId, issuedAt])
+  @@index([doctorId, issuedAt])
+  @@index([status])
+  @@index([tenantId])
+  @@map("prescriptions")
+}
+
+model PrescriptionItem {
+  id             Int          @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  prescription   Prescription @relation(fields: [prescriptionId], references: [id], onDelete: Cascade)
+  prescriptionId Int
+
+  /// What the prescriber actually wrote, kept verbatim and forever.
+  ///
+  /// PLAN.md said this would *become* a FK to `Medicine`. It doesn't, and the
+  /// difference matters: a prescription is a contemporaneous clinical record.
+  /// If the catalogue entry is later renamed or corrected, this row must still
+  /// say what was prescribed on the day. Replacing the text with a join would
+  /// let a catalogue edit silently rewrite history.
+  ///
+  /// So the text stays as the record, and `medicineId` is added alongside it as
+  /// the catalogue link. That also makes the migration safe — a nullable FK
+  /// backfilled by name, with unmatched rows surfacing for a human rather than
+  /// failing the migration.
+  medicineName   String
+  medicine       Medicine?    @relation(fields: [medicineId], references: [id])
+  medicineId     Int?
+
+  dosage         String
+  frequency      String
+  duration       String
+
+  /// Running total across dispense events. `PrescriptionStatus` moves to
+  /// PARTIALLY_DISPENSED or DISPENSED off the back of this.
+  quantityDispensed Int @default(0)
+
+  administrations MedicationAdministration[]
+  dispenseLines   DispenseLine[]
+
+  @@index([prescriptionId])
+  @@index([medicineId])
+  @@index([tenantId])
+  @@map("prescription_items")
+}
+
+// ───────────────────────────── inpatient ─────────────────────────────
+
+model Ward {
+  id    Int    @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  name  String
+  floor String?
+  beds  Bed[]
+
+  @@index([tenantId])
+  @@unique([tenantId, name])
+  @@map("wards")
+}
+
+model Bed {
+  id       Int     @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  ward     Ward    @relation(fields: [wardId], references: [id])
+  wardId   Int
+  label    String
+  /// Taken out of service (maintenance, deep clean) without deleting history.
+  isActive Boolean @default(true)
+
+  admissions Admission[]
+
+  @@unique([wardId, label])
+  @@index([wardId])
+  @@index([tenantId])
+  @@map("beds")
+}
+
+/// A patient occupying a bed.
+///
+/// TWO INVARIANTS, BOTH ENFORCED BY THE DATABASE
+/// ---------------------------------------------
+/// A bed holds at most one patient, and a patient occupies at most one bed.
+/// Both are exactly the kind of rule an application-level check loses to a
+/// race — two nurses admitting from different terminals in the same second.
+///
+/// Postgres treats NULLs as distinct in a unique index, so `@@unique([bedId,
+/// dischargedAt])` would happily allow ten live admissions in one bed. The
+/// clean fix is a partial unique index (`WHERE discharged_at IS NULL`), which
+/// Prisma cannot express in schema.prisma.
+///
+/// So the "currently occupying" fact is carried in its own nullable column:
+/// set on admit, nulled on discharge. A plain unique index on a nullable
+/// column gives exactly the guarantee we want — one non-null row per bed —
+/// using only what Prisma supports.
+model Admission {
+  id        Int             @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  patient   Patient         @relation(fields: [patientId], references: [id])
+  patientId Int
+  bed       Bed             @relation(fields: [bedId], references: [id])
+  bedId     Int
+
+  status      AdmissionStatus @default(ADMITTED)
+  admittedAt  DateTime        @default(now())
+  dischargedAt DateTime?
+  reason      String?
+  notes       String?
+
+  /// Mirrors `bedId` while admitted, NULL once discharged. Unique → one
+  /// live admission per bed. Never set this by hand; AdmissionsService owns it.
+  currentBedId     Int? @unique
+  /// Mirrors `patientId` while admitted, NULL once discharged. Unique → a
+  /// patient cannot be in two beds at once.
+  currentPatientId Int? @unique
+
+  vitals Vital[]
+  doses  MedicationAdministration[]
+
+  @@index([patientId, admittedAt])
+  @@index([bedId])
+  @@index([status])
+  @@index([tenantId])
+  @@map("admissions")
+}
+
+/// A set of observations recorded at the bedside.
+///
+/// Every field is optional because observation sets genuinely are partial —
+/// a nurse doing a quick pulse check should not have to invent a temperature.
+/// The service rejects a set where everything is empty.
+model Vital {
+  id          Int        @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  patient     Patient    @relation(fields: [patientId], references: [id])
+  patientId   Int
+  admission   Admission? @relation(fields: [admissionId], references: [id])
+  admissionId Int?
+
+  recordedBy   User     @relation("VitalsRecordedBy", fields: [recordedById], references: [id])
+  recordedById Int
+  recordedAt   DateTime @default(now())
+
+  systolic        Int?
+  diastolic       Int?
+  pulse           Int?
+  temperatureC    Decimal? @db.Decimal(4, 1)
+  respiratoryRate Int?
+  spo2            Int?
+  painScore       Int?
+  notes           String?
+
+  /// Idempotency key generated on the device before the write is attempted.
+  /// Vitals are entered offline at the bedside and replayed when signal
+  /// returns; without this, a retry after a timeout that actually succeeded
+  /// would duplicate the observation. Unique, so the replay is a no-op.
+  clientRef String? @unique
+
+  createdAt DateTime @default(now())
+
+  @@index([patientId, recordedAt])
+  @@index([admissionId, recordedAt])
+  @@index([tenantId])
+  @@map("vitals")
+}
+
+/// One scheduled dose of one prescribed medicine.
+///
+/// Rows are created when a prescription is scheduled against an admission —
+/// the drug chart, in paper terms. A dose that was never given still exists
+/// as a row with MISSED or REFUSED, because "nothing was recorded" and "the
+/// patient refused it" are very different facts at a handover.
+model MedicationAdministration {
+  id                 Int              @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  prescriptionItem   PrescriptionItem @relation(fields: [prescriptionItemId], references: [id])
+  prescriptionItemId Int
+  admission          Admission        @relation(fields: [admissionId], references: [id])
+  admissionId        Int
+  patientId          Int
+
+  dueAt   DateTime
+  status  DoseStatus @default(DUE)
+  givenAt DateTime?
+  givenBy   User?    @relation("DosesGivenBy", fields: [givenById], references: [id])
+  givenById Int?
+  notes     String?
+
+  /// Same reasoning as Vital.clientRef — medication rounds happen in corridors.
+  clientRef String? @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// A given prescription item cannot be scheduled twice for the same moment.
+  @@unique([prescriptionItemId, dueAt])
+  @@index([admissionId, dueAt])
+  @@index([status, dueAt])
+  @@index([patientId, dueAt])
+  @@index([tenantId])
+  @@map("medication_administrations")
+}
+
+// ───────────────────────────── pharmacy ─────────────────────────────
+
+/// Broad drug families, used to catch allergy conflicts a name match misses.
+///
+/// This is the whole reason the catalogue exists. In Phase 1 the allergy check
+/// compared strings: it caught "Penicillin V" against a penicillin allergy and
+/// sailed straight past "Amoxicillin", which is a penicillin and shares no
+/// substring with the word. Class is what makes the check mean something.
+///
+/// Deliberately coarse. A real deployment would use a maintained terminology
+/// (dm+d, RxNorm) with proper ingredient and cross-sensitivity data; inventing
+/// a fine-grained taxonomy here would look authoritative and be wrong.
+enum DrugClass {
+  PENICILLIN
+  CEPHALOSPORIN
+  SULFONAMIDE
+  MACROLIDE
+  TETRACYCLINE
+  QUINOLONE
+  NSAID
+  OPIOID
+  STATIN
+  ACE_INHIBITOR
+  BETA_BLOCKER
+  CALCIUM_CHANNEL_BLOCKER
+  DIURETIC
+  ANTICOAGULANT
+  ANTIDIABETIC
+  CORTICOSTEROID
+  ANTIHISTAMINE
+  BRONCHODILATOR
+  OTHER
+}
+
+model Medicine {
+  id       Int        @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  name     String
+  /// Tablet, capsule, syrup, injection…
+  form     String
+  /// "5 mg", "500 mg/5 ml" — the catalogue strength, not the prescribed dose.
+  strength String
+  drugClass DrugClass @default(OTHER)
+
+  /// Controlled drugs need a stricter paper trail. Flagged so the UI can say
+  /// so; the extra register is not built yet.
+  isControlled Boolean @default(false)
+
+  /// Total units below which the medicine appears on the low-stock report.
+  reorderLevel Int     @default(20)
+  isActive     Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  batches           StockBatch[]
+  prescriptionItems PrescriptionItem[]
+  dispenseLines     DispenseLine[]
+
+  @@index([drugClass])
+  @@index([tenantId])
+  @@unique([tenantId, name])
+  @@map("medicines")
+}
+
+/// Stock is held per batch, not as one number per medicine.
+///
+/// Batches expire, and they expire at different times. A single
+/// `quantityOnHand` column cannot answer "is any of this still in date", which
+/// is the question that actually matters when handing medicine to a patient.
+model StockBatch {
+  id          Int      @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  medicine    Medicine @relation(fields: [medicineId], references: [id])
+  medicineId  Int
+  batchNumber String
+  expiresAt   DateTime
+  quantity    Int
+  receivedAt  DateTime @default(now())
+
+  lines DispenseLine[]
+
+  @@unique([medicineId, batchNumber])
+  @@index([medicineId, expiresAt])
+  @@index([expiresAt])
+  @@index([tenantId])
+  @@map("stock_batches")
+}
+
+/// One act of dispensing: a pharmacist handing over medicine against a
+/// prescription. Separate from `Prescription` because a prescription can be
+/// dispensed in parts, and each part is its own event with its own timestamp
+/// and its own signature.
+model DispenseEvent {
+  id             Int      @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  prescription   Prescription @relation(fields: [prescriptionId], references: [id])
+  prescriptionId Int
+  pharmacist     User     @relation("DispensedEvents", fields: [pharmacistId], references: [id])
+  pharmacistId   Int
+  dispensedAt    DateTime @default(now())
+  notes          String?
+
+  lines DispenseLine[]
+
+  @@index([prescriptionId])
+  @@index([dispensedAt])
+  @@index([tenantId])
+  @@map("dispense_events")
+}
+
+model DispenseLine {
+  id                 Int              @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  event              DispenseEvent    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  eventId            Int
+  prescriptionItem   PrescriptionItem @relation(fields: [prescriptionItemId], references: [id])
+  prescriptionItemId Int
+  medicine           Medicine         @relation(fields: [medicineId], references: [id])
+  medicineId         Int
+  batch              StockBatch       @relation(fields: [batchId], references: [id])
+  batchId            Int
+  quantity           Int
+
+  @@index([eventId])
+  @@index([prescriptionItemId])
+  @@index([tenantId])
+  @@map("dispense_lines")
+}
+
+// ───────────────────────────── billing ─────────────────────────────
+
+model Invoice {
+  id          Int           @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  patient     Patient       @relation(fields: [patientId], references: [id])
+  patientId   Int
+  totalAmount Decimal       @db.Decimal(10, 2)
+
+  /// Running total across payments. Denormalised on purpose: the outstanding
+  /// balance is read on every list, aging report and payment screen, and
+  /// re-summing the payment rows each time would make the most-used query the
+  /// slowest. Maintained inside the same transaction as the payment insert, so
+  /// it cannot drift.
+  amountPaid  Decimal       @default(0) @db.Decimal(10, 2)
+
+  status      InvoiceStatus @default(PENDING)
+  issuedAt    DateTime      @default(now())
+  dueDate     DateTime?
+  notes       String?
+
+  /// Invoices are voided, never deleted — a missing invoice number is
+  /// indistinguishable from a cover-up, and the audit trail points at a row
+  /// that has to still exist.
+  voidedAt    DateTime?
+  voidReason  String?
+
+  items    InvoiceItem[]
+  payments Payment[]
+
+  @@index([patientId])
+  @@index([status, dueDate])
+  @@index([dueDate])
+  @@index([tenantId])
+  @@map("invoices")
+}
+
+/// One receipt of money against an invoice.
+///
+/// Append-only. A mistaken payment is corrected by recording a reversal, not by
+/// editing or deleting the original — the money moved, and the ledger has to
+/// say so even when it moved by mistake.
+model Payment {
+  id           Int           @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  invoice      Invoice       @relation(fields: [invoiceId], references: [id])
+  invoiceId    Int
+  amount       Decimal       @db.Decimal(10, 2)
+  method       PaymentMethod
+  /// Card auth code, cheque number, bank reference, insurance claim id.
+  reference    String?
+  receivedBy   User          @relation("PaymentsReceived", fields: [receivedById], references: [id])
+  receivedById Int
+  receivedAt   DateTime      @default(now())
+  notes        String?
+
+  @@index([invoiceId])
+  @@index([receivedAt])
+  @@index([tenantId])
+  @@map("payments")
+}
+
+model InvoiceItem {
+  id          Int     @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  invoice     Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  invoiceId   Int
+  description String
+  amount      Decimal @db.Decimal(10, 2)
+
+  @@index([invoiceId])
+  @@index([tenantId])
+  @@map("invoice_items")
+}
+
+// ───────────────────────────── audit ─────────────────────────────
+
+/// Append-only. Nothing in the application updates or deletes rows here;
+/// Phase 1 adds a Postgres RLS policy enforcing that at the database level.
+///
+/// `userId` is nullable on purpose: a failed login with an unknown email has
+/// no user to attribute, and those are exactly the rows worth keeping.
+model AuditLog {
+  id         Int          @id @default(autoincrement())
+
+  /// Nullable, unlike every other tenant-scoped table.
+  ///
+  /// A failed login with an unknown email has no hospital — there is no
+  /// authenticated user to attribute it to, and those are precisely the rows
+  /// worth keeping. Forcing a tenant here would mean either inventing one or
+  /// dropping the record.
+  ///
+  /// Consequence: the RLS policy on audit_logs differs from the others. Reads
+  /// are still restricted to the caller's hospital, so a NULL-tenant row is
+  /// invisible to every tenant and readable only by platform tooling.
+  tenant   Tenant? @relation(fields: [tenantId], references: [id])
+  tenantId Int?
+  user       User?        @relation(fields: [userId], references: [id])
+  userId     Int?
+  actorEmail String?
+  actorRole  UserRole?
+
+  action     String
+  method     String?
+  path       String?
+  targetType String?
+  targetId   Int?
+
+  outcome    AuditOutcome
+  statusCode Int?
+  ipAddress  String?
+  userAgent  String?
+  requestId  String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([targetType, targetId])
+  @@index([createdAt])
+  @@index([outcome, createdAt])
+  @@index([tenantId])
+  @@map("audit_logs")
+}

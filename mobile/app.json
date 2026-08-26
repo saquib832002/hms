@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "Meridian HMS",
+    "slug": "hms-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "meridianhms",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "test.demo.meridianhms",
+      "infoPlist": {
+        "NSFaceIDUsageDescription": "Unlock Meridian HMS to view patient information."
+      }
+    },
+    "android": {
+      "package": "test.demo.meridianhms",
+      "permissions": ["USE_BIOMETRIC", "USE_FINGERPRINT"]
+    },
+    "plugins": ["expo-router", "expo-secure-store", "expo-local-authentication"],
+    "extra": {
+      "apiOrigin": "http://192.168.1.10:3000"
+    }
+  }
+}

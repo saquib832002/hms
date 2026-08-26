@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+!.env.example
+
+# Spilled audit entries — rows the database would not accept, waiting for
+# `npm run audit:replay`. Access metadata, so never committed. If this
+# directory is non-empty on a real deployment, the trail is incomplete.
+var/

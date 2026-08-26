@@ -1,0 +1,17 @@
+version: '3.8'
+services:
+  postgres:
+    image: postgres:16
+    container_name: hms_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: hms_admin
+      POSTGRES_PASSWORD: localdevpassword
+      POSTGRES_DB: hms_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - hms_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  hms_postgres_data:

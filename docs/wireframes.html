@@ -1,0 +1,943 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HMS — Wireframes</title>
+<style>
+:root{
+  --bg:#f7f8fa; --surface:#fff; --border:#e3e6ea; --border-strong:#cfd4da;
+  --text:#14181d; --text-muted:#5b6672; --text-subtle:#8a939e;
+  --primary:#1e6fd9; --primary-hover:#1a5fb8; --primary-soft:#e8f1fd;
+  --success:#1a7f47; --success-soft:#e6f4ec;
+  --warning:#b06f00; --warning-soft:#fdf3e2;
+  --danger:#c0392b;  --danger-soft:#fdecea;
+  --radius:6px; --radius-sm:4px;
+  --font:'Inter',system-ui,-apple-system,Segoe UI,sans-serif;
+  --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font);background:#eceef1;color:var(--text);font-size:13px;line-height:1.45}
+
+/* ---------- chrome ---------- */
+.wrap{display:flex;min-height:100vh}
+.chrome{width:250px;flex-shrink:0;background:#1b2027;color:#c9d1d9;padding:18px 0;position:sticky;top:0;height:100vh;overflow-y:auto}
+.chrome h1{font-size:14px;color:#fff;padding:0 18px 4px;letter-spacing:-.2px}
+.chrome .sub{font-size:11px;color:#7d8794;padding:0 18px 16px}
+.chrome .grouplbl{font-size:10px;text-transform:uppercase;letter-spacing:.7px;color:#6e7681;padding:14px 18px 6px}
+.chrome button{display:block;width:100%;text-align:left;background:none;border:0;color:#c9d1d9;font:inherit;font-size:12px;padding:7px 18px;cursor:pointer;border-left:2px solid transparent}
+.chrome button:hover{background:#242b33;color:#fff}
+.chrome button.on{background:#242b33;color:#fff;border-left-color:var(--primary)}
+.chrome .phase{font-size:9px;color:#6e7681;border:1px solid #333b44;border-radius:3px;padding:0 4px;margin-left:6px;vertical-align:1px}
+
+.stage{flex:1;padding:26px 30px;overflow-x:auto}
+.stage-head{margin-bottom:16px;max-width:1180px}
+.stage-head h2{font-size:19px;letter-spacing:-.3px}
+.stage-head p{color:var(--text-muted);font-size:12.5px;margin-top:5px;max-width:760px}
+.note{background:#fffbe9;border:1px solid #ecdca6;border-left:3px solid var(--warning);
+      border-radius:var(--radius-sm);padding:9px 12px;font-size:12px;color:#6b5314;margin-top:12px;max-width:760px}
+
+/* ---------- shared ---------- */
+.chip{display:inline-flex;align-items:center;gap:4px;font-size:10.5px;font-weight:600;
+      padding:2px 7px;border-radius:20px;white-space:nowrap;letter-spacing:.2px}
+.chip.sched{background:var(--primary-soft);color:var(--primary)}
+.chip.in{background:var(--warning-soft);color:var(--warning)}
+.chip.now{background:var(--danger-soft);color:var(--danger)}
+.chip.done{background:var(--success-soft);color:var(--success)}
+.chip.grey{background:#eef0f2;color:var(--text-muted)}
+.btn{font:inherit;font-size:12px;font-weight:500;padding:6px 12px;border-radius:var(--radius-sm);
+     border:1px solid var(--border-strong);background:var(--surface);color:var(--text);cursor:pointer}
+.btn:hover{background:#f2f4f6}
+.btn.pri{background:var(--primary);border-color:var(--primary);color:#fff}
+.btn.pri:hover{background:var(--primary-hover)}
+.btn.sm{padding:3px 9px;font-size:11px}
+.mono{font-family:var(--mono);font-size:11.5px}
+.allergy{background:var(--danger-soft);border:1px solid #f2c4be;border-left:3px solid var(--danger);
+         border-radius:var(--radius-sm);padding:7px 10px;font-size:12px;color:#8a2a1f;font-weight:600;
+         display:flex;align-items:center;gap:7px}
+
+/* ---------- web frame ---------- */
+.web{background:var(--bg);border:1px solid var(--border-strong);border-radius:8px;overflow:hidden;
+     max-width:1180px;box-shadow:0 1px 3px rgba(0,0,0,.07)}
+.envbar{background:#4a2f6b;color:#e9dcf7;font-size:10.5px;text-align:center;padding:3px;letter-spacing:.4px}
+.app{display:flex;height:565px}
+.side{width:186px;flex-shrink:0;background:#fff;border-right:1px solid var(--border);padding:12px 0;display:flex;flex-direction:column}
+.brand{font-size:12.5px;font-weight:700;padding:0 14px 12px;letter-spacing:-.2px}
+.brand span{color:var(--primary)}
+.nav{font-size:12px;padding:6px 14px;color:var(--text-muted);cursor:default;display:flex;align-items:center;gap:8px;border-left:2px solid transparent}
+.nav.on{background:var(--primary-soft);color:var(--primary);font-weight:600;border-left-color:var(--primary)}
+.nav .ic{width:13px;text-align:center;opacity:.75}
+.sideft{margin-top:auto;padding:10px 14px 0;border-top:1px solid var(--border);font-size:11px;color:var(--text-subtle)}
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.top{height:46px;background:#fff;border-bottom:1px solid var(--border);display:flex;align-items:center;
+     padding:0 14px;gap:12px;flex-shrink:0}
+.top .ttl{font-size:13.5px;font-weight:600}
+.search{margin-left:auto;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);
+        padding:4px 9px;font-size:11.5px;color:var(--text-subtle);min-width:190px;display:flex;justify-content:space-between}
+.search kbd{font-family:var(--mono);font-size:10px;background:#fff;border:1px solid var(--border);border-radius:3px;padding:0 4px}
+.avatar{width:25px;height:25px;border-radius:50%;background:var(--primary);color:#fff;font-size:10.5px;
+        font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.stats{display:flex;gap:22px;padding:9px 16px;background:#fff;border-bottom:1px solid var(--border);flex-shrink:0}
+.stat b{font-size:16px;font-weight:700;letter-spacing:-.3px}
+.stat i{font-style:normal;font-size:10.5px;color:var(--text-muted);display:block;text-transform:uppercase;letter-spacing:.4px}
+.panes{flex:1;display:flex;min-height:0}
+.lpane{width:290px;flex-shrink:0;border-right:1px solid var(--border);background:#fff;overflow-y:auto}
+.dpane{flex:1;background:var(--bg);overflow-y:auto;padding:14px 16px;min-width:0}
+.full{flex:1;background:#fff;overflow-y:auto}
+
+.row{padding:8px 12px;border-bottom:1px solid #f0f2f4;display:flex;align-items:center;gap:9px;cursor:pointer;font-size:12px}
+.row:hover{background:#fafbfc}
+.row.on{background:var(--primary-soft);box-shadow:inset 2px 0 0 var(--primary)}
+.row .t{font-family:var(--mono);font-size:11px;color:var(--text-muted);width:38px;flex-shrink:0}
+.row .n{flex:1;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--danger);flex-shrink:0}
+
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-subtle);
+   font-weight:600;padding:8px 12px;border-bottom:1px solid var(--border);background:#fff;position:sticky;top:0}
+td{padding:8px 12px;border-bottom:1px solid #f0f2f4}
+tbody tr:hover{background:#fafbfc}
+
+.card{background:#fff;border:1px solid var(--border);border-radius:var(--radius);padding:13px;margin-bottom:11px}
+.pname{font-size:16px;font-weight:700;letter-spacing:-.3px}
+.pmeta{font-size:11.5px;color:var(--text-muted);margin-top:1px;font-family:var(--mono)}
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--border);margin:12px 0 11px}
+.tab{font-size:12px;padding:6px 11px;color:var(--text-muted);border-bottom:2px solid transparent;cursor:pointer}
+.tab.on{color:var(--primary);border-bottom-color:var(--primary);font-weight:600}
+.kv{display:grid;grid-template-columns:104px 1fr;gap:6px 10px;font-size:12px}
+.kv dt{color:var(--text-subtle);font-size:11.5px}
+.acts{display:flex;gap:8px;margin-top:13px}
+
+.sheet{position:absolute;top:0;right:0;bottom:0;width:400px;background:#fff;border-left:1px solid var(--border-strong);
+       box-shadow:-6px 0 20px rgba(0,0,0,.09);display:flex;flex-direction:column}
+.sheet h3{font-size:14px;padding:13px 15px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+.sheet .body{flex:1;overflow-y:auto;padding:13px 15px}
+.sheet .foot{padding:11px 15px;border-top:1px solid var(--border);background:var(--bg);display:flex;gap:8px;align-items:center}
+.fld{margin-bottom:11px}
+.fld label{display:block;font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:3px}
+.inp{border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:6px 9px;font-size:12px;
+     background:#fff;color:var(--text-subtle);min-height:29px}
+.grp{font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;color:var(--text-subtle);
+     font-weight:600;margin:15px 0 8px;padding-bottom:4px;border-bottom:1px solid var(--border)}
+.rx{border:1px solid var(--border);border-radius:var(--radius-sm);padding:9px;margin-bottom:8px;background:#fcfcfd}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.warnbox{background:var(--warning-soft);border:1px solid #ecdca6;border-radius:var(--radius-sm);
+         padding:8px 10px;font-size:11.5px;color:#6b5314;margin-bottom:11px}
+
+/* ---------- mobile ---------- */
+.phones{display:flex;gap:26px;flex-wrap:wrap}
+.phone{width:266px;flex-shrink:0}
+.phone .lbl{font-size:11.5px;color:var(--text-muted);margin-bottom:7px;font-weight:600;text-align:center}
+.screen{background:#fff;border:9px solid #22272e;border-radius:26px;height:522px;display:flex;flex-direction:column;overflow:hidden}
+.sbar{background:#fff;font-size:9.5px;padding:5px 13px 2px;display:flex;justify-content:space-between;color:var(--text);font-weight:600}
+.mhead{padding:8px 13px 9px;border-bottom:1px solid var(--border)}
+.mhead h4{font-size:15px;letter-spacing:-.3px}
+.mhead .d{font-size:10.5px;color:var(--text-muted)}
+.mbody{flex:1;overflow-y:auto;background:var(--bg);padding:9px}
+.mcard{background:#fff;border:1px solid var(--border);border-radius:var(--radius);padding:9px 10px;margin-bottom:7px}
+.mstats{display:flex;gap:6px;margin-bottom:9px}
+.mstat{flex:1;background:#fff;border:1px solid var(--border);border-radius:var(--radius);padding:6px;text-align:center}
+.mstat b{display:block;font-size:15px;font-weight:700}
+.mstat i{font-style:normal;font-size:9px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.3px}
+.tabbar{display:flex;border-top:1px solid var(--border);background:#fff;padding:5px 0 8px}
+.tb{flex:1;text-align:center;font-size:9.5px;color:var(--text-subtle)}
+.tb.on{color:var(--primary);font-weight:600}
+.tb .ic{display:block;font-size:14px;margin-bottom:1px}
+.pad{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:9px}
+.pad div{background:#fff;border:1px solid var(--border-strong);border-radius:var(--radius);
+         padding:11px 0;text-align:center;font-size:16px;font-weight:600}
+.vin{background:#fff;border:2px solid var(--primary);border-radius:var(--radius);padding:11px;text-align:center;margin-bottom:9px}
+.vin b{font-size:27px;font-weight:700;letter-spacing:-1px}
+.vin i{font-style:normal;display:block;font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px}
+.offline{background:#3d4148;color:#e6e9ec;font-size:10px;padding:4px 12px;text-align:center}
+.mbtn{background:var(--primary);color:#fff;text-align:center;padding:11px;border-radius:var(--radius);
+      font-size:13px;font-weight:600;margin:9px}
+.sect{font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--text-subtle);font-weight:700;margin:11px 0 6px}
+.hidden{display:none}
+@media(max-width:900px){.chrome{display:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav class="chrome">
+  <h1>HMS Wireframes</h1>
+  <div class="sub">Low-fidelity · layout &amp; hierarchy only</div>
+
+  <div class="grouplbl">Web · Doctor</div>
+  <button class="on" data-s="d-queue">Today's Queue</button>
+  <button data-s="d-rx">Write Prescription</button>
+
+  <div class="grouplbl">Web · Receptionist</div>
+  <button data-s="r-checkin">Check-in Queue</button>
+  <button data-s="r-reg">Patient Registration</button>
+  <button data-s="r-patients">Patients <span class="phase">scoped</span></button>
+
+  <div class="grouplbl">Web · Later phases</div>
+  <button data-s="n-ward">Nurse · Ward Board <span class="phase">P3</span></button>
+  <button data-s="b-inv">Billing · Invoices <span class="phase">P5</span></button>
+  <button data-s="a-audit">Admin · Audit Log <span class="phase">P6</span></button>
+
+  <div class="grouplbl">Mobile</div>
+  <button data-s="m-doctor">Doctor <span class="phase">P2</span></button>
+  <button data-s="m-nurse">Nurse <span class="phase">P3</span></button>
+</nav>
+
+<main class="stage">
+
+<!-- ============ DOCTOR QUEUE ============ -->
+<section id="d-queue">
+<div class="stage-head">
+  <h2>Doctor · Today's Queue</h2>
+  <p>Landing screen for the highest-value role. Two-pane: queue left, patient detail right. Selecting a row updates the detail pane and the URL — no page reload, no lost context.</p>
+</div>
+<div class="web">
+<div class="envbar">DEVELOPMENT — DUMMY DATA ONLY · NOT REAL PATIENT INFORMATION</div>
+<div class="app">
+  <aside class="side">
+    <div class="brand">Meridian<span>HMS</span></div>
+    <div class="nav on"><span class="ic">▤</span> Today's Queue</div>
+    <div class="nav"><span class="ic">▦</span> Appointments</div>
+    <div class="nav"><span class="ic">◍</span> Patients</div>
+    <div class="nav"><span class="ic">℞</span> Prescriptions</div>
+    <div class="nav"><span class="ic">▤</span> Medical Records</div>
+    <div class="sideft">Dr. Meera Rao<br><span style="color:var(--text-subtle)">Cardiology</span></div>
+  </aside>
+  <div class="main">
+    <div class="top">
+      <div class="ttl">Today's Queue</div>
+      <span style="font-size:11.5px;color:var(--text-muted)">Wed 12 Aug 2026</span>
+      <div class="search"><span>Search patients…</span><kbd>⌘K</kbd></div>
+      <div class="avatar">MR</div>
+    </div>
+    <div class="stats">
+      <div class="stat"><b>12</b><i>Scheduled</i></div>
+      <div class="stat"><b style="color:var(--warning)">3</b><i>Waiting</i></div>
+      <div class="stat"><b style="color:var(--danger)">1</b><i>In progress</i></div>
+      <div class="stat"><b style="color:var(--success)">8</b><i>Completed</i></div>
+    </div>
+    <div class="panes">
+      <div class="lpane">
+        <div class="row"><span class="t">09:00</span><span class="n">Anwar Khan</span><span class="chip done">DONE</span></div>
+        <div class="row"><span class="t">09:30</span><span class="n">Mohan Rao</span><span class="chip done">DONE</span></div>
+        <div class="row on"><span class="t">10:00</span><span class="n">Sara Patel</span><span class="dot"></span><span class="chip now">IN PROGRESS</span></div>
+        <div class="row"><span class="t">10:30</span><span class="n">Joana Silva</span><span class="chip in">CHECKED IN</span></div>
+        <div class="row"><span class="t">11:00</span><span class="n">Ravi Nair</span><span class="chip in">CHECKED IN</span></div>
+        <div class="row"><span class="t">11:30</span><span class="n">Elena Duarte</span><span class="chip in">CHECKED IN</span></div>
+        <div class="row"><span class="t">12:00</span><span class="n">Tomas Berg</span><span class="chip sched">SCHEDULED</span></div>
+        <div class="row"><span class="t">14:00</span><span class="n">Priya Sharma</span><span class="chip sched">SCHEDULED</span></div>
+        <div class="row"><span class="t">14:30</span><span class="n">Ibrahim Musa</span><span class="chip sched">SCHEDULED</span></div>
+        <div class="row"><span class="t">15:00</span><span class="n">Chen Wei</span><span class="chip sched">SCHEDULED</span></div>
+      </div>
+      <div class="dpane">
+        <div class="card">
+          <div class="pname">Sara Patel</div>
+          <div class="pmeta">34y · Female · O+ · #10248</div>
+          <div style="margin-top:10px" class="allergy">⚠ ALLERGY — Penicillin (severe), Sulfa drugs (moderate)</div>
+          <div class="tabs">
+            <div class="tab on">Overview</div><div class="tab">Records</div>
+            <div class="tab">Prescriptions</div><div class="tab">Appointments</div>
+          </div>
+          <dl class="kv">
+            <dt>Reason</dt><dd>Follow-up — hypertension</dd>
+            <dt>Last seen</dt><dd>12 Jun 2026 · Dr. M. Rao</dd>
+            <dt>Active Rx</dt><dd class="mono">Amlodipine 5mg · once daily</dd>
+            <dt>Last vitals</dt><dd class="mono">138/86 · 78 bpm · 36.8°C</dd>
+            <dt>Emergency</dt><dd>Rahul Patel · +44 7700 900142</dd>
+          </dl>
+          <div class="acts">
+            <button class="btn pri">Start Consult</button>
+            <button class="btn">Write Prescription</button>
+            <button class="btn">Add Record</button>
+          </div>
+        </div>
+        <div class="card">
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--text-subtle);font-weight:600;margin-bottom:9px">Recent visits</div>
+          <div style="font-size:12px;border-left:2px solid var(--border);padding-left:11px">
+            <div style="margin-bottom:9px"><b>12 Jun 2026</b> — Hypertension review<br>
+              <span style="color:var(--text-muted)">BP stable on current dose. Continue.</span></div>
+            <div style="margin-bottom:9px"><b>03 Mar 2026</b> — Initial diagnosis<br>
+              <span style="color:var(--text-muted)">Stage 1 hypertension. Amlodipine started.</span></div>
+            <div><b>28 Jan 2026</b> — General consultation<br>
+              <span style="color:var(--text-muted)">Routine check. BP elevated, monitoring advised.</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+<div class="note"><b>Allergy banner is structural, not decorative.</b> It sits directly under the patient name on every patient view in the system — never collapsed, never behind a tab. The red dot in the queue row flags it before the doctor even clicks.</div>
+</section>
+
+<!-- ============ WRITE RX ============ -->
+<section id="d-rx" class="hidden">
+<div class="stage-head">
+  <h2>Doctor · Write Prescription</h2>
+  <p>A side sheet, not a dialog — clinical forms need the room, and the patient header stays pinned so the doctor never prescribes against the wrong record.</p>
+</div>
+<div class="web">
+<div class="envbar">DEVELOPMENT — DUMMY DATA ONLY · NOT REAL PATIENT INFORMATION</div>
+<div class="app" style="position:relative">
+  <aside class="side">
+    <div class="brand">Meridian<span>HMS</span></div>
+    <div class="nav on"><span class="ic">▤</span> Today's Queue</div>
+    <div class="nav"><span class="ic">▦</span> Appointments</div>
+    <div class="nav"><span class="ic">◍</span> Patients</div>
+    <div class="nav"><span class="ic">℞</span> Prescriptions</div>
+    <div class="nav"><span class="ic">▤</span> Medical Records</div>
+  </aside>
+  <div class="main">
+    <div class="top"><div class="ttl">Today's Queue</div>
+      <div class="search"><span>Search patients…</span><kbd>⌘K</kbd></div><div class="avatar">MR</div></div>
+    <div class="panes">
+      <div class="lpane" style="opacity:.45">
+        <div class="row"><span class="t">09:00</span><span class="n">Anwar Khan</span><span class="chip done">DONE</span></div>
+        <div class="row on"><span class="t">10:00</span><span class="n">Sara Patel</span><span class="chip now">IN PROGRESS</span></div>
+        <div class="row"><span class="t">10:30</span><span class="n">Joana Silva</span><span class="chip in">CHECKED IN</span></div>
+      </div>
+      <div class="dpane" style="opacity:.45"><div class="card"><div class="pname">Sara Patel</div>
+        <div class="pmeta">34y · Female · O+ · #10248</div></div></div>
+    </div>
+  </div>
+  <div class="sheet">
+    <h3>New Prescription <span style="font-size:17px;color:var(--text-subtle);cursor:pointer">×</span></h3>
+    <div class="body">
+      <div class="card" style="padding:10px;margin-bottom:12px">
+        <div style="font-weight:700;font-size:13.5px">Sara Patel</div>
+        <div class="pmeta">34y · Female · O+ · #10248</div>
+      </div>
+      <div class="allergy" style="margin-bottom:12px">⚠ ALLERGY — Penicillin (severe), Sulfa drugs (moderate)</div>
+
+      <div class="grp">Medicines</div>
+      <div class="rx">
+        <div class="fld"><label>Medicine</label><div class="inp">Amlodipine</div></div>
+        <div class="g2">
+          <div class="fld"><label>Dosage</label><div class="inp">5 mg</div></div>
+          <div class="fld"><label>Frequency</label><div class="inp">Once daily</div></div>
+        </div>
+        <div class="fld" style="margin-bottom:0"><label>Duration</label><div class="inp">30 days</div></div>
+      </div>
+      <div class="rx">
+        <div class="fld"><label>Medicine</label><div class="inp" style="color:var(--danger);border-color:#e8a49c">Amoxicillin</div></div>
+        <div class="warnbox" style="margin:0 0 9px"><b>⚠ Allergy conflict.</b> Patient has a severe recorded allergy to Penicillin. Amoxicillin is a penicillin-class antibiotic.</div>
+        <div class="g2">
+          <div class="fld"><label>Dosage</label><div class="inp">500 mg</div></div>
+          <div class="fld"><label>Frequency</label><div class="inp">Three times daily</div></div>
+        </div>
+        <div class="fld" style="margin-bottom:0"><label>Duration</label><div class="inp">7 days</div></div>
+      </div>
+      <button class="btn sm" style="width:100%">+ Add medicine</button>
+
+      <div class="grp">Notes</div>
+      <div class="inp" style="min-height:52px;color:var(--text-subtle)">Optional instructions for the patient…</div>
+    </div>
+    <div class="foot">
+      <button class="btn pri">Issue Prescription</button>
+      <button class="btn">Cancel</button>
+      <span style="font-size:10.5px;color:var(--text-muted);line-height:1.3">Cannot be edited<br>once dispensed</span>
+    </div>
+  </div>
+</div>
+</div>
+<div class="note"><b>Two safety mechanisms visible here.</b> The allergy cross-check fires inline as the drug is entered — a warning in Phase 1, a hard block in Phase 4 once the <code>Medicine</code> catalogue makes class matching reliable. And the footer states the consequence of the action rather than saying "Submit".</div>
+</section>
+
+<!-- ============ CHECK-IN ============ -->
+<section id="r-checkin" class="hidden">
+<div class="stage-head">
+  <h2>Receptionist · Check-in Queue</h2>
+  <p>Full-width table, no detail pane — this is a scan-and-act screen, not a reading screen. One click per row, no confirmation dialogs for routine status changes.</p>
+</div>
+<div class="web">
+<div class="envbar">DEVELOPMENT — DUMMY DATA ONLY · NOT REAL PATIENT INFORMATION</div>
+<div class="app">
+  <aside class="side">
+    <div class="brand">Meridian<span>HMS</span></div>
+    <div class="nav on"><span class="ic">▤</span> Check-in Queue</div>
+    <div class="nav"><span class="ic">▦</span> Appointments</div>
+    <div class="nav"><span class="ic">+</span> Register Patient</div>
+    <div class="nav"><span class="ic">◍</span> Patients</div>
+    <div class="nav"><span class="ic">✚</span> Doctors</div>
+    <div class="sideft">Aisha Bello<br><span style="color:var(--text-subtle)">Reception</span></div>
+  </aside>
+  <div class="main">
+    <div class="top"><div class="ttl">Check-in Queue</div>
+      <span style="font-size:11.5px;color:var(--text-muted)">Wed 12 Aug 2026</span>
+      <div class="search"><span>Search patients…</span><kbd>⌘K</kbd></div><div class="avatar">AB</div></div>
+    <div class="stats">
+      <div class="stat"><b>38</b><i>Today</i></div>
+      <div class="stat"><b style="color:var(--warning)">6</b><i>Awaiting arrival</i></div>
+      <div class="stat"><b style="color:var(--success)">29</b><i>Checked in</i></div>
+      <div class="stat"><b style="color:var(--danger)">3</b><i>No-show</i></div>
+    </div>
+    <div class="full">
+      <table>
+        <thead><tr><th style="width:70px">Time</th><th>Patient</th><th style="width:74px">ID</th>
+          <th>Doctor</th><th>Reason</th><th style="width:112px">Status</th><th style="width:150px">Actions</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">09:00</td><td><b>Anwar Khan</b></td><td class="mono">#10241</td><td>Dr. M. Rao</td><td>Follow-up</td><td><span class="chip done">COMPLETED</span></td><td><span style="color:var(--text-subtle)">—</span></td></tr>
+          <tr><td class="mono">10:00</td><td><b>Sara Patel</b></td><td class="mono">#10248</td><td>Dr. M. Rao</td><td>Hypertension</td><td><span class="chip now">IN PROGRESS</span></td><td><span style="color:var(--text-subtle)">—</span></td></tr>
+          <tr><td class="mono">10:30</td><td><b>Joana Silva</b></td><td class="mono">#10193</td><td>Dr. M. Rao</td><td>Chest pain</td><td><span class="chip in">CHECKED IN</span></td><td><span style="color:var(--text-subtle)">—</span></td></tr>
+          <tr style="background:#fcfdff"><td class="mono">11:00</td><td><b>Ravi Nair</b></td><td class="mono">#10302</td><td>Dr. M. Rao</td><td>Routine</td><td><span class="chip sched">SCHEDULED</span></td>
+            <td><button class="btn pri sm">Check in</button> <button class="btn sm">No-show</button></td></tr>
+          <tr><td class="mono">11:00</td><td><b>Elena Duarte</b></td><td class="mono">#10277</td><td>Dr. S. Iqbal</td><td>Post-op review</td><td><span class="chip sched">SCHEDULED</span></td>
+            <td><button class="btn pri sm">Check in</button> <button class="btn sm">No-show</button></td></tr>
+          <tr><td class="mono">11:30</td><td><b>Tomas Berg</b></td><td class="mono">#10118</td><td>Dr. S. Iqbal</td><td>Consultation</td><td><span class="chip sched">SCHEDULED</span></td>
+            <td><button class="btn pri sm">Check in</button> <button class="btn sm">No-show</button></td></tr>
+          <tr><td class="mono">12:00</td><td><b>Priya Sharma</b></td><td class="mono">#10265</td><td>Dr. A. Osei</td><td>Diabetes review</td><td><span class="chip sched">SCHEDULED</span></td>
+            <td><button class="btn pri sm">Check in</button> <button class="btn sm">No-show</button></td></tr>
+          <tr><td class="mono">14:00</td><td><b>Ibrahim Musa</b></td><td class="mono">#10331</td><td>Dr. A. Osei</td><td>Follow-up</td><td><span class="chip sched">SCHEDULED</span></td>
+            <td><button class="btn pri sm">Check in</button> <button class="btn sm">No-show</button></td></tr>
+          <tr><td class="mono">14:30</td><td><b>Chen Wei</b></td><td class="mono">#10209</td><td>Dr. M. Rao</td><td>Cardiology referral</td><td><span class="chip sched">SCHEDULED</span></td>
+            <td><button class="btn pri sm">Check in</button> <button class="btn sm">No-show</button></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+</div>
+<div class="note"><b>No clinical column anywhere.</b> "Reason" is the free-text booking reason the receptionist typed — not a diagnosis. Diagnoses, notes, and prescriptions are absent from this role's API response entirely, not hidden by CSS.</div>
+</section>
+
+<!-- ============ REGISTRATION ============ -->
+<section id="r-reg" class="hidden">
+<div class="stage-head">
+  <h2>Receptionist · Patient Registration</h2>
+  <p>Side sheet, single column, grouped fields. The duplicate check is the important part of this screen.</p>
+</div>
+<div class="web">
+<div class="envbar">DEVELOPMENT — DUMMY DATA ONLY · NOT REAL PATIENT INFORMATION</div>
+<div class="app" style="position:relative">
+  <aside class="side">
+    <div class="brand">Meridian<span>HMS</span></div>
+    <div class="nav"><span class="ic">▤</span> Check-in Queue</div>
+    <div class="nav"><span class="ic">▦</span> Appointments</div>
+    <div class="nav on"><span class="ic">+</span> Register Patient</div>
+    <div class="nav"><span class="ic">◍</span> Patients</div>
+    <div class="nav"><span class="ic">✚</span> Doctors</div>
+  </aside>
+  <div class="main">
+    <div class="top"><div class="ttl">Patients</div>
+      <div class="search"><span>Search patients…</span><kbd>⌘K</kbd></div><div class="avatar">AB</div></div>
+    <div class="full" style="opacity:.4">
+      <table><thead><tr><th>Patient</th><th>ID</th><th>DOB</th><th>Phone</th></tr></thead>
+      <tbody><tr><td>Anwar Khan</td><td class="mono">#10241</td><td class="mono">14 Mar 1979</td><td class="mono">+44 7700 900101</td></tr>
+      <tr><td>Sara Patel</td><td class="mono">#10248</td><td class="mono">02 Nov 1991</td><td class="mono">+44 7700 900142</td></tr></tbody></table>
+    </div>
+  </div>
+  <div class="sheet">
+    <h3>Register New Patient <span style="font-size:17px;color:var(--text-subtle);cursor:pointer">×</span></h3>
+    <div class="body">
+      <div class="grp">Identity</div>
+      <div class="fld"><label>Full name *</label><div class="inp" style="color:var(--text)">Anwar Khan</div></div>
+      <div class="warnbox"><b>3 possible matches.</b> A patient with this name already exists — check before creating a duplicate.
+        <div style="margin-top:7px;background:#fff;border:1px solid #e5d9b4;border-radius:4px;padding:6px 8px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+            <span><b>Anwar Khan</b> <span class="mono" style="color:var(--text-muted)">#10241 · 14 Mar 1979 · +44 7700 900101</span></span>
+            <button class="btn sm">Use</button></div>
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <span><b>Anwar Khan</b> <span class="mono" style="color:var(--text-muted)">#10904 · 22 Jul 1988 · +44 7700 900555</span></span>
+            <button class="btn sm">Use</button></div>
+        </div>
+      </div>
+      <div class="g2">
+        <div class="fld"><label>Date of birth *</label><div class="inp">dd / mm / yyyy</div></div>
+        <div class="fld"><label>Gender *</label><div class="inp">Select…</div></div>
+      </div>
+      <div class="grp">Contact</div>
+      <div class="fld"><label>Phone *</label><div class="inp">+44 …</div></div>
+      <div class="fld"><label>Email</label><div class="inp">optional</div></div>
+      <div class="fld"><label>Address</label><div class="inp" style="min-height:46px">Street, city, postcode</div></div>
+      <div class="grp">Emergency contact</div>
+      <div class="g2">
+        <div class="fld"><label>Name</label><div class="inp">&nbsp;</div></div>
+        <div class="fld"><label>Phone</label><div class="inp">&nbsp;</div></div>
+      </div>
+      <div class="grp">Clinical basics</div>
+      <div class="fld"><label>Blood group</label><div class="inp">Select…</div></div>
+    </div>
+    <div class="foot"><button class="btn pri">Register Patient</button><button class="btn">Cancel</button></div>
+  </div>
+</div>
+</div>
+<div class="note"><b>Duplicate detection earns its place here.</b> Split records are one of the most damaging data problems in hospital systems — clinical history quietly divides across two IDs and neither tells the whole story. Catching it at the moment of creation is far cheaper than merging later.</div>
+</section>
+
+<!-- ============ PATIENTS SCOPED ============ -->
+<section id="r-patients" class="hidden">
+<div class="stage-head">
+  <h2>Receptionist · Patients</h2>
+  <p>The same route a doctor uses, returning a different body. This is the sharpest minimum-necessary boundary in the system.</p>
+</div>
+<div class="web">
+<div class="envbar">DEVELOPMENT — DUMMY DATA ONLY · NOT REAL PATIENT INFORMATION</div>
+<div class="app">
+  <aside class="side">
+    <div class="brand">Meridian<span>HMS</span></div>
+    <div class="nav"><span class="ic">▤</span> Check-in Queue</div>
+    <div class="nav"><span class="ic">▦</span> Appointments</div>
+    <div class="nav"><span class="ic">+</span> Register Patient</div>
+    <div class="nav on"><span class="ic">◍</span> Patients</div>
+    <div class="nav"><span class="ic">✚</span> Doctors</div>
+  </aside>
+  <div class="main">
+    <div class="top"><div class="ttl">Patients</div>
+      <div class="search"><span>Search patients…</span><kbd>⌘K</kbd></div><div class="avatar">AB</div></div>
+    <div class="panes">
+      <div class="lpane">
+        <div class="row on"><span class="n">Sara Patel</span><span class="mono" style="color:var(--text-subtle)">#10248</span></div>
+        <div class="row"><span class="n">Anwar Khan</span><span class="mono" style="color:var(--text-subtle)">#10241</span></div>
+        <div class="row"><span class="n">Joana Silva</span><span class="mono" style="color:var(--text-subtle)">#10193</span></div>
+        <div class="row"><span class="n">Ravi Nair</span><span class="mono" style="color:var(--text-subtle)">#10302</span></div>
+        <div class="row"><span class="n">Elena Duarte</span><span class="mono" style="color:var(--text-subtle)">#10277</span></div>
+        <div class="row"><span class="n">Tomas Berg</span><span class="mono" style="color:var(--text-subtle)">#10118</span></div>
+      </div>
+      <div class="dpane">
+        <div class="card">
+          <div class="pname">Sara Patel</div>
+          <div class="pmeta">34y · Female · #10248</div>
+          <div class="tabs"><div class="tab on">Details</div><div class="tab">Appointments</div></div>
+          <dl class="kv">
+            <dt>Date of birth</dt><dd class="mono">02 Nov 1991</dd>
+            <dt>Gender</dt><dd>Female</dd>
+            <dt>Phone</dt><dd class="mono">+44 7700 900142</dd>
+            <dt>Email</dt><dd class="mono">s.patel@example.com</dd>
+            <dt>Address</dt><dd>18 Elmfield Road, Bristol, BS6 6AN</dd>
+            <dt>Emergency</dt><dd>Rahul Patel · +44 7700 900143</dd>
+            <dt>Registered</dt><dd class="mono">28 Jan 2026</dd>
+          </dl>
+          <div class="acts"><button class="btn">Edit details</button><button class="btn pri">Book appointment</button></div>
+        </div>
+        <div class="card" style="background:#fafbfc;border-style:dashed">
+          <div style="font-size:11.5px;color:var(--text-muted);line-height:1.55">
+            <b style="color:var(--text)">Note for implementers —</b> compare this to the doctor's view of the same patient.
+            No allergies, no blood group, no diagnoses, no prescriptions, no medical records.
+            Those fields are absent from the <span class="mono">GET /patients/:id</span> response for this role.
+            The UI isn't hiding them; the API never sent them.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+<div class="note"><b>Build this screen before the doctor's.</b> It's the cheapest possible test that role-shaped responses actually work. A leak found here costs nothing; the same leak found after the clinical UI is layered on top costs a refactor.</div>
+</section>
+
+<!-- ============ NURSE WARD ============ -->
+<section id="n-ward" class="hidden">
+<div class="stage-head">
+  <h2>Nurse · Ward Board <span style="font-size:12px;color:var(--text-muted);font-weight:400">— Phase 3</span></h2>
+  <p>Blocked on new models: <span class="mono">Ward</span>, <span class="mono">Bed</span>, <span class="mono">Admission</span>, <span class="mono">Vital</span>, <span class="mono">MedicationAdministration</span>. Nothing in the current schema tracks admission or occupancy.</p>
+</div>
+<div class="web">
+<div class="envbar">DEVELOPMENT — DUMMY DATA ONLY · NOT REAL PATIENT INFORMATION</div>
+<div class="app">
+  <aside class="side">
+    <div class="brand">Meridian<span>HMS</span></div>
+    <div class="nav on"><span class="ic">▥</span> Ward Board</div>
+    <div class="nav"><span class="ic">♥</span> Vitals</div>
+    <div class="nav"><span class="ic">℞</span> Medications</div>
+    <div class="nav"><span class="ic">▦</span> Appointments</div>
+    <div class="nav"><span class="ic">◍</span> Patients</div>
+    <div class="sideft">Nurse J. Adeyemi<br><span style="color:var(--text-subtle)">Ward B</span></div>
+  </aside>
+  <div class="main">
+    <div class="top"><div class="ttl">Ward B — Bed Status</div>
+      <div class="search"><span>Search patients…</span><kbd>⌘K</kbd></div><div class="avatar">JA</div></div>
+    <div class="stats">
+      <div class="stat"><b>24</b><i>Beds</i></div>
+      <div class="stat"><b style="color:var(--warning)">19</b><i>Occupied</i></div>
+      <div class="stat"><b style="color:var(--success)">5</b><i>Available</i></div>
+      <div class="stat"><b style="color:var(--danger)">4</b><i>Vitals overdue</i></div>
+    </div>
+    <div class="full">
+      <table>
+        <thead><tr><th style="width:60px">Bed</th><th>Patient</th><th style="width:70px">Age</th>
+          <th>Admitted</th><th>Last vitals</th><th>Next med</th><th style="width:110px">Status</th></tr></thead>
+        <tbody>
+          <tr><td class="mono"><b>B-01</b></td><td><b>Ravi Nair</b> <span class="dot" style="display:inline-block"></span></td><td class="mono">62</td>
+            <td class="mono">10 Aug</td><td class="mono">08:15 — 142/88</td><td class="mono">12:00 Metformin</td><td><span class="chip done">STABLE</span></td></tr>
+          <tr><td class="mono"><b>B-02</b></td><td><b>Elena Duarte</b></td><td class="mono">45</td>
+            <td class="mono">11 Aug</td><td class="mono" style="color:var(--danger)">04:30 — overdue</td><td class="mono">11:30 Paracetamol</td><td><span class="chip now">NEEDS OBS</span></td></tr>
+          <tr><td class="mono"><b>B-03</b></td><td><b>Tomas Berg</b></td><td class="mono">58</td>
+            <td class="mono">09 Aug</td><td class="mono">09:45 — 128/74</td><td class="mono">14:00 Enalapril</td><td><span class="chip done">STABLE</span></td></tr>
+          <tr><td class="mono"><b>B-04</b></td><td colspan="5" style="color:var(--text-subtle)">Available</td><td><span class="chip grey">EMPTY</span></td></tr>
+          <tr><td class="mono"><b>B-05</b></td><td><b>Priya Sharma</b></td><td class="mono">37</td>
+            <td class="mono">12 Aug</td><td class="mono">09:00 — 118/76</td><td class="mono" style="color:var(--warning)">11:15 Insulin</td><td><span class="chip in">MONITORING</span></td></tr>
+          <tr><td class="mono"><b>B-06</b></td><td><b>Ibrahim Musa</b> <span class="dot" style="display:inline-block"></span></td><td class="mono">71</td>
+            <td class="mono">07 Aug</td><td class="mono" style="color:var(--danger)">05:00 — overdue</td><td class="mono">12:00 Warfarin</td><td><span class="chip now">NEEDS OBS</span></td></tr>
+          <tr><td class="mono"><b>B-07</b></td><td colspan="5" style="color:var(--text-subtle)">Available</td><td><span class="chip grey">EMPTY</span></td></tr>
+          <tr><td class="mono"><b>B-08</b></td><td><b>Chen Wei</b></td><td class="mono">29</td>
+            <td class="mono">11 Aug</td><td class="mono">10:00 — 122/80</td><td class="mono">16:00 Ibuprofen</td><td><span class="chip done">STABLE</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+</div>
+</section>
+
+<!-- ============ BILLING ============ -->
+<section id="b-inv" class="hidden">
+<div class="stage-head">
+  <h2>Billing · Invoices <span style="font-size:12px;color:var(--text-muted);font-weight:400">— Phase 5</span></h2>
+  <p>Needs a <span class="mono">Payment</span> model. <span class="mono">InvoiceStatus.PARTIALLY_PAID</span> exists in the schema today with nothing recording the partial amount.</p>
+</div>
+<div class="web">
+<div class="envbar">DEVELOPMENT — DUMMY DATA ONLY · NOT REAL PATIENT INFORMATION</div>
+<div class="app">
+  <aside class="side">
+    <div class="brand">Meridian<span>HMS</span></div>
+    <div class="nav on"><span class="ic">▤</span> Invoices</div>
+    <div class="nav"><span class="ic">＄</span> Payments</div>
+    <div class="nav"><span class="ic">▨</span> Outstanding</div>
+    <div class="nav"><span class="ic">◍</span> Patients</div>
+    <div class="sideft">D. Okonkwo<br><span style="color:var(--text-subtle)">Billing</span></div>
+  </aside>
+  <div class="main">
+    <div class="top"><div class="ttl">Invoices</div>
+      <div class="search"><span>Search…</span><kbd>⌘K</kbd></div><div class="avatar">DO</div></div>
+    <div class="stats">
+      <div class="stat"><b class="mono">£48,210</b><i>Outstanding</i></div>
+      <div class="stat"><b class="mono" style="color:var(--danger)">£9,140</b><i>Overdue</i></div>
+      <div class="stat"><b>62</b><i>Pending</i></div>
+      <div class="stat"><b style="color:var(--success)">318</b><i>Paid this month</i></div>
+    </div>
+    <div class="full">
+      <table>
+        <thead><tr><th style="width:84px">Invoice</th><th>Patient</th><th>Issued</th><th>Due</th>
+          <th style="width:92px">Amount</th><th style="width:92px">Paid</th><th style="width:120px">Status</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">INV-2041</td><td>Anwar Khan</td><td class="mono">01 Aug</td><td class="mono">15 Aug</td>
+            <td class="mono">£1,250.00</td><td class="mono">£1,250.00</td><td><span class="chip done">PAID</span></td></tr>
+          <tr><td class="mono">INV-2042</td><td>Sara Patel</td><td class="mono">02 Aug</td><td class="mono">16 Aug</td>
+            <td class="mono">£380.00</td><td class="mono">£150.00</td><td><span class="chip in">PARTIALLY PAID</span></td></tr>
+          <tr><td class="mono">INV-2043</td><td>Joana Silva</td><td class="mono">05 Aug</td><td class="mono">19 Aug</td>
+            <td class="mono">£2,840.00</td><td class="mono">£0.00</td><td><span class="chip sched">PENDING</span></td></tr>
+          <tr><td class="mono">INV-2019</td><td>Ravi Nair</td><td class="mono">02 Jul</td><td class="mono">16 Jul</td>
+            <td class="mono">£670.00</td><td class="mono">£0.00</td><td><span class="chip now">OVERDUE</span></td></tr>
+          <tr><td class="mono">INV-2044</td><td>Elena Duarte</td><td class="mono">06 Aug</td><td class="mono">20 Aug</td>
+            <td class="mono">£145.00</td><td class="mono">£0.00</td><td><span class="chip sched">PENDING</span></td></tr>
+          <tr><td class="mono">INV-2021</td><td>Tomas Berg</td><td class="mono">04 Jul</td><td class="mono">18 Jul</td>
+            <td class="mono">£3,900.00</td><td class="mono">£1,000.00</td><td><span class="chip now">OVERDUE</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+</div>
+<div class="note"><b>Money is a string on the wire.</b> <span class="mono">"1250.00"</span>, never <span class="mono">1250.0</span>. Prisma <span class="mono">Decimal</span> serialised through a JS float loses pennies, and pennies in a billing system become reconciliation disputes. Also note: no clinical column here either.</div>
+</section>
+
+<!-- ============ AUDIT ============ -->
+<section id="a-audit" class="hidden">
+<div class="stage-head">
+  <h2>Admin · Audit Log <span style="font-size:12px;color:var(--text-muted);font-weight:400">— Phase 6</span></h2>
+  <p>The payoff for building the audit interceptor in Phase 0. Failures are logged alongside successes — a receptionist repeatedly hitting 403s on clinical endpoints is exactly what this exists to surface.</p>
+</div>
+<div class="web">
+<div class="envbar">DEVELOPMENT — DUMMY DATA ONLY · NOT REAL PATIENT INFORMATION</div>
+<div class="app">
+  <aside class="side">
+    <div class="brand">Meridian<span>HMS</span></div>
+    <div class="nav"><span class="ic">▨</span> Dashboard</div>
+    <div class="nav"><span class="ic">◍</span> Staff &amp; Users</div>
+    <div class="nav"><span class="ic">✚</span> Doctors</div>
+    <div class="nav"><span class="ic">▢</span> Departments</div>
+    <div class="nav"><span class="ic">▤</span> Reports</div>
+    <div class="nav on"><span class="ic">⌾</span> Audit Log</div>
+    <div class="nav"><span class="ic">⚙</span> Settings</div>
+    <div class="sideft">S. Whitfield<br><span style="color:var(--text-subtle)">Administrator</span></div>
+  </aside>
+  <div class="main">
+    <div class="top"><div class="ttl">Audit Log</div>
+      <div class="search"><span>Filter by user, action, patient…</span><kbd>⌘K</kbd></div><div class="avatar">SW</div></div>
+    <div class="full">
+      <table>
+        <thead><tr><th style="width:126px">Timestamp</th><th>User</th><th style="width:96px">Role</th>
+          <th>Action</th><th>Target</th><th style="width:106px">IP</th><th style="width:88px">Outcome</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">12 Aug 10:04:22</td><td>Dr. M. Rao</td><td><span class="chip grey">DOCTOR</span></td>
+            <td class="mono">POST /prescriptions</td><td class="mono">Patient #10248</td><td class="mono">10.0.4.18</td><td><span class="chip done">SUCCESS</span></td></tr>
+          <tr><td class="mono">12 Aug 10:03:51</td><td>Dr. M. Rao</td><td><span class="chip grey">DOCTOR</span></td>
+            <td class="mono">GET /patients/:id/records</td><td class="mono">Patient #10248</td><td class="mono">10.0.4.18</td><td><span class="chip done">SUCCESS</span></td></tr>
+          <tr style="background:var(--danger-soft)"><td class="mono">12 Aug 10:02:14</td><td>A. Bello</td><td><span class="chip grey">RECEPTIONIST</span></td>
+            <td class="mono">GET /patients/:id/records</td><td class="mono">Patient #10248</td><td class="mono">10.0.4.31</td><td><span class="chip now">403 DENIED</span></td></tr>
+          <tr style="background:var(--danger-soft)"><td class="mono">12 Aug 10:02:09</td><td>A. Bello</td><td><span class="chip grey">RECEPTIONIST</span></td>
+            <td class="mono">GET /patients/:id/records</td><td class="mono">Patient #10241</td><td class="mono">10.0.4.31</td><td><span class="chip now">403 DENIED</span></td></tr>
+          <tr><td class="mono">12 Aug 09:58:40</td><td>A. Bello</td><td><span class="chip grey">RECEPTIONIST</span></td>
+            <td class="mono">PATCH /appointments/:id/status</td><td class="mono">Appointment #4412</td><td class="mono">10.0.4.31</td><td><span class="chip done">SUCCESS</span></td></tr>
+          <tr><td class="mono">12 Aug 09:55:03</td><td>Nurse J. Adeyemi</td><td><span class="chip grey">NURSE</span></td>
+            <td class="mono">POST /vitals</td><td class="mono">Patient #10302</td><td class="mono">10.0.9.77</td><td><span class="chip done">SUCCESS</span></td></tr>
+          <tr><td class="mono">12 Aug 09:41:12</td><td>—</td><td><span class="chip grey">—</span></td>
+            <td class="mono">POST /auth/login</td><td class="mono">j.doe@example.com</td><td class="mono">203.0.113.9</td><td><span class="chip now">FAILED ×5</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+</div>
+<div class="note"><b>Two patterns are visible in this log</b> — a receptionist walking sequential patient IDs against a clinical endpoint, and five failed logins from an external IP. Neither is detectable if you only log successes, which is why the interceptor records failures too.</div>
+</section>
+
+<!-- ============ MOBILE DOCTOR ============ -->
+<section id="m-doctor" class="hidden">
+<div class="stage-head">
+  <h2>Mobile · Doctor <span style="font-size:12px;color:var(--text-muted);font-weight:400">— Phase 2</span></h2>
+  <p>Task parity, not feature parity. Three questions only: what's next, what do I need to know, what can I record standing up. Full history review stays on the web.</p>
+</div>
+<div class="phones">
+  <div class="phone"><div class="lbl">Queue — landing</div>
+    <div class="screen">
+      <div class="sbar"><span>09:41</span><span>▮▮▮ ⌁ ▰</span></div>
+      <div class="mhead"><h4>Today's Queue</h4><div class="d">Wed 12 Aug · Dr. M. Rao</div></div>
+      <div class="mbody">
+        <div class="mstats">
+          <div class="mstat"><b>12</b><i>Total</i></div>
+          <div class="mstat"><b style="color:var(--warning)">3</b><i>Waiting</i></div>
+          <div class="mstat"><b style="color:var(--success)">8</b><i>Done</i></div>
+        </div>
+        <div class="mcard" style="border-left:3px solid var(--danger)">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <b class="mono" style="font-size:12px">10:00</b><span class="chip now">IN PROGRESS</span></div>
+          <div style="font-weight:700;font-size:14px;margin-top:3px">Sara Patel <span class="dot" style="display:inline-block"></span></div>
+          <div style="font-size:11px;color:var(--text-muted)">34y · Female · Follow-up, HTN</div>
+        </div>
+        <div class="mcard">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <b class="mono" style="font-size:12px">10:30</b><span class="chip in">CHECKED IN</span></div>
+          <div style="font-weight:700;font-size:14px;margin-top:3px">Joana Silva</div>
+          <div style="font-size:11px;color:var(--text-muted)">51y · Female · Chest pain</div>
+        </div>
+        <div class="mcard">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <b class="mono" style="font-size:12px">11:00</b><span class="chip in">CHECKED IN</span></div>
+          <div style="font-weight:700;font-size:14px;margin-top:3px">Ravi Nair <span class="dot" style="display:inline-block"></span></div>
+          <div style="font-size:11px;color:var(--text-muted)">62y · Male · Routine</div>
+        </div>
+        <div class="mcard">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <b class="mono" style="font-size:12px">11:30</b><span class="chip sched">SCHEDULED</span></div>
+          <div style="font-weight:700;font-size:14px;margin-top:3px">Elena Duarte</div>
+          <div style="font-size:11px;color:var(--text-muted)">45y · Female · Post-op review</div>
+        </div>
+      </div>
+      <div class="tabbar">
+        <div class="tb on"><span class="ic">▤</span>Queue</div>
+        <div class="tb"><span class="ic">◍</span>Patients</div>
+        <div class="tb"><span class="ic">🔔</span>Alerts</div>
+        <div class="tb"><span class="ic">☰</span>Me</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="phone"><div class="lbl">Patient summary — read-only</div>
+    <div class="screen">
+      <div class="sbar"><span>09:42</span><span>▮▮▮ ⌁ ▰</span></div>
+      <div class="mhead"><div style="font-size:11px;color:var(--primary);margin-bottom:3px">‹ Queue</div>
+        <h4>Sara Patel</h4><div class="d">34y · Female · O+ · #10248</div></div>
+      <div class="mbody">
+        <div class="allergy" style="margin-bottom:9px;font-size:11px">⚠ ALLERGY<br>Penicillin (severe) · Sulfa (moderate)</div>
+        <div class="sect">Active medications</div>
+        <div class="mcard"><b style="font-size:12.5px">Amlodipine 5mg</b>
+          <div style="font-size:11px;color:var(--text-muted)">Once daily · started 03 Mar 2026</div></div>
+        <div class="sect">Last vitals · 08:15 today</div>
+        <div class="mcard"><div style="display:flex;justify-content:space-between;font-size:12px" class="mono">
+          <span><b>138/86</b><br><i style="font-style:normal;font-size:9.5px;color:var(--text-muted)">BP</i></span>
+          <span><b>78</b><br><i style="font-style:normal;font-size:9.5px;color:var(--text-muted)">PULSE</i></span>
+          <span><b>36.8</b><br><i style="font-style:normal;font-size:9.5px;color:var(--text-muted)">TEMP</i></span>
+          <span><b>98%</b><br><i style="font-style:normal;font-size:9.5px;color:var(--text-muted)">SpO2</i></span></div></div>
+        <div class="sect">Last visit</div>
+        <div class="mcard"><b style="font-size:12px">12 Jun 2026</b>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Hypertension review — BP stable on current dose, continue.</div></div>
+        <div style="font-size:10.5px;color:var(--text-subtle);text-align:center;padding:9px 4px">
+          Full history and records available on web</div>
+      </div>
+      <div style="padding:0 9px 4px"><div class="mbtn" style="margin:0 0 6px">Write Prescription</div>
+        <div class="mbtn" style="margin:0;background:#fff;color:var(--primary);border:1px solid var(--primary)">View Records</div></div>
+      <div class="tabbar">
+        <div class="tb on"><span class="ic">▤</span>Queue</div>
+        <div class="tb"><span class="ic">◍</span>Patients</div>
+        <div class="tb"><span class="ic">🔔</span>Alerts</div>
+        <div class="tb"><span class="ic">☰</span>Me</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="phone"><div class="lbl">Alerts — no PHI in notifications</div>
+    <div class="screen">
+      <div class="sbar"><span>09:43</span><span>▮▮▮ ⌁ ▰</span></div>
+      <div class="mhead"><h4>Alerts</h4><div class="d">3 unread</div></div>
+      <div class="mbody">
+        <div class="mcard" style="border-left:3px solid var(--danger)">
+          <div style="font-size:9.5px;color:var(--text-subtle);text-transform:uppercase;letter-spacing:.5px;font-weight:700">Critical result · 2 min ago</div>
+          <div style="font-size:12.5px;font-weight:600;margin-top:3px">A lab result needs your review</div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Tap to open in app</div></div>
+        <div class="mcard" style="border-left:3px solid var(--warning)">
+          <div style="font-size:9.5px;color:var(--text-subtle);text-transform:uppercase;letter-spacing:.5px;font-weight:700">Queue · 14 min ago</div>
+          <div style="font-size:12.5px;font-weight:600;margin-top:3px">Your 10:30 patient has checked in</div></div>
+        <div class="mcard">
+          <div style="font-size:9.5px;color:var(--text-subtle);text-transform:uppercase;letter-spacing:.5px;font-weight:700">Pharmacy · 1 hr ago</div>
+          <div style="font-size:12.5px;font-weight:600;margin-top:3px">A prescription query needs clarification</div></div>
+        <div style="background:#eef1f4;border:1px dashed var(--border-strong);border-radius:6px;padding:9px;
+                    font-size:10.5px;color:var(--text-muted);margin-top:11px;line-height:1.5">
+          <b style="color:var(--text)">Design rule —</b> notification text contains no patient name, condition, or result value.
+          A lock screen is visible to anyone holding the phone. Detail appears only after authentication.</div>
+      </div>
+      <div class="tabbar">
+        <div class="tb"><span class="ic">▤</span>Queue</div>
+        <div class="tb"><span class="ic">◍</span>Patients</div>
+        <div class="tb on"><span class="ic">🔔</span>Alerts</div>
+        <div class="tb"><span class="ic">☰</span>Me</div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ============ MOBILE NURSE ============ -->
+<section id="m-nurse" class="hidden">
+<div class="stage-head">
+  <h2>Mobile · Nurse <span style="font-size:12px;color:var(--text-muted);font-weight:400">— Phase 3</span></h2>
+  <p>The most mobile-critical role in the system. Vitals entry is the single most-used screen — large targets, one field at a time, and it must work with no signal.</p>
+</div>
+<div class="phones">
+  <div class="phone"><div class="lbl">Vitals entry — offline-tolerant</div>
+    <div class="screen">
+      <div class="sbar"><span>10:12</span><span>▮▮▮ ⌁ ▰</span></div>
+      <div class="offline">⚠ Offline — will sync when reconnected</div>
+      <div class="mhead"><div style="font-size:11px;color:var(--primary);margin-bottom:3px">‹ Ward B</div>
+        <h4>Ravi Nair</h4><div class="d">Bed B-01 · 62y · Male</div></div>
+      <div class="mbody">
+        <div class="vin"><i>Blood pressure</i><b>142 / 88</b>
+          <div style="font-size:10px;color:var(--danger);font-weight:600;margin-top:2px">↑ Above normal range</div></div>
+        <div class="pad">
+          <div>1</div><div>2</div><div>3</div><div>4</div><div>5</div><div>6</div>
+          <div>7</div><div>8</div><div>9</div><div>/</div><div>0</div><div>⌫</div>
+        </div>
+        <div style="display:flex;gap:6px;margin-top:9px;font-size:10.5px;text-align:center">
+          <div style="flex:1;background:#fff;border:1px solid var(--border);border-radius:6px;padding:6px">
+            <b class="mono" style="font-size:13px">78</b><br><span style="color:var(--text-muted)">PULSE</span></div>
+          <div style="flex:1;background:#fff;border:1px solid var(--border);border-radius:6px;padding:6px">
+            <b class="mono" style="font-size:13px">36.8</b><br><span style="color:var(--text-muted)">TEMP</span></div>
+          <div style="flex:1;background:#fff;border:1px solid var(--border);border-radius:6px;padding:6px">
+            <b class="mono" style="font-size:13px">—</b><br><span style="color:var(--text-muted)">SpO2</span></div>
+        </div>
+      </div>
+      <div style="padding:0 9px"><div class="mbtn" style="margin:0 0 9px">Save Vitals</div></div>
+      <div class="tabbar">
+        <div class="tb"><span class="ic">▥</span>Ward</div>
+        <div class="tb on"><span class="ic">♥</span>Vitals</div>
+        <div class="tb"><span class="ic">℞</span>Meds</div>
+        <div class="tb"><span class="ic">☰</span>Me</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="phone"><div class="lbl">Medications due — swipe to give</div>
+    <div class="screen">
+      <div class="sbar"><span>10:14</span><span>▮▮▮ ⌁ ▰</span></div>
+      <div class="mhead"><h4>Medications</h4><div class="d">Ward B · 12 due this shift</div></div>
+      <div class="mbody">
+        <div class="sect" style="color:var(--danger)">Overdue · 2</div>
+        <div class="mcard" style="border-left:3px solid var(--danger)">
+          <div style="display:flex;justify-content:space-between"><b style="font-size:12.5px">Elena Duarte</b>
+            <span class="mono" style="font-size:11px;color:var(--danger)">09:30</span></div>
+          <div style="font-size:11px;color:var(--text-muted)">Bed B-02 · Paracetamol 500mg · oral</div>
+          <div style="font-size:10px;color:var(--danger);font-weight:600;margin-top:3px">44 min overdue</div></div>
+        <div class="mcard" style="border-left:3px solid var(--danger)">
+          <div style="display:flex;justify-content:space-between"><b style="font-size:12.5px">Ibrahim Musa</b>
+            <span class="mono" style="font-size:11px;color:var(--danger)">09:45</span></div>
+          <div style="font-size:11px;color:var(--text-muted)">Bed B-06 · Warfarin 3mg · oral</div>
+          <div style="font-size:10px;color:var(--danger);font-weight:600;margin-top:3px">29 min overdue</div></div>
+
+        <div class="sect" style="color:var(--warning)">Due now · 1</div>
+        <div class="mcard" style="border-left:3px solid var(--warning)">
+          <div style="display:flex;justify-content:space-between"><b style="font-size:12.5px">Priya Sharma</b>
+            <span class="mono" style="font-size:11px">11:15</span></div>
+          <div style="font-size:11px;color:var(--text-muted)">Bed B-05 · Insulin 8 units · subcut.</div>
+          <div style="margin-top:6px;background:var(--success-soft);color:var(--success);text-align:center;
+                      border-radius:4px;padding:5px;font-size:10.5px;font-weight:700">← swipe to mark as given</div></div>
+
+        <div class="sect">Upcoming</div>
+        <div class="mcard">
+          <div style="display:flex;justify-content:space-between"><b style="font-size:12.5px">Ravi Nair</b>
+            <span class="mono" style="font-size:11px;color:var(--text-muted)">12:00</span></div>
+          <div style="font-size:11px;color:var(--text-muted)">Bed B-01 · Metformin 500mg · oral</div></div>
+        <div class="mcard">
+          <div style="display:flex;justify-content:space-between"><b style="font-size:12.5px">Tomas Berg</b>
+            <span class="mono" style="font-size:11px;color:var(--text-muted)">14:00</span></div>
+          <div style="font-size:11px;color:var(--text-muted)">Bed B-03 · Enalapril 10mg · oral</div></div>
+      </div>
+      <div class="tabbar">
+        <div class="tb"><span class="ic">▥</span>Ward</div>
+        <div class="tb"><span class="ic">♥</span>Vitals</div>
+        <div class="tb on"><span class="ic">℞</span>Meds</div>
+        <div class="tb"><span class="ic">☰</span>Me</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="phone"><div class="lbl">Ward board — mobile</div>
+    <div class="screen">
+      <div class="sbar"><span>10:15</span><span>▮▮▮ ⌁ ▰</span></div>
+      <div class="mhead"><h4>Ward B</h4><div class="d">19 of 24 beds occupied</div></div>
+      <div class="mbody">
+        <div class="mstats">
+          <div class="mstat"><b>19</b><i>Occupied</i></div>
+          <div class="mstat"><b style="color:var(--success)">5</b><i>Free</i></div>
+          <div class="mstat"><b style="color:var(--danger)">4</b><i>Obs due</i></div>
+        </div>
+        <div class="mcard" style="border-left:3px solid var(--danger)">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <b class="mono" style="font-size:11.5px">B-02</b><span class="chip now">NEEDS OBS</span></div>
+          <div style="font-weight:700;font-size:13px;margin-top:3px">Elena Duarte</div>
+          <div style="font-size:10.5px;color:var(--danger)">Last vitals 04:30 — overdue</div></div>
+        <div class="mcard" style="border-left:3px solid var(--danger)">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <b class="mono" style="font-size:11.5px">B-06</b><span class="chip now">NEEDS OBS</span></div>
+          <div style="font-weight:700;font-size:13px;margin-top:3px">Ibrahim Musa <span class="dot" style="display:inline-block"></span></div>
+          <div style="font-size:10.5px;color:var(--danger)">Last vitals 05:00 — overdue</div></div>
+        <div class="mcard">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <b class="mono" style="font-size:11.5px">B-01</b><span class="chip done">STABLE</span></div>
+          <div style="font-weight:700;font-size:13px;margin-top:3px">Ravi Nair <span class="dot" style="display:inline-block"></span></div>
+          <div style="font-size:10.5px;color:var(--text-muted)">08:15 · 142/88 · 78bpm</div></div>
+        <div class="mcard">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <b class="mono" style="font-size:11.5px">B-05</b><span class="chip in">MONITORING</span></div>
+          <div style="font-weight:700;font-size:13px;margin-top:3px">Priya Sharma</div>
+          <div style="font-size:10.5px;color:var(--text-muted)">09:00 · 118/76 · 72bpm</div></div>
+      </div>
+      <div class="tabbar">
+        <div class="tb on"><span class="ic">▥</span>Ward</div>
+        <div class="tb"><span class="ic">♥</span>Vitals</div>
+        <div class="tb"><span class="ic">℞</span>Meds</div>
+        <div class="tb"><span class="ic">☰</span>Me</div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+</main>
+</div>
+
+<script>
+(function(){
+  var btns = document.querySelectorAll('.chrome button');
+  btns.forEach(function(b){
+    b.addEventListener('click', function(){
+      btns.forEach(function(x){ x.classList.remove('on'); });
+      b.classList.add('on');
+      document.querySelectorAll('.stage > section').forEach(function(s){ s.classList.add('hidden'); });
+      var t = document.getElementById(b.dataset.s);
+      if (t) t.classList.remove('hidden');
+      window.scrollTo(0,0);
+    });
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+og in as	You land on
+reception@demo.test	Check-in Queue
+doctor@demo.test	Today's Queue
+nurse@demo.test	Ward Board
+pharmacy@demo.test	Prescription Queue
+billing@demo.test	Invoices
+admin@demo.test	Dashboard
+
+Password for all - ChangeMe123!

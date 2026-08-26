@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body { height: 100%; }
+  body {
+    @apply bg-bg text-text font-sans text-base antialiased;
+  }
+  /* Staff navigate by keyboard. A visible focus ring is a feature. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-primary ring-offset-1;
+  }
+}
+
+@layer components {
+  .scroll-thin::-webkit-scrollbar { width: 9px; height: 9px; }
+  .scroll-thin::-webkit-scrollbar-thumb { @apply bg-border-strong rounded; }
+  .scroll-thin::-webkit-scrollbar-track { background: transparent; }
+}
