@@ -1,4 +1,6 @@
 import 'reflect-metadata';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { UserRole } from '@prisma/client';
 import { PATH_METADATA, METHOD_METADATA } from '@nestjs/common/constants';
 import { RequestMethod } from '@nestjs/common';
@@ -186,6 +188,82 @@ describe('access matrix', () => {
       ).map((r) => `${r.controller}.${r.handler}`);
 
       expect(clinicalReads).toEqual([]);
+    });
+
+    /*
+     * THE RULE CHANGED, AND IT CHANGED IN THE OPEN
+     * --------------------------------------------
+     * "Admin sees no patient identity anywhere" held for six phases and is no
+     * longer true: `GET /admin/reports/consultations` returns the patients
+     * behind a count on the owner's daily activity screen — who attended, when,
+     * what they were charged, whether they paid.
+     *
+     * That was asked for and is defensible. An owner reconciling their own
+     * clinic needs to know a doctor's three consultations were three real
+     * people who were billed; every field crossing over is one reception sees
+     * at the desk and billing sees on an invoice.
+     *
+     * The dishonest version of this change was available and tempting: put the
+     * route on `AdminController`, watch the test above stay green because it
+     * keys on *clinical controllers*, and leave a rule in the file saying
+     * something that had stopped being true. A safety net you have quietly
+     * stepped around is worse than none — the next person reads it and believes
+     * it.
+     *
+     * So the rule is restated as what it now is: **attendance and money, never
+     * clinical content**, asserted directly against the one endpoint that
+     * carries identity.
+     */
+    it('lets admin see attendance and money, and nothing clinical', () => {
+      const SERVICE = readFileSync(
+        resolve(__dirname, '../../admin/admin.service.ts'),
+        'utf8',
+      )
+        // Comments explain the boundary using the same words the boundary
+        // forbids. Asserting against them would fail the build for documenting
+        // itself, and the tempting fix is to weaken the documentation.
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
+
+      const start = SERVICE.indexOf('async consultationLedger(');
+      expect(start).toBeGreaterThan(-1);
+      const body = SERVICE.slice(start, SERVICE.indexOf('\n  async ', start + 10));
+
+      // Identity and money: the point of the endpoint.
+      expect(body).toContain('patient: { select: { id: true, fullName: true } }');
+      expect(body).toContain('invoice: { select: { id: true, totalAmount: true, amountPaid: true } }');
+
+      /*
+       * `reason` is the dangerous one and the reason this is a source test.
+       * Reception types it at booking and it is routinely "chest pain" — a
+       * clinical fact sitting one field away from everything above, on the same
+       * model, which any `include` or careless `select` would carry across.
+       */
+      expect(body).not.toMatch(/\breason\b/);
+
+      // Whether a prescription exists is operational; what is in it names a
+      // condition. Only the id is fetched, so no shape can render contents.
+      expect(body).toContain('prescription: { select: { id: true } }');
+      expect(body).not.toMatch(/items|medicineName|dosage/);
+
+      for (const clinical of ['diagnosis', 'allergie', 'medicalRecord', 'vital', 'admission']) {
+        expect(body.toLowerCase()).not.toContain(clinical);
+      }
+
+      // Never the whole row. `patient: true` would carry dob, phone, address
+      // and the insurer into a management screen as valid, unremarkable data.
+      expect(body).not.toMatch(/patient:\s*true/);
+      expect(body).not.toMatch(/include:/);
+    });
+
+    it('audits the one admin route that reads patient identity under its own name', () => {
+      // "Who looked up our patient list, and when" must be answerable without
+      // unpicking a generic report action.
+      const controller = readFileSync(
+        resolve(__dirname, '../../admin/admin.controller.ts'),
+        'utf8',
+      );
+      expect(controller).toContain("@AuditAction('ADMIN_CONSULTATION_LEDGER')");
     });
 
     it('keeps admin out of records, observations and the drug chart entirely', () => {

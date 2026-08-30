@@ -1,11 +1,10 @@
 import { useEffect, useState } from 'react';
 import { FlatList, StyleSheet, Text, View } from 'react-native';
 import * as Notifications from 'expo-notifications';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { theme } from '@/lib/theme';
 import { relativeAge } from '@/lib/format';
-import { Card } from '@/components/ui';
+import { AppHeader, Card, Screen } from '@/components/ui';
 
 interface AlertItem {
   id: string;
@@ -61,10 +60,8 @@ export default function AlertsScreen() {
   }, [router]);
 
   return (
-    <SafeAreaView style={s.root} edges={['top']}>
-      <View style={s.header}>
-        <Text style={s.title}>Alerts</Text>
-      </View>
+    <Screen>
+      <AppHeader title={'Alerts'} />
       <FlatList
         data={alerts}
         keyExtractor={(a) => a.id}
@@ -86,33 +83,23 @@ export default function AlertsScreen() {
           </Card>
         )}
       />
-    </SafeAreaView>
+    </Screen>
   );
 }
 
 const s = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.color.bg },
-  header: {
-    paddingHorizontal: theme.space(4),
-    paddingBottom: theme.space(2),
-    backgroundColor: theme.color.surface,
-    borderBottomWidth: 1,
-    borderBottomColor: theme.color.border,
-  },
-  title: { fontSize: 24, fontWeight: '800', color: theme.color.text },
   list: { padding: theme.space(3) },
   kind: {
-    fontSize: 10,
-    fontWeight: '800',
+    ...theme.font.caption,
     letterSpacing: 0.5,
     color: theme.color.textSubtle,
     textTransform: 'uppercase',
   },
-  body: { fontSize: 15, fontWeight: '600', color: theme.color.text, marginTop: 2 },
-  age: { fontSize: 12, color: theme.color.textMuted, marginTop: 2 },
-  empty: { fontSize: 15, color: theme.color.textMuted, textAlign: 'center' },
+  body: { ...theme.font.body, color: theme.color.text, marginTop: 2 },
+  age: { ...theme.font.caption, color: theme.color.textMuted, marginTop: 2 },
+  empty: { ...theme.font.body, color: theme.color.textMuted, textAlign: 'center' },
   emptyHint: {
-    fontSize: 12,
+    ...theme.font.caption,
     color: theme.color.textSubtle,
     textAlign: 'center',
     marginTop: theme.space(2),

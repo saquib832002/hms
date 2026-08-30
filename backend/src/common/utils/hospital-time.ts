@@ -102,6 +102,57 @@ export function hospitalDayRange(instant: Date, timeZone: string): { start: Date
   return { start, end };
 }
 
+/**
+ * `YYYY-MM` for the hospital's local month.
+ *
+ * Revenue is reported by month, and a month is a local idea. A payment taken at
+ * 23:30 on the 31st in Asia/Kolkata is already the 1st in UTC — bucketing on the
+ * stored instant would move that clinic's takings into the next month, which is
+ * exactly the figure someone reconciles against a bank statement.
+ */
+export function hospitalMonthKey(instant: Date, timeZone: string): string {
+  const { year, month } = hospitalDate(instant, timeZone);
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+
+/** [start, end) covering one hospital-local calendar month. */
+export function hospitalMonthRange(instant: Date, timeZone: string): { start: Date; end: Date } {
+  const { year, month } = hospitalDate(instant, timeZone);
+  const start = zonedTimeToUtc({ year, month, day: 1 }, timeZone);
+  const next = month === 12 ? { year: year + 1, month: 1 } : { year, month: month + 1 };
+  return { start, end: zonedTimeToUtc({ ...next, day: 1 }, timeZone) };
+}
+
+/**
+ * The last `count` month keys ending with the one containing `instant`, oldest
+ * first, along with the instant the window opens at.
+ *
+ * Generated rather than derived from the rows, so a month with no payments
+ * appears as a zero instead of vanishing. A trend with the quiet months missing
+ * is not a trend — it reads as though the clinic was busy every month it
+ * appears in.
+ */
+export function recentMonths(
+  instant: Date,
+  timeZone: string,
+  count: number,
+): { keys: string[]; start: Date } {
+  const { year, month } = hospitalDate(instant, timeZone);
+  const keys: string[] = [];
+  for (let back = count - 1; back >= 0; back--) {
+    // Date.UTC normalises an out-of-range month, so month-13 and month-0 roll
+    // the year without a special case.
+    const d = new Date(Date.UTC(year, month - 1 - back, 1));
+    keys.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
+  }
+  const first = new Date(Date.UTC(year, month - count, 1));
+  const start = zonedTimeToUtc(
+    { year: first.getUTCFullYear(), month: first.getUTCMonth() + 1, day: 1 },
+    timeZone,
+  );
+  return { keys, start };
+}
+
 /** Parses a `YYYY-MM-DD` query param into a hospital-local day range. */
 export function parseDateParam(value: string | undefined, timeZone: string): { start: Date; end: Date } {
   if (!value) return hospitalDayRange(new Date(), timeZone);

@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { FlatList, RefreshControl, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { api } from '@/lib/api';
+import { useLiveData } from '@/lib/use-live-data';
 import { theme } from '@/lib/theme';
 import { date, relativeAge } from '@/lib/format';
-import { Card, ErrorBanner, StatusPill } from '@/components/ui';
+import { AppHeader, Card, ErrorBanner, Screen, StatusPill } from '@/components/ui';
 import type { DispenseQueueItem, Inventory } from '@/lib/types';
 
 /**
@@ -41,20 +41,16 @@ export default function PharmacyScreen() {
     }
   }, []);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  // Refetches on focus and every 15s, so the queue length is worth walking on.
+  useLiveData(load);
 
   // Only what needs attention — a full stock list is a desk screen.
   const lowStock = (inventory?.data ?? []).filter((r) => r.belowReorderLevel || r.inDateQuantity === 0);
   const expiring = (inventory?.data ?? []).filter((r) => r.expiringSoon.length > 0);
 
   return (
-    <SafeAreaView style={s.root} edges={['top']}>
-      <View style={s.header}>
-        <Text style={s.title}>Pharmacy</Text>
-        <Text style={s.muted}>Updated {relativeAge(fetchedAt)}</Text>
-      </View>
+    <Screen>
+      <AppHeader title={'Pharmacy'} subtitle={'Updated {relativeAge(fetchedAt)}'} />
 
       {error && <ErrorBanner message={error} />}
 
@@ -86,7 +82,7 @@ export default function PharmacyScreen() {
                 {lowStock.slice(0, 8).map((m) => (
                   <Card key={m.id}>
                     <View style={s.rowTop}>
-                      <Text style={s.name}>
+                      <Text style={s.name} numberOfLines={1}>
                         {m.name} <Text style={s.muted}>{m.strength}</Text>
                       </Text>
                       <StatusPill
@@ -153,7 +149,7 @@ export default function PharmacyScreen() {
           </Text>
         }
       />
-    </SafeAreaView>
+    </Screen>
   );
 }
 
@@ -167,16 +163,7 @@ function Stat({ label, value, tone }: { label: string; value: number; tone?: str
 }
 
 const s = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.color.bg },
-  header: {
-    paddingHorizontal: theme.space(4),
-    paddingBottom: theme.space(2),
-    backgroundColor: theme.color.surface,
-    borderBottomWidth: 1,
-    borderBottomColor: theme.color.border,
-  },
-  title: { fontSize: 22, fontWeight: '800', color: theme.color.text },
-  muted: { fontSize: 13, color: theme.color.textMuted },
+  muted: { ...theme.font.small, color: theme.color.textMuted },
   list: { padding: theme.space(3) },
   stats: { flexDirection: 'row', gap: theme.space(2), marginBottom: theme.space(2) },
   stat: {
@@ -188,11 +175,10 @@ const s = StyleSheet.create({
     paddingVertical: theme.space(2),
     alignItems: 'center',
   },
-  statValue: { fontSize: 20, fontWeight: '800', color: theme.color.text },
-  statLabel: { fontSize: 11, color: theme.color.textMuted, textTransform: 'uppercase' },
+  statValue: { ...theme.font.title, color: theme.color.text },
+  statLabel: { ...theme.font.caption, color: theme.color.textMuted, textTransform: 'uppercase' },
   group: {
-    fontSize: 12,
-    fontWeight: '800',
+    ...theme.font.caption,
     letterSpacing: 0.6,
     textTransform: 'uppercase',
     color: theme.color.textSubtle,
@@ -200,13 +186,13 @@ const s = StyleSheet.create({
     marginBottom: theme.space(2),
   },
   rowTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  rxId: { fontSize: 13, fontWeight: '800', color: theme.color.textMuted, letterSpacing: 0.5 },
+  rxId: { ...theme.font.small, color: theme.color.textMuted, letterSpacing: 0.5 },
   nameLine: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
-  name: { fontSize: 17, fontWeight: '700', color: theme.color.text },
+  name: { ...theme.font.heading, color: theme.color.text , flexShrink: 1 },
   allergyDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: theme.color.danger },
-  warn: { fontSize: 12, color: theme.color.warning, fontWeight: '600', marginTop: 4 },
+  warn: { ...theme.font.caption, color: theme.color.warning, fontWeight: '600', marginTop: 4 },
   footnote: {
-    fontSize: 12,
+    ...theme.font.caption,
     color: theme.color.textSubtle,
     textAlign: 'center',
     marginTop: theme.space(5),

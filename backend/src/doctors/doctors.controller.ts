@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Param, ParseIntPipe, Patch, Query } from '@nestjs/common';
-import { IsInt, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsInt, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
 import { UserRole } from '@prisma/client';
 import { DoctorsService } from './doctors.service';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -11,6 +11,22 @@ class UpdateDoctorDto {
   @IsOptional() @IsInt() departmentId?: number | null;
   @IsOptional() @IsString() @MaxLength(60) registrationNo?: string | null;
   @IsOptional() @IsString() @MaxLength(40) phone?: string | null;
+
+  /**
+   * Consultation fee, as a string. Never a JSON number.
+   *
+   * The same rule as every other amount in this system: a JSON number has been
+   * through float representation by the time it arrives, and `parseFloat` on
+   * the way in is how pennies go missing. Empty string clears the fee, which is
+   * distinct from zero — no fee means "cannot be billed at checkout", zero
+   * would mean "this consultation is free".
+   */
+  @IsOptional()
+  @IsString()
+  @Matches(/^$|^\d{1,8}(\.\d{1,2})?$/, {
+    message: 'consultationFee must be a positive amount with at most 2 decimal places, as a string',
+  })
+  consultationFee?: string;
 }
 
 const ALL_STAFF = [

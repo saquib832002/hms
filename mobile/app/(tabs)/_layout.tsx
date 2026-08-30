@@ -1,7 +1,7 @@
 import { Tabs } from 'expo-router';
-import { Text } from 'react-native';
+import { Platform, Text } from 'react-native';
 import { useAuth } from '@/lib/auth-context';
-import { theme } from '@/lib/theme';
+import { accentFor, fillFor, headerBgFor, theme } from '@/lib/theme';
 
 /**
  * Tabs are derived from the signed-in role, exactly like the web sidebar.
@@ -19,19 +19,41 @@ export default function TabsLayout() {
   const isDoctor = user?.role === 'DOCTOR';
   const isPharmacist = user?.role === 'PHARMACIST';
   const isAdmin = user?.role === 'ADMIN';
+  const isReception = user?.role === 'RECEPTIONIST';
+  const isBilling = user?.role === 'BILLING_STAFF';
 
-  const icon = (glyph: string) => ({ color }: { color: string }) => (
-    <Text style={{ color, fontSize: 18 }}>{glyph}</Text>
-  );
+  // The bar wears the same accent as the header, so the app reads as one piece
+  // and the active role stays legible from the bottom of the screen too.
+  const accent = accentFor(user?.role);
+
+  const icon =
+    (glyph: string) =>
+    ({ color, focused }: { color: string; focused: boolean }) => (
+      <Text style={{ color, fontSize: focused ? 19 : 17 }}>{glyph}</Text>
+    );
 
   return (
     <Tabs
       screenOptions={{
         headerShown: false,
-        tabBarActiveTintColor: theme.color.primary,
+        tabBarActiveTintColor: accent,
         tabBarInactiveTintColor: theme.color.textSubtle,
-        tabBarStyle: { borderTopColor: theme.color.border },
-        tabBarLabelStyle: { fontSize: 11, fontWeight: '600' },
+        tabBarStyle: {
+          // Same pale wash as the header, so the app is bracketed by its colour
+          // top and bottom. The active tab uses the darkened accent — the neon
+          // fill itself would be unreadable as a 9px label.
+          backgroundColor: headerBgFor(user?.role),
+          borderTopColor: fillFor(user?.role),
+          borderTopWidth: 2,
+          // Taller than the default: these are gloved thumbs in a hurry, and
+          // the stock 49pt bar puts the labels uncomfortably close to the edge.
+          height: Platform.OS === 'ios' ? 82 : 60,
+          paddingTop: theme.space(1),
+          paddingBottom: Platform.OS === 'ios' ? theme.space(7) : theme.space(2),
+          ...theme.elevation.raised,
+        },
+        tabBarLabelStyle: { ...theme.font.overline, textTransform: 'none' },
+        tabBarItemStyle: { paddingVertical: 2 },
       }}
     >
       {/* Doctor */}
@@ -58,6 +80,22 @@ export default function TabsLayout() {
       <Tabs.Screen
         name="pharmacy"
         options={{ title: 'Pharmacy', tabBarIcon: icon('℞'), href: isPharmacist ? undefined : null }}
+      />
+
+      {/* Reception — check-in is the reason this role has an app at all. */}
+      <Tabs.Screen
+        name="schedule"
+        options={{ title: 'Schedule', tabBarIcon: icon('▤'), href: isReception ? undefined : null }}
+      />
+      <Tabs.Screen
+        name="patients"
+        options={{ title: 'Patients', tabBarIcon: icon('◍'), href: isReception ? undefined : null }}
+      />
+
+      {/* Billing — look up and take payment. Aging and reconciliation are web. */}
+      <Tabs.Screen
+        name="invoices"
+        options={{ title: 'Invoices', tabBarIcon: icon('¤'), href: isBilling ? undefined : null }}
       />
 
       {/* Admin — aggregates only, no patient reachable from here. */}

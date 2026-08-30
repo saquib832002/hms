@@ -177,7 +177,7 @@ Note what the last two have in common with the Phase 3 orphans: all three passed
 ## Endpoints with no way in
 
 Found by tightening `endpoint-coverage.spec.ts` to match on `(method, path)`
-structurally instead of grepping for path fragments. All five had been passing
+structurally instead of grepping for path fragments. All had been passing
 on coincidence — the old check was satisfied by the words appearing anywhere in
 the client source, in any order, in any file, under any HTTP verb.
 
@@ -191,8 +191,11 @@ two cannot drift apart.
 | `PATCH /prescriptions/:id/cancel` | No way for a doctor to retract a prescription | The worst of the five. A wrong prescription can be issued and not withdrawn. `schedule-medication-sheet.tsx` already refuses to chart a cancelled prescription, so the UI reasons about a state it gives nobody a way to reach. |
 | `PATCH /medicines/:id` | No way to correct a catalogue entry | This is what the `drugClass = OTHER` trap needs in order to be fixable. Allergy checks against a mis-classed medicine run, report nothing, and look healthy. |
 | `POST /medicines` | No way to add a medicine | The catalogue can only be seeded. A hospital cannot stock anything new. |
-| `PATCH /doctors/:id` | No way to edit a doctor profile | An admin can create the account but specialty, fee and department are frozen at seed time. |
 | `GET /patients/:patientId/admissions` | No screen shows a past stay | Admission history was never built; the ward board only shows current occupancy. |
+
+`PATCH /doctors/:id` was on this list and is now closed: consultation fees made
+it load-bearing — a fee nobody can set is a checkout nobody can complete — so
+the doctors screen gained a fee editor.
 
 Two more endpoints have no caller and are staying that way — `GET /appointments/:id`
 and `GET /prescriptions/:id` — both superseded by richer reads the clients

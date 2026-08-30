@@ -40,9 +40,10 @@ export class AppointmentsService {
     await this.assertOnGrid(scheduledAt);
     await this.assertPatientExists(dto.patientId);
     await this.assertDoctorExists(dto.doctorId);
+    await this.assertPatientIsFree(dto.patientId, scheduledAt);
 
     try {
-      return await this.prisma.appointment.create({
+      const created = await this.prisma.appointment.create({
         data: {
           tenantId: currentTenantId(),
           patientId: dto.patientId,
@@ -52,16 +53,66 @@ export class AppointmentsService {
         },
         include: this.listInclude(),
       });
+      return this.shapeFee(created);
     } catch (err) {
-      // The database enforces one appointment per doctor per slot. Checking
-      // for a clash in application code first would still lose the race when
-      // two receptionists click "book" at the same moment, so the constraint
-      // is the real guarantee and this just translates it into English.
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
-        throw new ConflictException('That slot is already booked for this doctor');
-      }
-      throw err;
+      throw this.translateSlotConflict(err);
     }
+  }
+
+  /**
+   * A patient cannot be in two places at once.
+   *
+   * The check above is for the *message* — it can name the other doctor, which
+   * is what a receptionist needs to resolve the situation. The guarantee is the
+   * partial unique index in `prisma/sql/appointment-slots.sql`, because two
+   * receptionists tapping "book" in the same second both pass this check and
+   * both insert.
+   *
+   * Cancelled and no-show appointments are ignored, here and in the index: the
+   * patient is not attending those, so they do not occupy the person.
+   */
+  private async assertPatientIsFree(
+    patientId: number,
+    scheduledAt: Date,
+    excludeAppointmentId?: number,
+  ) {
+    const clash = await this.prisma.appointment.findFirst({
+      where: {
+        patientId,
+        scheduledAt,
+        status: { notIn: [AppointmentStatus.CANCELLED, AppointmentStatus.NO_SHOW] },
+        ...(excludeAppointmentId ? { id: { not: excludeAppointmentId } } : {}),
+      },
+      include: { doctor: { select: { fullName: true } } },
+    });
+
+    if (clash) {
+      throw new ConflictException(
+        `This patient already has an appointment at that time with Dr ${
+          clash.doctor?.fullName ?? 'another doctor'
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Turns a unique-violation into something a receptionist can act on.
+   *
+   * Two indexes can fire here and they mean opposite things — the doctor is
+   * busy, or the patient is. "That slot is already booked" covered both and
+   * sent reception looking at the wrong calendar.
+   */
+  private translateSlotConflict(err: unknown): unknown {
+    if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') {
+      return err;
+    }
+
+    const target = String((err.meta as { target?: unknown } | undefined)?.target ?? '');
+
+    if (target.includes('patient')) {
+      return new ConflictException('This patient already has an appointment at that time');
+    }
+    return new ConflictException('That slot is already booked for this doctor');
   }
 
   /**
@@ -105,7 +156,10 @@ export class AppointmentsService {
       include: this.listInclude(),
     });
 
-    return { data, meta: { date: query.date ?? 'today', timezone: clinic.timezone, total: data.length } };
+    return {
+      data: data.map((a) => this.shapeFee(a)),
+      meta: { date: query.date ?? 'today', timezone: clinic.timezone, total: data.length },
+    };
   }
 
   /**
@@ -137,7 +191,7 @@ export class AppointmentsService {
       // someone else already reveals that this patient saw another doctor.
       throw new NotFoundException(`Appointment ${id} not found`);
     }
-    return appointment;
+    return this.shapeFee(appointment);
   }
 
   async update(id: number, dto: UpdateAppointmentDto, user: AuthUser) {
@@ -154,17 +208,34 @@ export class AppointmentsService {
       throw new BadRequestException('Cannot reschedule into the past');
     }
 
+    // Moving an appointment can create the same clash as booking one, and the
+    // reschedule path had no check at all — the only thing standing in its way
+    // was the doctor-slot index, which says nothing about the patient.
+    if (scheduledAt) {
+      await this.assertOnGrid(scheduledAt);
+      await this.assertPatientIsFree(existing.patientId, scheduledAt, id);
+    }
+
+    /*
+     * Reception may move an appointment to a different doctor.
+     *
+     * Checked here so an unknown id is a 404 rather than a foreign-key error
+     * surfacing as a 500. The route already restricts this to reception and
+     * admin; a doctor cannot reassign their own appointments to someone else.
+     */
+    if (dto.doctorId !== undefined && dto.doctorId !== existing.doctorId) {
+      await this.assertDoctorExists(dto.doctorId);
+    }
+
     try {
-      return await this.prisma.appointment.update({
+      const moved = await this.prisma.appointment.update({
         where: { id },
         data: { scheduledAt, reason: dto.reason, doctorId: dto.doctorId },
         include: this.listInclude(),
       });
+      return this.shapeFee(moved);
     } catch (err) {
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
-        throw new ConflictException('That slot is already booked for this doctor');
-      }
-      throw err;
+      throw this.translateSlotConflict(err);
     }
   }
 
@@ -211,13 +282,49 @@ export class AppointmentsService {
       }
     }
 
-    return updated;
+    return this.shapeFee(updated);
+  }
+
+  /**
+   * What every appointment response carries.
+   *
+   * `consultationFee` and `invoice` are here for reception's checkout: the fee
+   * to read out to the patient, and whether this consultation has already been
+   * billed so the button can say so rather than failing on the second tap.
+   *
+   * Only the invoice *id* — not its total, status or payments. Whether a charge
+   * exists is administrative; what is on it is billing's business, and every
+   * role that reads an appointment would otherwise receive it. A fee is a price
+   * list entry, not PHI.
+   */
+  /**
+   * The doctor's fee leaves as a string, never a Decimal object or a float.
+   *
+   * Same rule as everywhere else money appears: `parseFloat` on the client is
+   * how pennies go missing, and a Decimal serialises to something no client can
+   * use directly.
+   */
+  private shapeFee<T extends { doctor?: { consultationFee: Prisma.Decimal | null } | null }>(
+    row: T,
+  ) {
+    if (!row.doctor) return row;
+    return {
+      ...row,
+      doctor: {
+        ...row.doctor,
+        consultationFee:
+          row.doctor.consultationFee === null ? null : row.doctor.consultationFee.toFixed(2),
+      },
+    };
   }
 
   private listInclude() {
     return {
       patient: { select: { id: true, fullName: true, dob: true, gender: true, phone: true } },
-      doctor: { select: { id: true, fullName: true, specialization: true } },
+      doctor: {
+        select: { id: true, fullName: true, specialization: true, consultationFee: true },
+      },
+      invoice: { select: { id: true } },
     };
   }
 

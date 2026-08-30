@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import { FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { api } from '@/lib/api';
+import { useLiveData } from '@/lib/use-live-data';
 import { useOutbox } from '@/lib/outbox-context';
 import { theme } from '@/lib/theme';
 import { relativeAge, time } from '@/lib/format';
-import { Card, ErrorBanner, StatusPill } from '@/components/ui';
+import { AppHeader, Card, ErrorBanner, Screen, StatusPill } from '@/components/ui';
 import type { BedRow, Ward, WardBoard } from '@/lib/types';
 
 /**
@@ -44,16 +44,19 @@ export default function WardScreen() {
     }
   }, [wardId]);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  // Refetches on focus and every 15s. Admissions, transfers and discharges
+  // happen while a nurse is looking at another screen.
+  useLiveData(load);
 
   const rows = [...(board?.beds ?? [])].sort(byUrgency);
 
   return (
-    <SafeAreaView style={s.root} edges={['top']}>
-      <View style={s.header}>
-        <Text style={s.title}>{board?.ward.name ?? 'Ward'}</Text>
+    <Screen>
+      <AppHeader
+        title={board?.ward.name ?? 'Ward'}
+        subtitle={board ? `${board.stats.occupied} of ${board.stats.beds} beds occupied` : undefined}
+      />
+      <View style={s.pickerBar}>
         <View style={s.wardTabs}>
           {wards.map((w) => (
             <Pressable
@@ -120,7 +123,7 @@ export default function WardScreen() {
           />
         )}
       />
-    </SafeAreaView>
+    </Screen>
   );
 }
 
@@ -211,15 +214,7 @@ function Stat({ label, value, tone }: { label: string; value: number; tone?: str
 }
 
 const s = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.color.bg },
-  header: {
-    paddingHorizontal: theme.space(4),
-    paddingBottom: theme.space(2),
-    backgroundColor: theme.color.surface,
-    borderBottomWidth: 1,
-    borderBottomColor: theme.color.border,
-  },
-  title: { fontSize: 22, fontWeight: '800', color: theme.color.text },
+  pickerBar: { paddingHorizontal: theme.space(4), paddingTop: theme.space(4) },
   wardTabs: { flexDirection: 'row', gap: theme.space(2), marginTop: theme.space(2) },
   wardTab: {
     paddingHorizontal: theme.space(3),
@@ -230,10 +225,10 @@ const s = StyleSheet.create({
     borderColor: theme.color.border,
   },
   wardTabActive: { backgroundColor: theme.color.primarySoft, borderColor: theme.color.primary },
-  wardTabText: { fontSize: 13, color: theme.color.textMuted },
+  wardTabText: { ...theme.font.small, color: theme.color.textMuted },
   wardTabTextActive: { color: theme.color.primary, fontWeight: '700' },
   syncBar: { backgroundColor: theme.color.warningSoft, paddingVertical: 5 },
-  syncText: { color: '#6b5314', fontSize: 12, textAlign: 'center' },
+  syncText: { color: theme.color.warning, ...theme.font.caption, textAlign: 'center' },
   list: { padding: theme.space(3) },
   stats: { flexDirection: 'row', gap: theme.space(2), marginBottom: theme.space(2) },
   stat: {
@@ -245,13 +240,18 @@ const s = StyleSheet.create({
     paddingVertical: theme.space(2),
     alignItems: 'center',
   },
-  statValue: { fontSize: 20, fontWeight: '800', color: theme.color.text },
-  statLabel: { fontSize: 11, color: theme.color.textMuted, textTransform: 'uppercase' },
-  rowTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  bedLabel: { fontSize: 14, fontWeight: '800', color: theme.color.textMuted, letterSpacing: 0.5 },
+  statValue: { ...theme.font.title, color: theme.color.text },
+  statLabel: { ...theme.font.caption, color: theme.color.textMuted, textTransform: 'uppercase' },
+  rowTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: theme.space(2),
+  },
+  bedLabel: { ...theme.font.small, color: theme.color.textMuted, letterSpacing: 0.5 , flexShrink: 1 },
   nameLine: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
-  name: { fontSize: 18, fontWeight: '700', color: theme.color.text },
+  name: { ...theme.font.heading, color: theme.color.text },
   allergyDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: theme.color.danger },
-  meta: { fontSize: 13, color: theme.color.textMuted, marginTop: 2 },
+  meta: { ...theme.font.small, color: theme.color.textMuted, marginTop: 2 },
   metaAlert: { color: theme.color.danger, fontWeight: '600' },
 });

@@ -3,8 +3,39 @@ import * as SecureStore from 'expo-secure-store';
 import { SecureSession, SecureStorage } from './secure-session';
 import type { AuthUser, UserRole } from './types';
 
-/** Roles with a real mobile experience. Everything else is desk work. */
-export const MOBILE_ROLES: UserRole[] = ['DOCTOR', 'NURSE', 'PHARMACIST', 'ADMIN'];
+/**
+ * Every role has screens here.
+ *
+ * This used to be a subset — doctor, nurse, pharmacist, admin — and reception
+ * and billing were refused at login with a message pointing them at the web
+ * app. The comment above the check said the backend "would refuse every
+ * clinical call anyway", which was simply untrue: reception has its own
+ * perfectly good endpoints and always did. The real reason was that nobody had
+ * built reception screens, and an absence of screens had been written up as
+ * though it were a policy.
+ *
+ * It also failed the people this product is for. A small clinic where the
+ * receptionist has a phone and no desktop is the normal case, not the edge
+ * case — and check-in is *better* on a phone, since you are standing next to
+ * the person you are checking in.
+ *
+ * The security argument pointed the other way too: reception sees the least
+ * PHI in the system — `toPatientResponse` withholds allergies and diagnoses
+ * from them — while doctors and nurses, who already carried the app, see the
+ * most.
+ *
+ * Kept as a named list rather than deleted, because `role-screens.test.ts`
+ * asserts every UserRole appears here *and* has a tab. That way the next role
+ * added to the enum fails the build instead of silently getting a blank app.
+ */
+export const MOBILE_ROLES: UserRole[] = [
+  'DOCTOR',
+  'NURSE',
+  'PHARMACIST',
+  'ADMIN',
+  'RECEPTIONIST',
+  'BILLING_STAFF',
+];
 
 /**
  * API client.
@@ -34,12 +65,79 @@ const expoStorage: SecureStorage = {
 export const session = new SecureSession(expoStorage);
 
 /**
- * On a device this must be the dev machine's LAN IP — `localhost` on a phone
- * is the phone. Set it in app.json under `expo.extra.apiOrigin`.
+ * Where the API lives, from the phone's point of view.
+ *
+ * WHY THIS IS DERIVED RATHER THAN CONFIGURED
+ * ------------------------------------------
+ * `localhost` on a phone is the phone. The obvious fix is to write the dev
+ * machine's LAN IP into app.json — which works exactly until the router hands
+ * out a different lease, someone joins a different network, or the file is read
+ * from a stale Metro cache. Every one of those presents identically: a
+ * connection error with a correct-looking IP sitting in the config.
+ *
+ * So in development the host is taken from the Expo dev server instead. That
+ * address is *known* to be reachable, because the JavaScript bundle currently
+ * running was downloaded over it. It costs nothing to compute and cannot go
+ * stale.
+ *
+ * `extra.apiOrigin` still wins when there is no dev server — a standalone or
+ * production build — where a real hostname has to be configured.
  */
+function devServerHost(): string | null {
+  // hostUri is the modern field; the others are fallbacks across SDK versions
+  // and launch modes. Shape is always "host:port", e.g. "192.168.1.42:8081".
+  // Cast rather than trust the published types: `hostUri` and `debuggerHost`
+  // are present at runtime but move between the typed surfaces across SDK
+  // versions, and a compile error here would be a worse outcome than a
+  // null check.
+  const c = Constants as unknown as {
+    expoConfig?: { hostUri?: string } | null;
+    expoGoConfig?: { debuggerHost?: string } | null;
+    manifest2?: { extra?: { expoGo?: { debuggerHost?: string } } } | null;
+  };
+
+  const candidates = [
+    c.expoConfig?.hostUri,
+    c.expoGoConfig?.debuggerHost,
+    c.manifest2?.extra?.expoGo?.debuggerHost,
+  ];
+
+  for (const candidate of candidates) {
+    const host = candidate?.split(':')[0]?.trim();
+    // A dev server on localhost means the simulator, where localhost is right.
+    if (host && host.length > 0) return host;
+  }
+  return null;
+}
+
+let loggedOrigin = false;
+
 export function apiOrigin(): string {
-  const configured = (Constants.expoConfig?.extra as { apiOrigin?: string } | undefined)?.apiOrigin;
-  return configured ?? 'http://localhost:3000';
+  const extra = Constants.expoConfig?.extra as
+    | { apiOrigin?: string; apiPort?: number }
+    | undefined;
+  const port = extra?.apiPort ?? 3000;
+
+  const host = devServerHost();
+  const resolved = host ? `http://${host}:${port}` : (extra?.apiOrigin ?? `http://localhost:${port}`);
+
+  /*
+   * Logged once, on purpose.
+   *
+   * "Connection error" with no indication of what was dialled is the single
+   * least debuggable failure in this app — it looks the same whether the IP is
+   * wrong, the firewall is closed, or the config never loaded. One line in the
+   * Metro terminal removes the guesswork.
+   */
+  if (__DEV__ && !loggedOrigin) {
+    loggedOrigin = true;
+    console.log(
+      `[api] using ${resolved}` +
+        (host ? ` (derived from Expo dev server host ${host})` : ' (no dev server — from app.json)'),
+    );
+  }
+
+  return resolved;
 }
 
 export class ApiError extends Error {
@@ -159,13 +257,16 @@ export async function login(email: string, password: string): Promise<AuthUser> 
     user: AuthUser;
   };
 
-  // Only roles with screens here. Letting reception sign in would give them a
-  // shell with nothing in it and a confusing set of 403s; the backend would
-  // refuse every clinical call anyway.
+  /*
+   * A backstop, not a policy. Every role in the enum has screens, and a test
+   * asserts that. This stays only so a role added to `UserRole` without a tab
+   * gets a clear refusal rather than an empty app — and the message says the
+   * app is incomplete, because that is what it would mean.
+   */
   if (!MOBILE_ROLES.includes(data.user.role)) {
     throw new ApiError(
-      403,
-      'This app is not available for your role. Please use the web application.',
+      500,
+      'This app has no screens for your role yet. Please use the web application and report this.',
     );
   }
 
@@ -177,18 +278,18 @@ export async function login(email: string, password: string): Promise<AuthUser> 
 /**
  * Act as a different one of your own roles.
  *
- * Mirrors login in one important way: the role must be one this app has
- * screens for. An owner-doctor can hold RECEPTIONIST too, and switching into
- * it here would leave them in a shell with no tabs and a string of 403s — so
- * the refusal is explicit and names the web app instead.
+ * An owner-doctor who also holds RECEPTIONIST can now switch into it here and
+ * get real screens, which is the point of the change: one person, several
+ * hats, one login, and an audit trail that can still answer "what did Dr Smith
+ * do today".
  *
  * `switchableRoles` is what the UI should offer; this is the enforcement.
  */
 export async function switchRole(role: string): Promise<AuthUser> {
   if (!MOBILE_ROLES.includes(role as AuthUser['role'])) {
     throw new ApiError(
-      400,
-      'That role has no screens in this app. Please use the web application.',
+      500,
+      'This app has no screens for that role yet. Please use the web application and report this.',
     );
   }
 
@@ -204,6 +305,17 @@ export async function switchRole(role: string): Promise<AuthUser> {
 /** The roles this app can actually show, out of those the user holds. */
 export function switchableRoles(user: AuthUser | null): AuthUser['role'][] {
   return (user?.availableRoles ?? []).filter((r) => MOBILE_ROLES.includes(r));
+}
+
+/**
+ * Re-read the signed-in user.
+ *
+ * `JwtStrategy` resolves the user, their held roles and their hospital's
+ * settings from the database on every request, so this is always current — it
+ * is the client's *cached copy* that goes stale, not the server's answer.
+ */
+export async function fetchMe(): Promise<AuthUser> {
+  return api<AuthUser>('/auth/me');
 }
 
 export async function restoreSession(): Promise<AuthUser | null> {

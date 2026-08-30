@@ -51,8 +51,10 @@ const INTENTIONALLY_UNCALLED: Record<string, string> = {
   'GET /health': 'Infrastructure probe, not a client feature.',
   'GET /admissions/:id': 'Ward board carries the admission inline; no client needs to fetch one alone yet.',
   'GET /doctors/:id': 'Clients use the directory list; nothing needs a single doctor yet.',
-  'GET /appointments/:id':
-    'Every list carries the appointment inline, and reschedule already holds the row it is editing. A detail fetch would be a second source of truth for data the client already has.',
+  // 'GET /appointments/:id' was exempted here on the argument that reschedule
+  // already held the row it was editing. Mobile reschedule is a route reached
+  // by id with no row in hand, so it fetches one — the exemption's reasoning
+  // was true of the web app and never of a deep-linkable screen.
   'GET /prescriptions/:id':
     'Superseded by GET /pharmacy/prescriptions/:id, which returns the same prescription plus stock and allergy context. The plain read is kept for a non-pharmacy caller that does not exist yet.',
 };
@@ -72,8 +74,6 @@ const INTENTIONALLY_UNCALLED: Record<string, string> = {
 const KNOWN_GAPS: Record<string, string> = {
   'GET /patients/:patientId/admissions':
     'No screen shows a past stay. Admission history UI was never built.',
-  'PATCH /doctors/:id':
-    'An admin can create a doctor account but cannot edit the profile — specialty, fee, department are set at seed time and then frozen.',
   'POST /medicines':
     'The catalogue can only be seeded. There is no way to add a medicine through the UI.',
   'PATCH /medicines/:id':

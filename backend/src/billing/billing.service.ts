@@ -4,7 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { InvoiceStatus, Prisma } from '@prisma/client';
+import { AppointmentStatus, InvoiceStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthUser } from '../common/types/auth-user';
 import { applyPayment, fromMinor, MoneyError, sumAmounts, toMinor, toMoneyString } from './money';
@@ -17,6 +17,148 @@ import { currentTenantId } from '../common/tenancy/tenant-context';
 @Injectable()
 export class BillingService {
   constructor(private prisma: PrismaService) {}
+
+  /**
+   * Raise the invoice for a finished consultation.
+   *
+   * WHERE THE FLOW WAS BROKEN
+   * -------------------------
+   * Nothing connected treatment to money. A doctor marked a consultation
+   * complete and the patient walked out; billing only ever existed if somebody
+   * remembered to walk over and type an amount from memory. There was not even
+   * a field recording what a doctor charges.
+   *
+   * WHEN, AND WHY IT MOVED
+   * ----------------------
+   * At **check-in**, before the consultation — not after it.
+   *
+   * The first version required COMPLETED, on the assumption that treatment
+   * comes first and billing follows. That is the insurance-led model. Most
+   * outpatient clinics, and every clinic this product is aimed at, work the
+   * other way: the patient arrives, pays at the desk, and then waits to be
+   * seen. Billing after the fact means chasing someone who has already walked
+   * out of the building.
+   *
+   * So an invoice can be raised from CHECKED_IN onwards. Not from SCHEDULED —
+   * a patient who has not arrived may never arrive, and an invoice raised
+   * against them is a debt for a visit that did not happen.
+   *
+   * Still a deliberate tap rather than automatic on check-in. Free follow-ups,
+   * staff patients and written-off visits are ordinary, and each one
+   * auto-invoiced would need voiding. An audit trail full of corrections is
+   * worse than one tap by the person the patient is standing in front of.
+   *
+   * PAYING IS NOT A PRECONDITION, AND MUST NOT BECOME ONE
+   * -----------------------------------------------------
+   * Nothing in the clinical path checks whether an invoice exists or is
+   * settled. A doctor can start and complete a consultation for a patient who
+   * has not paid, and the charge can be raised or collected afterwards — which
+   * is why COMPLETED stays billable.
+   *
+   * This is a safety position, not an oversight. A gate on payment reads as
+   * tidy and fails at the only moment it matters: the patient who deteriorated
+   * in the waiting room, the one whose payment failed, the one the clinic has
+   * decided to treat for nothing. Software refusing care over an unpaid balance
+   * is a decision no system should make on a clinic's behalf.
+   *
+   * `consultation-billing.spec.ts` asserts the absence of such a gate, because
+   * adding one looks like an improvement to anyone who has not thought it
+   * through.
+   *
+   * THE LINE DESCRIPTION CARRIES NO CLINICAL FACT
+   * ---------------------------------------------
+   * `CONS · Consultation`. Not the diagnosis, not the prescription, and
+   * deliberately **not the doctor's name either**: in a hospital with an
+   * oncology department, "Consultation — Dr Chen" tells billing which
+   * department the patient attended, and that is a clinical fact reaching a
+   * role that `toPatientResponse` withholds it from. The `appointmentId` link
+   * carries the detail for anyone actually authorised to see it.
+   *
+   * This is the rule CLAUDE.md states: if auto-generation is ever added, the
+   * description must be a tariff code.
+   */
+  async invoiceForAppointment(appointmentId: number) {
+    const appointment = await this.prisma.appointment.findUnique({
+      where: { id: appointmentId },
+      select: {
+        id: true,
+        status: true,
+        patientId: true,
+        scheduledAt: true,
+        doctor: { select: { fullName: true, consultationFee: true } },
+        invoice: { select: { id: true } },
+      },
+    });
+
+    if (!appointment) throw new NotFoundException(`Appointment ${appointmentId} not found`);
+
+    /*
+     * Billable from arrival onwards.
+     *
+     * CANCELLED and NO_SHOW are excluded because both mean the visit did not
+     * happen — invoicing either is revenue invented from an empty chair.
+     * SCHEDULED is excluded because the patient has not turned up yet.
+     */
+    const BILLABLE: AppointmentStatus[] = [
+      AppointmentStatus.CHECKED_IN,
+      AppointmentStatus.IN_PROGRESS,
+      AppointmentStatus.COMPLETED,
+    ];
+
+    if (!BILLABLE.includes(appointment.status)) {
+      throw new ConflictException(
+        appointment.status === AppointmentStatus.SCHEDULED
+          ? 'Check the patient in first — an invoice for someone who has not arrived is a debt for a visit that may not happen.'
+          : `This appointment is ${appointment.status.toLowerCase().replace('_', ' ')} and cannot be billed.`,
+      );
+    }
+
+    // Checked for the message; the unique index on Invoice.appointmentId is
+    // what actually guarantees it, including against two taps at once.
+    if (appointment.invoice) {
+      throw new ConflictException('This consultation has already been invoiced');
+    }
+
+    const fee = appointment.doctor?.consultationFee;
+    if (fee === null || fee === undefined) {
+      throw new ConflictException(
+        `No consultation fee is set for Dr ${appointment.doctor?.fullName ?? 'this doctor'}. ` +
+          'An administrator can set one on the doctor’s profile.',
+      );
+    }
+
+    const amount = toMoneyString(fee);
+    if (toMinor(amount) <= 0) {
+      throw new ConflictException('That doctor’s consultation fee is zero — nothing to invoice');
+    }
+
+    try {
+      const invoice = await this.prisma.invoice.create({
+        data: {
+          tenantId: currentTenantId(),
+          patientId: appointment.patientId,
+          appointmentId: appointment.id,
+          totalAmount: amount,
+          items: {
+            create: [
+              {
+                tenantId: currentTenantId(),
+                description: 'CONS · Consultation',
+                amount,
+              },
+            ],
+          },
+        },
+        include: this.detailInclude(),
+      });
+      return this.shape(invoice);
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        throw new ConflictException('This consultation has already been invoiced');
+      }
+      throw err;
+    }
+  }
 
   /**
    * Create an invoice from line items.

@@ -243,8 +243,14 @@ DECLARE
 BEGIN
   PERFORM set_config('app.tenant_id', '', true);
 
-  INSERT INTO platform_users (email, "passwordHash", "fullName", "isActive")
-  VALUES ('__rls_probe__@invalid', 'x', 'RLS probe', false);
+  -- "updatedAt" is supplied explicitly, and the reason is worth knowing before
+  -- writing any other raw INSERT against this schema: Prisma's `@updatedAt` is
+  -- applied by the *client*, not as a database default. `@default(now())` does
+  -- emit DEFAULT CURRENT_TIMESTAMP, so createdAt fills itself and updatedAt
+  -- does not — the column is NOT NULL with nothing behind it. Every raw insert
+  -- has to name it.
+  INSERT INTO platform_users (email, "passwordHash", "fullName", "isActive", "updatedAt")
+  VALUES ('__rls_probe__@invalid', 'x', 'RLS probe', false, now());
 
   SELECT count(*) INTO seen_no_tenant
     FROM platform_users WHERE email = '__rls_probe__@invalid';

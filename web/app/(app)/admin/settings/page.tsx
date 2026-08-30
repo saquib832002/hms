@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { api, ApiError } from '@/lib/api';
+import { useAuth } from '@/lib/auth-context';
 import { Button, ErrorState, Field, TableSkeleton } from '@/components/ui/primitives';
 import { TimezoneSelect } from '@/components/ui/timezone-select';
 
@@ -70,6 +71,7 @@ const hh = (h: number) => `${String(h).padStart(2, '0')}:00`;
  * quietly reshapes the appointment book is worse than one that explains itself.
  */
 export default function ClinicSettingsPage() {
+  const { refreshUser } = useAuth();
   const [saved, setSaved] = useState<ClinicSettings | null>(null);
   const [form, setForm] = useState<Partial<ClinicSettings>>({});
   const [error, setError] = useState<string | null>(null);
@@ -114,6 +116,10 @@ export default function ClinicSettingsPage() {
       });
       setSaved(res);
       setForm(res);
+      // The currency symbol shown on every other screen comes from the cached
+      // session, not from this response. Without this it stays stale until the
+      // next sign-in, which reads as the save not having worked.
+      await refreshUser();
       setNotice('Saved. New appointment slots use these settings from now on.');
     } catch (e) {
       // The server explains why — an end hour before the start, an unknown

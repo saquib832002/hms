@@ -31,6 +31,31 @@ React Native ────┘         + Prisma ORM
 
 **Role-based UI, not one giant menu.** Each role sees only its own navigation, built after login from its role. This mirrors backend RBAC exactly and satisfies HIPAA minimum-necessary-access — a receptionist shouldn't *see* clinical notes, not merely be blocked from editing them.
 
+**A hidden link is not an unreachable screen, and that mattered.** The menu was
+the only thing shaping which role saw which route, and a menu holds until the
+first URL is typed. It stopped holding on a shared machine: a doctor's session
+ended at `/queue`, leaving `?next=/queue` in the address bar, and the
+administrator who signed in next was sent there. `GET /me/queue` came back 403 —
+the API refusing exactly as designed — but the screen was broken and the
+hospital's audit log gained a **denied clinical access by an administrator**.
+Nothing leaked; the trail is what suffered. Denial rows are supposed to mean
+someone reached for data they should not have, and they are worth much less once
+the app manufactures them by accident.
+
+So `canReach(role, path)` is derived from the nav table rather than declared
+beside it, the `(app)` layout bounces a role to its own landing screen, and
+`?next=` is validated against the role that *arrived* rather than the one that
+left. Three properties are load-bearing and each has a test: an unknown path
+stays a 404 rather than becoming a silent redirect (otherwise every typo reads
+as a refusal and real broken links disappear); the check survives a query string
+and a trailing slash, since `?next=` carries both; and **every `page.tsx` must
+appear in the nav table for at least one role** — a page nobody has a menu entry
+for would be reachable by everybody, with the guard waving it through while
+looking like it was checking.
+
+Still not the security boundary. The API is, and assumes any client can call any
+endpoint. This only stops the app from asking for what its own role cannot have.
+
 **Web = desktop application feel.** This is an internal operational tool (think Epic, Linear, a banking back-office), not a marketing site:
 
 - Persistent sidebar navigation — staff live here for 8-hour shifts
@@ -41,6 +66,39 @@ React Native ────┘         + Prisma ORM
 
 **Mobile = curated task subset, not feature parity.** Aim for *task* parity per role, not feature parity. Mobile is for quick lookups, on-the-go actions (bedside vitals, approving a prescription between rounds), notifications, and simple entry. Billing reconciliation, report generation, bulk entry, and multi-panel history review stay web-only.
 
+**Every role gets the app; no role gets every screen.** That distinction had been lost: reception and billing were refused at mobile login for six phases, behind a comment claiming the backend "would refuse every clinical call anyway" — untrue, reception has its own endpoints and always did. The real reason was that nobody had built the screens, and the absence had acquired a rationale. It also failed the target market, where a small clinic's receptionist may have a phone and no desktop, and where check-in is *better* on a phone because you are standing next to the person you are checking in. The security argument pointed the other way too: reception sees the least PHI in the system, doctors and nurses the most, and it was reception that was excluded. `role-screens.test.ts` now fails the build if a role in `UserRole` has no tab — a curated subset is a decision, an empty app is an omission, and only one of them should be possible.
+
+**Mobile admin is read-only with three deliberate exceptions**, and the line
+between them and the rest is worth stating because "the phone is for looking,
+the desk is for doing" is a tidy rule that fails in specific places.
+
+- **A doctor's consultation fee.** One number that blocks *somebody else's*
+  work right now: reception's checkout refuses for an unpriced doctor, and the
+  receptionist discovers it standing in front of a patient. Making the owner
+  find a laptop to unblock a queue is the wrong trade, and in a small clinic
+  the owner is often the doctor being priced, holding a phone.
+- **Clinic settings** — currency, timezone, slot length, opening hours. A
+  five-field form, and currency is the first thing a new tenant changes: a
+  hospital in India seeing pounds on every invoice has a broken product until
+  it is fixed, and a laptop requirement makes that a bad first hour.
+
+- **Role assignment** — which roles a person may act as, and which they sign in
+  as. The owner-doctor case is the reason multi-role exists, and it is most
+  often set up by the owner, who is the person least likely to be at a desk.
+  Granting a role is also reversible and immediately visible, unlike the
+  account operations beside it.
+
+What stays on the web is unchanged and is not an omission: creating accounts,
+resetting passwords, deactivating staff, departments, the audit browser,
+invoice aging, and the full revenue table. Creating an account with a temporary
+password is not a one-handed task — the password has to be read out or written
+down — and getting a deactivation wrong locks someone out mid-shift. The audit
+browser is scanning and filtering, which is the thing a phone is worst at.
+
+Both mobile writes go through the same `@Roles(ADMIN)` routes as the web ones
+and are audited identically. The phone is an affordance on the boundary, never
+a second one.
+
 **Exception:** any public patient-facing page (book an appointment, hospital info) stays light and marketing-style. The dense treatment is for internal staff tools only.
 
 ## Current state
@@ -50,7 +108,7 @@ React Native ────┘         + Prisma ORM
 - `docker-compose.yml` — Postgres 16, db `hms_db`, user `hms_admin`, port 5432
 - `backend/` — NestJS 11 + Prisma 6. Auth (rotating refresh tokens, Argon2, login lockout), `RolesGuard`, global audit interceptor, PHI-safe exception filter, rate limiting, seed script. Feature modules: patients, doctors, appointments, medical-records, prescriptions, me/queue, wards, admissions, vitals, medications, medicines, pharmacy, billing, users, departments, admin, notifications, audit. 348 tests, no DB required.
 - `web/` — Next.js 15 App Router + Tailwind. Login, role-derived shell, ⌘K search, reception (check-in, booking, registration with duplicate detection, patients), doctor (queue, records, prescriptions), audit browser, nurse ward board (admit/transfer/discharge/drug chart), vitals history, medication round, pharmacy dispensing and inventory, billing invoices/payments/aging, admin dashboard/users/departments, forced password change, 15s live refresh. 74 tests.
-- `mobile/` — Expo/React Native. Doctor: queue, patient summary, prescribe. Nurse: ward board, bedside vitals, medication round. Pharmacist: read-only queue and stock alerts. Admin: read-only aggregate overview. Refresh token in expo-secure-store, 15-min idle biometric lock, **durable offline outbox** with idempotent replay. 91 tests. **Never executed on hardware — first device run is the real review.**
+- `mobile/` — Expo/React Native, SDK 52. **All six roles.** Doctor: queue, patient summary, prescribe. Nurse: ward board, bedside vitals, medication round. Pharmacist: read-only queue and stock alerts. Reception: today's schedule with check-in, patient search, registration with duplicate detection, booking against the tenant's slot grid. Billing: outstanding invoices and taking a payment. Admin: read-only aggregate overview. Refresh token in expo-secure-store, 15-min idle biometric lock, **durable offline outbox** with idempotent replay. API host is derived from the Expo dev server rather than a hand-set IP. 117 tests. **Reception and billing screens have never run on hardware.**
 
 ### Multi-tenancy: the database enforces it, not the queries
 
@@ -237,11 +295,71 @@ Postgres holds `Decimal(10,2)`, application arithmetic happens in integer minor 
 
 Overpayment is rejected rather than absorbed: a credit balance needs refunds and credit notes to be real, and swallowing the excess loses the patient's money silently.
 
+### Payment happens at check-in, before the doctor
+
+For six phases the flow stopped dead at `COMPLETED`. A doctor finished a
+consultation, the patient walked out, and nothing told anyone to charge them —
+there was not even a field recording what a doctor charges.
+
+**Reception raises the invoice at check-in**, one tap, fee prefilled:
+`POST /appointments/:id/invoice`. The patient arrives, pays at the desk, and
+then waits to be seen.
+
+This was built the other way round first — billable only once `COMPLETED` —
+which is the insurance-led model and wrong for the clinics this is aimed at.
+Billing after the consultation means chasing someone who has already left the
+building. Billable statuses are now `CHECKED_IN`, `IN_PROGRESS`, `COMPLETED`:
+not `SCHEDULED`, because a patient who has not arrived may never arrive, and not
+`CANCELLED`/`NO_SHOW`, which are revenue invented from an empty chair.
+
+Still a deliberate tap rather than automatic on check-in. Free follow-ups, staff
+patients and written-off visits are ordinary, and each auto-invoiced one would
+need voiding — an audit trail full of corrections is worse than one tap by the
+person the patient is standing in front of.
+
+**Paying is offered, never required, and must not become required.** Nothing in
+the clinical path checks whether an invoice exists or is settled: a doctor sees
+the patient regardless, and the charge can be raised or collected afterwards —
+which is why `COMPLETED` stays billable. That is a safety position rather than
+an omission. A payment gate reads as tidy and fails at the only moment it
+matters: the patient who deteriorated in the waiting room, the one whose card
+was declined, the one the clinic chose to treat for nothing. Refusing care over
+an unpaid balance is not a decision software should make on a clinic's behalf.
+`consultation-billing.spec.ts` asserts the *absence* of such a gate across the
+four clinical services, because adding one looks like an improvement to anyone
+who has not thought it through.
+
+**The fee is per-doctor** (`Doctor.consultationFee`), and **no fee is not zero**.
+Blank means checkout refuses and names the doctor; zero means the consultation
+is genuinely free. Collapsing them would make a forgotten price look like a
+decision, and the first anyone would know is a month of unbilled work. Admins
+set it on the doctors screen — which finally gives `PATCH /doctors/:id` a
+caller, six phases after it was written.
+
+**`Invoice.appointmentId` is UNIQUE**, so billing the same consultation twice is
+impossible rather than discouraged — including two receptionists tapping at
+once. Same argument as the appointment slot indexes: the constraint is the
+guarantee, the service check is only for the message.
+
+**The route lives on `AppointmentsController`, not `BillingController`.**
+`access-matrix.spec.ts` asserts every billing route is exactly
+`[ADMIN, BILLING_STAFF]` and calls that the cleanest role boundary in the
+system; adding reception there to save an import would have traded a real
+guarantee for a file location. Checkout is an appointment action anyway.
+
+**Who collects is a role-assignment question, not a code one.** Reception can
+raise the charge and read the amount back. Whether they may also take the money
+depends on whether that clinic also gives them `BILLING_STAFF` — which the
+multi-role work already supports, and which is exactly right for a small
+practice where reception *is* billing.
+
 ### Billing must not learn clinical facts
 
 Invoice lines are typed by billing staff or picked from service presets — never generated from prescriptions or dispensing. A line reading "Amoxicillin 500mg × 21" would route a medication history to billing past the role-shaped patient response. If auto-generation is ever added, the description must be a tariff code.
 
 Insurance fields go the other way: billing and reception get them, clinicians do not. Minimum-necessary cuts both directions.
+
+Consultation billing is the first auto-generated line, and it follows that rule to the letter: `CONS · Consultation`, with **no doctor name**. In a hospital with an oncology department, "Consultation — Dr Chen" tells billing which department the patient attended, which is a clinical fact reaching a role `toPatientResponse` withholds it from. `consultation-billing.spec.ts` asserts the description is a constant and that no template literal can ever be interpolated into it.
 
 ### Admin is operational, not clinical — and that had drifted
 
@@ -250,6 +368,148 @@ The rule has been stated since Phase 1. When Phase 6 added a test asserting it d
 Admin now holds **no clinical GET at all**. Bed-management *writes* remain, because that is how a mis-admission gets corrected and an admin without them has no route but a database console; each is audited. Reports are aggregates with no patient rows and no clinical breakdown.
 
 A stated rule with no test is a rule that drifts.
+
+### Takings are counted from payments, not from invoices
+
+`GET /admin/reports/finance` answers "what did we take today, this month, and
+over the last twelve" from `Payment.receivedAt`. The dashboard used to answer it
+by summing `amountPaid` over invoices **issued** in the window, which is a
+different question wearing the same label: it missed every payment made against
+an older invoice — the normal case for anything not settled at the desk — and
+counted the whole paid-to-date of a new invoice even where part arrived later.
+Both errors are silent. The figure looks plausible and moves when takings move.
+
+**Months are the hospital's.** A payment taken at 23:30 on the 31st in
+Asia/Kolkata is already the 1st in UTC, so bucketing on the stored instant moves
+that clinic's takings into the next month — and this is the number someone
+reconciles against a bank statement. `hospitalMonthKey` and `hospitalMonthRange`
+sit beside `hospitalDayRange` for the same reason it does.
+
+**The month axis is generated, not derived from the rows.** A month nobody paid
+in appears as a zero. Deriving the axis from the data is the standard way a
+revenue chart ends up flattering — the quiet months are simply not drawn, and
+the line only ever connects the good ones. Same argument for the payment-method
+split: every method is listed even at zero, because "no card payments today" and
+"the card row is missing" look identical on screen and only one of them means
+the till balances.
+
+**Billed and collected are always reported side by side.** Payment is
+deliberately not required before a consultation, so the gap between them is real
+— and reporting only what was charged is how a clinic mistakes invoices raised
+for money in the bank.
+
+### A per-doctor report is operational; a per-department one would not be
+
+`GET /admin/reports/doctors` gives headcount, appointments today and over seven
+days, whether a consultation fee is set, and revenue billed against collected. A
+doctor is staff, not a patient, and counting their appointments says nothing
+about who those appointments were with.
+
+The line to hold is the breakdown key. "Revenue by department" reads as
+operations and, in a hospital with an oncology department, is a statement about
+what patients attended for — the same leak `consultation-billing.spec.ts`
+refuses in an invoice description, arriving somewhere nobody would question it.
+`reports.spec.ts` asserts the *absence* of any patient or clinical field in
+those two service methods, and pins the select down to
+`appointment: { select: { doctorId: true } }` — `appointment: true` would pull a
+`patientId` into a finance report as valid, unremarkable data.
+
+Unpriced doctors are surfaced on the dashboard rather than left to be
+discovered, because a doctor with no fee breaks reception's checkout and the
+receptionist finds out standing in front of the patient.
+
+### Admin sees attendance and money, never clinical content
+
+This rule replaces "admin sees no patient identity anywhere", which held for six
+phases and is no longer true. `GET /admin/reports/consultations` returns the
+patients behind a count on the owner's daily activity screen: name, appointment
+time, whether they attended, what they were charged, whether they paid.
+
+That was asked for and is defensible. An owner reconciling their own clinic
+needs to know a doctor's three consultations were three real people who were
+billed, and every field crossing over is one reception already sees at the desk
+and billing sees on an invoice. It is the same information, gathered by doctor
+and day.
+
+**What still does not cross, and why the line is there:**
+
+- `Appointment.reason` — typed by reception at booking and routinely "chest
+  pain". It sits on the same record as everything above, one careless `include`
+  away, which is why the test asserts the word never appears in that method.
+- Prescription contents. `prescriptionIssued` is a **boolean**: that a doctor
+  prescribed something is operational; *what* they prescribed names a condition,
+  and an antiretroviral or an antipsychotic on an owner's screen tells them
+  something the patient told their doctor.
+- Diagnoses, notes, allergies, vitals, admissions.
+
+**The dishonest version of this change was available.** Putting the route on
+`AdminController` leaves `access-matrix.spec.ts`'s "no clinical GET at all"
+green, because that test keys on clinical *controllers* — the rule would have
+stayed in the file saying something that had stopped being true. A safety net
+you have quietly stepped around is worse than none, because the next person
+reads it and believes it. So the rule was restated and asserted directly against
+the one endpoint that carries identity.
+
+`toLedgerRow` is an explicit allowlist rather than a spread of a Prisma row, and
+a test pins its exact key set. A spread passes every "does it contain X" check
+while silently carrying the next field somebody adds to the model.
+
+`ADMIN_CONSULTATION_LEDGER` is its own audit action: "who looked up our patient
+list, and when" must be answerable without unpicking a generic report action.
+
+### The owner's daily view answers "who and how much", and links to who attended
+
+`GET /admin/reports/staff-activity?date=` gives one day, one row per member of
+staff: consultations and revenue per doctor, registrations and bookings per
+receptionist, money taken per billing user, dispensing per pharmacist, vitals
+and doses per nurse. It is the request a clinic owner actually has — reconciling
+the day, and checking the numbers a doctor reports match the ones the system
+recorded.
+
+**Every count is a link.** Booked, completed and no-show open the patients
+behind them — see "Admin sees attendance and money" above for exactly what
+crosses. A number an owner cannot check is a number they have to take on trust,
+which is the opposite of why they opened the screen. Zero is deliberately not a
+link: a link that opens an empty panel teaches people the links do not work.
+
+For records, prescriptions or a diagnosis the answer is still the one multi-role
+provides: **switch to a clinical role you hold and look as that role.** The
+audit log then records that they viewed clinical data while acting as a doctor —
+honest, and what a regulator would ask for.
+
+**The drill-down is the consultation ledger, not the audit log.** Rows briefly
+linked to `/audit?userId=&date=`, and that was removed: the audit trail is a
+list of API actions — `PATIENT_CREATE`, `APPOINTMENT_STATUS_CHANGE`,
+`QUEUE_VIEW` — and an owner reading it learns what the *application* called,
+not what their staff did. Engineering vocabulary behind an ordinary-looking link
+makes a management screen feel like a debugging tool. The audit browser keeps
+its own nav item, with the same `?userId=` and `?date=` filters, for the
+compliance question it actually answers; it is simply not the natural next click
+from a report.
+
+**Reads are not counted.** `QUEUE_VIEW` and `PATIENT_SEARCH` measure how long a
+screen was open, not what was done; a productivity figure built on them rewards
+leaving a list up, and is the first number a member of staff would rightly
+argue with. Only actions that changed something are counted, and
+`reports.spec.ts` asserts no read-only action appears in `ACTIVITY_ACTIONS`.
+
+**Refusals are not counted per person, and were removed after being built.**
+Beside someone's registrations and bookings, a denial count reads as a
+performance metric and is not one — most denials are a stale tab, a bookmarked
+URL, or a role that changed this morning. The signal is not lost, only kept
+where it means something: the dashboard's hospital-wide denied count over 24
+hours, and the audit log itself. For the same reason a refused action counts
+towards nothing at all, because it changed nothing.
+
+**Check-ins, cancellations and reschedules are one figure**, because the audit
+log records that an appointment's status changed and not what it changed *to*.
+Splitting them means recording the new status on the audit row — worth doing if
+the distinction is ever needed, and dishonest to fake by guessing.
+
+**A person appears under every role they hold, not just their default** — the
+owner-doctor again. Counting them only as an administrator would leave their
+consultations attributed to nobody, and a day's takings that do not add up is
+worse than a name appearing in two tables.
 
 ### What the live run found
 

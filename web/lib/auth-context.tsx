@@ -27,6 +27,16 @@ interface AuthState {
    * which of the person's roles is in use.
    */
   switchRole: (role: UserRole) => Promise<AuthUser>;
+  /**
+   * Re-read the session from the server.
+   *
+   * The server resolves the hospital's currency and timezone on every request,
+   * but this context holds the last copy it was handed — at sign-in, at
+   * bootstrap, or at a role switch. An admin who changed the currency kept
+   * seeing the old symbol until the next sign-in, which reads as the setting
+   * not having saved at all.
+   */
+  refreshUser: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -87,6 +97,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return next;
   }, []);
 
+  const refreshUser = useCallback(async () => {
+    // Failure is swallowed: a stale currency symbol is cosmetic, and ending the
+    // session over one would turn it into a real problem. A genuinely dead
+    // session trips the expiry handler on the next request anyway.
+    try {
+      setUser(await api<AuthUser>('/auth/me'));
+    } catch {
+      /* keep the copy we have */
+    }
+  }, []);
+
   const signOut = useCallback(async () => {
     await apiLogout();
     setUser(null);
@@ -94,8 +115,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [router]);
 
   const value = useMemo(
-    () => ({ user, loading, signIn, signOut, switchRole }),
-    [user, loading, signIn, signOut, switchRole],
+    () => ({ user, loading, signIn, signOut, switchRole, refreshUser }),
+    [user, loading, signIn, signOut, switchRole, refreshUser],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

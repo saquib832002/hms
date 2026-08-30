@@ -10,6 +10,7 @@ import {
 import { AppState, AppStateStatus } from 'react-native';
 import * as LocalAuthentication from 'expo-local-authentication';
 import {
+  fetchMe,
   login as apiLogin,
   logout as apiLogout,
   restoreSession,
@@ -36,6 +37,19 @@ interface AuthState {
    * use, and the choice is recorded on every audited action afterwards.
    */
   switchRole: (role: UserRole) => Promise<void>;
+  /**
+   * Re-read the session from the server.
+   *
+   * The server already sends the hospital's currency and timezone on every
+   * authenticated request, but this context holds the last copy it was handed —
+   * at sign-in, at restore, or at a role switch. So an admin who changed the
+   * currency kept seeing the old symbol until they signed out, which reads as
+   * the setting not having saved.
+   *
+   * Cheaper and less alarming than making them sign out, and it is the same
+   * call `restoreSession` already makes.
+   */
+  refreshUser: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -104,6 +118,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(next);
   }, []);
 
+  const refreshUser = useCallback(async () => {
+    // Failure is swallowed: a stale currency symbol is a cosmetic problem, and
+    // dropping the session over one would turn it into a real one. If the
+    // session has genuinely ended, the next request trips the expiry handler.
+    try {
+      setUser(await fetchMe());
+    } catch {
+      /* keep the copy we have */
+    }
+  }, []);
+
   const signOut = useCallback(async () => {
     await apiLogout(pushToken.current ?? undefined);
     await unregisterPush();
@@ -137,8 +162,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [signOut]);
 
   const value = useMemo(
-    () => ({ user, loading, locked, signIn, signOut, unlock, switchRole }),
-    [user, loading, locked, signIn, signOut, unlock, switchRole],
+    () => ({ user, loading, locked, signIn, signOut, unlock, switchRole, refreshUser }),
+    [user, loading, locked, signIn, signOut, unlock, switchRole, refreshUser],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

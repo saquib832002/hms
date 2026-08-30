@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { api } from '@/lib/api';
-import type { ActivityReport, AdminDashboard, StaffReport } from '@/lib/types';
+import type { ActivityReport, AdminDashboard, FinanceReport, StaffReport } from '@/lib/types';
 import { titleCase } from '@/lib/format';
 import { Card, ErrorState, Skeleton } from '@/components/ui/primitives';
 import { Freshness } from '@/components/freshness';
@@ -24,19 +24,24 @@ export default function AdminDashboardPage() {
   const [dashboard, setDashboard] = useState<AdminDashboard | null>(null);
   const [activity, setActivity] = useState<ActivityReport | null>(null);
   const [staff, setStaff] = useState<StaffReport | null>(null);
+  const [finance, setFinance] = useState<FinanceReport | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [d, a, s] = await Promise.all([
+      // Only three months of trend are needed for the headline figures; the
+      // full twelve are fetched by the Reports screen, which actually draws it.
+      const [d, a, s, f] = await Promise.all([
         api<AdminDashboard>('/admin/dashboard'),
         api<ActivityReport>('/admin/reports/activity?days=7'),
         api<StaffReport>('/admin/reports/staff'),
+        api<FinanceReport>('/admin/reports/finance?months=3'),
       ]);
       setDashboard(d);
       setActivity(a);
       setStaff(s);
+      setFinance(f);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not load the dashboard');
     }
@@ -55,7 +60,10 @@ export default function AdminDashboardPage() {
     <div className="scroll-thin flex-1 overflow-y-auto p-4">
       <div className="mb-3 flex items-center justify-between">
         <p className="text-sm text-text-muted">
-          Operational figures only — no patient data is reachable from this screen.
+          Operational figures only — no patient data is reachable from this screen.{' '}
+          <Link href="/admin/reports" className="text-primary hover:underline">
+            Full reports →
+          </Link>
         </p>
         <Freshness
           lastUpdated={lastUpdated}
@@ -80,27 +88,59 @@ export default function AdminDashboardPage() {
               sub={`${dashboard.occupancy.occupied} of ${dashboard.occupancy.beds} beds`}
               tone={dashboard.occupancy.percent > 90 ? 'danger' : undefined}
             />
+            {/* Takings, counted from payments received today — not from
+                invoices raised today, which is a different number and the one
+                this dashboard used to show. */}
             <Metric
-              label="Outstanding"
-              value={fmt(dashboard.finance.outstanding)}
-              sub={`${dashboard.finance.openInvoices} open invoices`}
+              label="Collected today"
+              value={finance ? fmt(finance.collected.today) : '—'}
+              sub={finance ? `${finance.collected.paymentsToday} payments` : undefined}
+              tone="success"
               mono
             />
             <Metric
-              label="Collected, 7 days"
-              value={fmt(dashboard.finance.collectedLastSevenDays)}
-              tone="success"
+              label="Collected this month"
+              value={finance ? fmt(finance.collected.thisMonth) : '—'}
+              sub={finance ? `${finance.collected.paymentsThisMonth} payments` : undefined}
               mono
             />
           </div>
 
           <div className="mt-3 grid grid-cols-4 gap-3">
             <Metric
+              label="Outstanding"
+              value={fmt(dashboard.finance.outstanding)}
+              sub={`${dashboard.finance.openInvoices} open · ${
+                finance ? fmt(finance.aging.totalOverdue) : '—'
+              } overdue`}
+              // Compared as a string. `Number("1234.50") > 0` works and is the
+              // habit that later becomes `Number(a) + Number(b)` — money never
+              // becomes a float in this codebase, not even for a comparison.
+              tone={finance && finance.aging.totalOverdue !== '0.00' ? 'warning' : undefined}
+              mono
+            />
+            <Metric
               label="No-show rate, 7 days"
               value={`${dashboard.appointments.noShowRate}%`}
               sub={`${dashboard.appointments.noShowsLastSevenDays} of ${dashboard.appointments.lastSevenDays}`}
               tone={dashboard.appointments.noShowRate > 15 ? 'warning' : undefined}
             />
+            {/* Unpriced doctors are a dashboard item because they break
+                reception's checkout — the receptionist finds out standing in
+                front of a patient, which is the worst place to find out. */}
+            <Metric
+              label="Doctors"
+              value={dashboard.staff.doctors}
+              tone={dashboard.staff.doctorsWithoutFee > 0 ? 'warning' : undefined}
+              sub={
+                dashboard.staff.doctorsWithoutFee > 0
+                  ? `${dashboard.staff.doctorsWithoutFee} with no fee set`
+                  : 'all priced'
+              }
+            />
+          </div>
+
+          <div className="mt-3 grid grid-cols-4 gap-3">
             <Metric label="Active staff" value={dashboard.staff.active} />
             <Metric
               label="Locked out"
@@ -119,6 +159,16 @@ export default function AdminDashboardPage() {
               value={dashboard.security.deniedRequestsLastDay}
               tone={dashboard.security.deniedRequestsLastDay > 20 ? 'danger' : undefined}
               sub="See the audit log"
+            />
+            {/* Returned by the API since the dashboard was written and rendered
+                nowhere until now. Beds free is the other one an admin actually
+                acts on — an occupancy percentage does not tell you whether the
+                next admission has somewhere to go. */}
+            <Metric
+              label="Beds available"
+              value={dashboard.occupancy.available}
+              tone={dashboard.occupancy.available === 0 ? 'danger' : undefined}
+              sub={`${dashboard.catalogue.medicines} medicines in catalogue`}
             />
           </div>
 

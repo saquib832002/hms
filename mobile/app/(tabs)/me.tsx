@@ -1,12 +1,12 @@
 import { useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useAuth } from '@/lib/auth-context';
 import { apiOrigin, switchableRoles } from '@/lib/api';
 import { clearQueueCache } from '@/lib/use-queue';
 import { useOutbox } from '@/lib/outbox-context';
 import { theme } from '@/lib/theme';
-import { Button, Card } from '@/components/ui';
+import { AppHeader, Button, Card, Screen } from '@/components/ui';
+import type { UserRole } from '@/lib/types';
 
 const ROLE_LABEL: Record<string, string> = {
   DOCTOR: 'Doctor',
@@ -16,6 +16,72 @@ const ROLE_LABEL: Record<string, string> = {
   RECEPTIONIST: 'Reception',
   BILLING_STAFF: 'Billing',
 };
+
+/**
+ * What the app does for the role currently being worn.
+ *
+ * WHY THIS IS PER-ROLE AND WHY IT IS MAINTAINED
+ * ---------------------------------------------
+ * The card this replaces read "Appointment booking, patient registration,
+ * billing and full history review are web-only" — and by the time anyone read
+ * it again, all four of those had been built. Stale copy describing a
+ * limitation that no longer exists is worse than no copy: it is the app telling
+ * its own users not to look for a feature that is one tap away, and it is the
+ * same failure as the comment that justified locking reception out of mobile
+ * for six phases.
+ *
+ * Keyed on the *active* role rather than every role held, because that is what
+ * the tab bar is showing right now. Switching hats changes this list, which is
+ * itself a useful demonstration of what switching does.
+ */
+const CAN_DO: Record<UserRole, string[]> = {
+  DOCTOR: [
+    'Today’s queue, with waiting times',
+    'Patient summary — allergies, recent records, current medicines',
+    'Write a prescription',
+    'Complete a consultation and call the next patient',
+  ],
+  NURSE: [
+    'Ward board — admit, transfer and discharge',
+    'Bedside vitals',
+    'Medication round and the drug chart',
+    'Vitals and doses save offline and send themselves when signal returns',
+  ],
+  PHARMACIST: ['Dispensing queue', 'Stock and low-stock alerts'],
+  RECEPTIONIST: [
+    'The schedule for any day — not just today',
+    'Check a patient in',
+    'Register a patient, with duplicate detection',
+    'Book, reschedule and cancel appointments',
+    'Raise the consultation invoice at check-in',
+  ],
+  BILLING_STAFF: ['Outstanding invoices', 'Take a payment'],
+  ADMIN: [
+    'Overview — appointments, occupancy, staff and denied requests',
+    'Takings today and this month, and a six-month trend',
+    'Per-doctor workload and revenue',
+    'Daily activity — who worked, what they did, and one person’s actions for a day',
+    'Set a doctor’s consultation fee',
+    'Clinic settings — currency, timezone, slot length, opening hours',
+    'Staff roles — who may act as what',
+  ],
+};
+
+/**
+ * Kept deliberately, not by omission.
+ *
+ * Every line here is a decision with a reason recorded in `CLAUDE.md`. If one
+ * of these ever ships on mobile, this list has to shrink on the same day — an
+ * inaccurate "we don't do that" is how a working feature stays invisible.
+ */
+const WEB_ONLY = [
+  'Creating staff accounts and resetting passwords — the temporary password has to be read out or written down',
+  'Deactivating staff — getting it wrong locks someone out mid-shift',
+  'Departments',
+  'The full audit browser across all staff — scanning and filtering, which a phone is worst at. One person’s day is on the phone',
+  'Invoice aging and the full twelve-month revenue table',
+  'Side-by-side history review and bulk entry',
+];
 
 export default function MeScreen() {
   const { user, signOut, switchRole } = useAuth();
@@ -37,12 +103,26 @@ export default function MeScreen() {
   }
 
   return (
-    <SafeAreaView style={s.root} edges={['top']}>
-      <View style={s.header}>
-        <Text style={s.title}>Account</Text>
-      </View>
+    <Screen>
+      <AppHeader title={'Account'} />
 
-      <View style={s.body}>
+      {/*
+        Scrollable, and it was not.
+        --------------------------
+        The content grew — roles held, the switcher, pending sync, two capability
+        lists — and Sign out sat below the fold on a plain View with no way to
+        reach it. A sign-out button you cannot reach is not a cosmetic problem
+        on a shared clinical device: it is the control that clears the cached
+        queue and any queued bedside writes off a phone somebody is handing over.
+
+        `paddingBottom` clears the tab bar as well as the home indicator, so the
+        last button is fully tappable rather than half under the bar.
+      */}
+      <ScrollView
+        contentContainerStyle={s.scroll}
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={s.body}>
         <Card>
           <Text style={s.name}>{user?.fullName}</Text>
           <Text style={s.meta}>{user?.email}</Text>
@@ -53,10 +133,31 @@ export default function MeScreen() {
         </Card>
 
         {/*
-          Only when there is a real choice. Most staff hold one role, and an
-          owner-doctor may hold roles this app has no screens for — those are
-          filtered out rather than offered and then refused.
+          Roles held, stated whether or not there is a choice.
+          ---------------------------------------------------
+          The switcher below only appears when someone holds two or more, which
+          is right — but it meant a single-role account and a broken switcher
+          looked *identical*: nothing on screen either way. An owner-doctor
+          reported the app had no role switching, and there was no way, from
+          inside the app, to tell whether they held one role or the feature had
+          failed. That ambiguity cost three rounds of guessing.
+
+          So the roles the server says this session holds are always shown. It
+          is one line, and it turns an invisible state into a checkable fact.
         */}
+        <Card>
+          <Text style={s.sectionTitle}>Roles held</Text>
+          <Text style={s.note}>
+            {(user?.availableRoles ?? []).map((r) => ROLE_LABEL[r] ?? r).join(' · ') || '—'}
+          </Text>
+          {roles.length < 2 ? (
+            <Text style={s.note}>
+              Only one role, so there is nothing to switch between. An administrator can grant
+              more from Staff roles on the Overview tab, or Staff &amp; Users on the web.
+            </Text>
+          ) : null}
+        </Card>
+
         {roles.length > 1 ? (
           <Card>
             <Text style={s.sectionTitle}>Acting as</Text>
@@ -112,12 +213,30 @@ export default function MeScreen() {
         </Card>
 
         <Card>
-          <Text style={s.sectionTitle}>What this app does not do</Text>
-          <Text style={s.note}>
-            Appointment booking, patient registration, billing and full history
-            review are web-only. Mobile covers what can reasonably be done
-            standing up.
+          <Text style={s.sectionTitle}>
+            What you can do here as {ROLE_LABEL[user?.role ?? ''] ?? 'this role'}
           </Text>
+          {(CAN_DO[user?.role as UserRole] ?? []).map((line) => (
+            <View key={line} style={s.bulletRow}>
+              <Text style={s.bulletDot}>•</Text>
+              <Text style={s.bullet}>{line}</Text>
+            </View>
+          ))}
+          {roles.length > 1 ? (
+            <Text style={s.footnote}>
+              Switching role from the header changes this list — you act as one role at a time.
+            </Text>
+          ) : null}
+        </Card>
+
+        <Card>
+          <Text style={s.sectionTitle}>Still on the web</Text>
+          {WEB_ONLY.map((line) => (
+            <View key={line} style={s.bulletRow}>
+              <Text style={s.bulletDot}>•</Text>
+              <Text style={s.bullet}>{line}</Text>
+            </View>
+          ))}
         </Card>
 
         {__DEV__ && (
@@ -129,24 +248,27 @@ export default function MeScreen() {
 
         <Button label="Sign out" variant="danger" onPress={() => void onSignOut()} />
       </View>
-    </SafeAreaView>
+      </ScrollView>
+    </Screen>
   );
 }
 
 const s = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.color.bg },
-  header: {
-    paddingHorizontal: theme.space(4),
-    paddingBottom: theme.space(2),
-    backgroundColor: theme.color.surface,
-    borderBottomWidth: 1,
-    borderBottomColor: theme.color.border,
+  scroll: { paddingBottom: theme.space(10) },
+  body: { padding: theme.space(3), gap: theme.space(3) },
+  name: { ...theme.font.heading, color: theme.color.text },
+  meta: { ...theme.font.small, color: theme.color.textMuted, marginTop: 2 },
+  sectionTitle: { ...theme.font.small, color: theme.color.text, marginBottom: 4 },
+  note: { ...theme.font.small, color: theme.color.textMuted, lineHeight: 19 },
+  error: { ...theme.font.small, color: theme.color.danger, marginTop: 6 },
+
+  bulletRow: { flexDirection: 'row', gap: theme.space(2), marginTop: theme.space(1) },
+  bulletDot: { ...theme.font.small, color: theme.color.textSubtle, lineHeight: 19 },
+  bullet: { ...theme.font.small, color: theme.color.textMuted, lineHeight: 19, flex: 1 },
+  footnote: {
+    ...theme.font.caption,
+    color: theme.color.textSubtle,
+    lineHeight: 16,
+    marginTop: theme.space(2),
   },
-  title: { fontSize: 24, fontWeight: '800', color: theme.color.text },
-  body: { padding: theme.space(3) },
-  name: { fontSize: 18, fontWeight: '700', color: theme.color.text },
-  meta: { fontSize: 13, color: theme.color.textMuted, marginTop: 2 },
-  sectionTitle: { fontSize: 13, fontWeight: '700', color: theme.color.text, marginBottom: 4 },
-  note: { fontSize: 13, color: theme.color.textMuted, lineHeight: 19 },
-  error: { fontSize: 13, color: theme.color.danger, marginTop: 6 },
 });

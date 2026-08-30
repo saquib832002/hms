@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
 import { AppointmentsService } from './appointments.service';
+import { BillingService } from '../billing/billing.service';
 import { CreateAppointmentDto } from './dto/create-appointment.dto';
 import { UpdateAppointmentDto } from './dto/update-appointment.dto';
 import { QueryAppointmentsDto } from './dto/query-appointments.dto';
@@ -12,7 +13,10 @@ import { AuthUser } from '../common/types/auth-user';
 
 @Controller('appointments')
 export class AppointmentsController {
-  constructor(private readonly appointments: AppointmentsService) {}
+  constructor(
+    private readonly appointments: AppointmentsService,
+    private readonly billing: BillingService,
+  ) {}
 
   @Get()
   @Roles(UserRole.ADMIN, UserRole.RECEPTIONIST, UserRole.DOCTOR, UserRole.NURSE)
@@ -60,5 +64,29 @@ export class AppointmentsController {
     @CurrentUser() user: AuthUser,
   ) {
     return this.appointments.changeStatus(id, dto.status, user);
+  }
+
+  /**
+   * Raise the invoice for this consultation. Reception's checkout action.
+   *
+   * WHY IT IS HERE AND NOT ON BillingController
+   * -------------------------------------------
+   * `access-matrix.spec.ts` asserts every billing route is exactly
+   * [ADMIN, BILLING_STAFF] and calls that "the cleanest role boundary in the
+   * system". Adding reception there to make one screen convenient would trade a
+   * real guarantee for a route location, and the test would have been right to
+   * fail.
+   *
+   * Checkout is an *appointment* action anyway: it is the last step of the
+   * visit, taken by the person the patient is standing in front of. Reception
+   * can raise the charge and read back the amount to the patient; whether they
+   * may then *collect* it is a separate question answered by whether that
+   * clinic also gives them BILLING_STAFF.
+   */
+  @Post(':id/invoice')
+  @Roles(UserRole.ADMIN, UserRole.RECEPTIONIST)
+  @AuditAction('APPOINTMENT_INVOICE_RAISED')
+  raiseInvoice(@Param('id', ParseIntPipe) id: number) {
+    return this.billing.invoiceForAppointment(id);
   }
 }

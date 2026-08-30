@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Modal, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { api } from '@/lib/api';
+import { useLiveData } from '@/lib/use-live-data';
 import { useOutbox } from '@/lib/outbox-context';
 import { theme } from '@/lib/theme';
 import { time } from '@/lib/format';
-import { Button, Card, ErrorBanner, StatusPill } from '@/components/ui';
+import { AppHeader, Button, Card, ErrorBanner, Screen, StatusPill } from '@/components/ui';
 import type { Dose, DoseStatus, MedicationRound, Ward } from '@/lib/types';
 
 /**
@@ -44,14 +44,14 @@ export default function MedsScreen() {
     }
   }, [wardId]);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  // Refetches on focus and every 15s. A dose signed for by someone else must
+  // not still read as due — that is the path to a double administration.
+  useLiveData(load);
 
   return (
-    <SafeAreaView style={s.root} edges={['top']}>
-      <View style={s.header}>
-        <Text style={s.title}>Medications</Text>
+    <Screen>
+      <AppHeader title="Medications" subtitle="Drug round" />
+      <View style={s.pickerBar}>
         <View style={s.wardTabs}>
           {wards.map((w) => (
             <Pressable
@@ -108,7 +108,7 @@ export default function MedsScreen() {
       </ScrollView>
 
       <RecordDoseModal dose={acting} onClose={() => setActing(null)} onRecorded={() => void load()} />
-    </SafeAreaView>
+    </Screen>
   );
 }
 
@@ -156,7 +156,7 @@ function Group({
                 <View style={{ flexDirection: 'row', marginTop: 6 }}>
                   <StatusPill
                     label={d.status === 'GIVEN' ? `Given${d.givenBy ? ` · ${d.givenBy}` : ''}` : d.status}
-                    bg={d.status === 'GIVEN' ? theme.color.successSoft : '#eef0f2'}
+                    bg={d.status === 'GIVEN' ? theme.color.successSoft : theme.color.surfaceSunken}
                     fg={d.status === 'GIVEN' ? theme.color.success : theme.color.textMuted}
                   />
                 </View>
@@ -272,15 +272,7 @@ function RecordDoseModal({
 }
 
 const s = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.color.bg },
-  header: {
-    paddingHorizontal: theme.space(4),
-    paddingBottom: theme.space(2),
-    backgroundColor: theme.color.surface,
-    borderBottomWidth: 1,
-    borderBottomColor: theme.color.border,
-  },
-  title: { fontSize: 22, fontWeight: '800', color: theme.color.text },
+  pickerBar: { paddingHorizontal: theme.space(4), paddingTop: theme.space(4) },
   wardTabs: { flexDirection: 'row', gap: theme.space(2), marginTop: theme.space(2) },
   wardTab: {
     paddingHorizontal: theme.space(3),
@@ -291,27 +283,26 @@ const s = StyleSheet.create({
     borderColor: theme.color.border,
   },
   wardTabActive: { backgroundColor: theme.color.primarySoft, borderColor: theme.color.primary },
-  wardTabText: { fontSize: 13, color: theme.color.textMuted },
+  wardTabText: { ...theme.font.small, color: theme.color.textMuted },
   wardTabTextActive: { color: theme.color.primary, fontWeight: '700' },
   syncBar: { backgroundColor: theme.color.warningSoft, paddingVertical: 5 },
-  syncText: { color: '#6b5314', fontSize: 12, textAlign: 'center' },
+  syncText: { color: theme.color.warning, ...theme.font.caption, textAlign: 'center' },
   list: { padding: theme.space(3) },
   group: {
-    fontSize: 12,
-    fontWeight: '800',
+    ...theme.font.caption,
     letterSpacing: 0.6,
     textTransform: 'uppercase',
     marginTop: theme.space(3),
     marginBottom: theme.space(2),
   },
   rowTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  bed: { fontSize: 13, fontWeight: '800', color: theme.color.textMuted, letterSpacing: 0.5 },
-  due: { fontSize: 14, fontWeight: '700', color: theme.color.text },
+  bed: { ...theme.font.small, color: theme.color.textMuted, letterSpacing: 0.5 },
+  due: { ...theme.font.small, color: theme.color.text },
   nameLine: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
-  name: { fontSize: 17, fontWeight: '700', color: theme.color.text },
+  name: { ...theme.font.heading, color: theme.color.text },
   allergyDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: theme.color.danger },
-  medicine: { fontSize: 15, color: theme.color.text, marginTop: 2 },
-  muted: { fontSize: 13, color: theme.color.textMuted, marginTop: 2 },
+  medicine: { ...theme.font.body, color: theme.color.text, marginTop: 2 },
+  muted: { ...theme.font.small, color: theme.color.textMuted, marginTop: 2 },
   modalRoot: { flex: 1, justifyContent: 'flex-end' },
   modalBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.25)' },
   modalCard: {
@@ -321,19 +312,19 @@ const s = StyleSheet.create({
     padding: theme.space(5),
     paddingBottom: theme.space(10),
   },
-  modalBed: { fontSize: 13, fontWeight: '800', color: theme.color.textMuted, letterSpacing: 0.5 },
-  modalName: { fontSize: 22, fontWeight: '800', color: theme.color.text },
-  modalMedicine: { fontSize: 17, color: theme.color.text, marginTop: 2 },
-  modalPrompt: { fontSize: 15, fontWeight: '700', color: theme.color.text, marginBottom: theme.space(2) },
+  modalBed: { ...theme.font.small, color: theme.color.textMuted, letterSpacing: 0.5 },
+  modalName: { ...theme.font.display, color: theme.color.text },
+  modalMedicine: { ...theme.font.heading, color: theme.color.text, marginTop: 2 },
+  modalPrompt: { ...theme.font.body, color: theme.color.text, marginBottom: theme.space(2) },
   allergyWarn: {
     marginTop: theme.space(3),
     backgroundColor: theme.color.dangerSoft,
     borderWidth: 1,
-    borderColor: '#f2c4be',
+    borderColor: 'rgba(255,90,82,0.45)',
     borderRadius: theme.radius.sm,
     padding: theme.space(3),
   },
-  allergyWarnText: { color: '#8a2a1f', fontSize: 13, fontWeight: '600' },
+  allergyWarnText: { color: theme.color.dangerText, ...theme.font.small },
   input: {
     backgroundColor: theme.color.surface,
     borderWidth: 1,
@@ -341,7 +332,7 @@ const s = StyleSheet.create({
     borderRadius: theme.radius.sm,
     padding: theme.space(3),
     minHeight: 90,
-    fontSize: 16,
+    ...theme.font.input,
     color: theme.color.text,
     textAlignVertical: 'top',
     marginBottom: theme.space(3),

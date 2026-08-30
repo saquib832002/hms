@@ -386,6 +386,17 @@ model Doctor {
   department     Department? @relation(fields: [departmentId], references: [id])
   phone          String?
   registrationNo String?
+
+  /// What this doctor charges for a consultation, in the hospital's currency.
+  ///
+  /// Nullable, and the absence is meaningful: a doctor with no fee set cannot
+  /// be billed for at checkout, and reception is told so by name rather than
+  /// being shown a zero. Charging nothing and having forgotten to set a price
+  /// look identical otherwise, and only one of them should be silent.
+  ///
+  /// Decimal, never a float — see billing/money.ts.
+  consultationFee Decimal? @db.Decimal(10, 2)
+
   createdAt      DateTime    @default(now())
 
   appointments   Appointment[]
@@ -501,11 +512,20 @@ model Appointment {
   updatedAt   DateTime          @updatedAt
 
   prescription Prescription?
+  invoice      Invoice?
 
-  // A doctor cannot be double-booked for the same slot. Enforced in the
-  // database as well as the service — a race between two receptionists
-  // clicking "book" at the same moment would slip past an application check.
-  @@unique([doctorId, scheduledAt], name: "doctor_slot_unique")
+  // NO plain @@unique here, and the reason matters.
+  //
+  // Two slot rules are enforced in the database — a doctor cannot be in two
+  // places at once, and neither can a patient — but both must ignore cancelled
+  // and no-show rows. A plain unique index cannot express that, so a cancelled
+  // appointment would hold its slot forever and the freed time could never be
+  // rebooked. Prisma cannot declare a *partial* unique index, so both live in
+  // `prisma/sql/appointment-slots.sql`, applied by `npm run db:constraints`.
+  //
+  // This is the same reason Postgres was chosen over MySQL: the constraint is
+  // the real guarantee, and an application check loses the race between two
+  // receptionists tapping "book" in the same second.
   @@index([doctorId, scheduledAt])
   @@index([patientId, scheduledAt])
   @@index([status, scheduledAt])
@@ -904,6 +924,19 @@ model Invoice {
   /// that has to still exist.
   voidedAt    DateTime?
   voidReason  String?
+
+  /// The consultation this invoice bills for, when it came from one.
+  ///
+  /// UNIQUE, and that is the point: it makes billing the same consultation
+  /// twice impossible rather than merely discouraged. Reception tapping "Bill"
+  /// a second time — or two receptionists tapping it at once — gets a conflict
+  /// from the database, not a duplicate charge the patient has to dispute.
+  ///
+  /// Nullable because ad-hoc invoices exist: a dressing, a certificate, a
+  /// charge raised without an appointment behind it. Postgres allows many NULLs
+  /// under a unique constraint, so those are unaffected.
+  appointment   Appointment? @relation(fields: [appointmentId], references: [id])
+  appointmentId Int?         @unique
 
   items    InvoiceItem[]
   payments Payment[]

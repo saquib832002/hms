@@ -29,41 +29,47 @@ export default function LoginScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
       <View style={s.inner}>
+        <View style={s.mark}>
+          <Text style={s.markGlyph}>✚</Text>
+        </View>
         <Text style={s.brand}>
           Meridian<Text style={{ color: theme.color.primary }}>HMS</Text>
         </Text>
         <Text style={s.sub}>Clinical sign in</Text>
 
-        <TextInput
-          style={s.input}
-          value={email}
-          onChangeText={setEmail}
-          placeholder="Email"
-          placeholderTextColor={theme.color.textSubtle}
-          autoCapitalize="none"
-          autoCorrect={false}
-          keyboardType="email-address"
-          textContentType="username"
-        />
-        <TextInput
-          style={s.input}
-          value={password}
-          onChangeText={setPassword}
-          placeholder="Password"
-          placeholderTextColor={theme.color.textSubtle}
-          secureTextEntry
-          textContentType="password"
-          onSubmitEditing={() => void submit()}
-        />
+        <View style={s.card}>
+          <TextInput
+            style={s.input}
+            value={email}
+            onChangeText={setEmail}
+            placeholder="Email"
+            placeholderTextColor={theme.color.textSubtle}
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="email-address"
+            textContentType="username"
+          />
+          <TextInput
+            style={s.input}
+            value={password}
+            onChangeText={setPassword}
+            placeholder="Password"
+            placeholderTextColor={theme.color.textSubtle}
+            secureTextEntry
+            textContentType="password"
+            onSubmitEditing={() => void submit()}
+          />
 
         {error && <ErrorBanner message={error} />}
 
-        <Button label={busy ? 'Signing in…' : 'Sign in'} onPress={() => void submit()} busy={busy} />
+          <Button label="Sign in" onPress={() => void submit()} busy={busy} />
+        </View>
 
         {__DEV__ && (
           <Text style={s.devHint}>
-            doctor@demo.test · nurse@demo.test{'\n'}pharmacy@demo.test{'\n'}ChangeMe123!{'\n'}
-            Set the API address in app.json → expo.extra.apiOrigin
+            doctor@demo.test · nurse@demo.test · pharmacy@demo.test{'\n'}
+            reception@demo.test · billing@demo.test · admin@demo.test{'\n'}
+            ChangeMe123!
           </Text>
         )}
       </View>
@@ -74,30 +80,49 @@ export default function LoginScreen() {
 const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: theme.color.bg, justifyContent: 'center' },
   inner: { padding: theme.space(6) },
-  brand: { fontSize: 28, fontWeight: '800', textAlign: 'center', color: theme.color.text },
+  mark: {
+    alignSelf: 'center',
+    width: 64,
+    height: 64,
+    borderRadius: theme.radius.xl,
+    backgroundColor: theme.color.cross,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: theme.space(4),
+    ...theme.elevation.raised,
+  },
+  markGlyph: { ...theme.font.hero, color: theme.color.onAccent, fontWeight: '800' },
+  brand: { ...theme.font.display, textAlign: 'center', color: theme.color.text },
   sub: {
-    fontSize: 15,
-    color: theme.color.textMuted,
+    ...theme.font.small,
     textAlign: 'center',
-    marginTop: 4,
+    color: theme.color.textSubtle,
     marginBottom: theme.space(6),
   },
-  input: {
+  card: {
     backgroundColor: theme.color.surface,
     borderWidth: 1,
-    borderColor: theme.color.borderStrong,
-    borderRadius: theme.radius.sm,
-    paddingHorizontal: theme.space(3),
+    borderColor: theme.color.border,
+    borderRadius: theme.radius.lg,
+    padding: theme.space(4),
+    gap: theme.space(3),
+    ...theme.elevation.card,
+  },
+  input: {
     minHeight: theme.touchTarget,
-    fontSize: 16,
+    borderWidth: 1,
+    borderColor: theme.color.border,
+    borderRadius: theme.radius.md,
+    backgroundColor: theme.color.surface,
+    paddingHorizontal: theme.space(4),
+    ...theme.font.input,
     color: theme.color.text,
-    marginBottom: theme.space(3),
   },
   devHint: {
-    marginTop: theme.space(6),
-    fontSize: 12,
+    ...theme.font.caption,
     color: theme.color.textSubtle,
     textAlign: 'center',
+    marginTop: theme.space(6),
     lineHeight: 18,
   },
 });

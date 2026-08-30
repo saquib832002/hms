@@ -37,15 +37,15 @@ const s = StyleSheet.create({
   alert: {
     backgroundColor: theme.color.dangerSoft,
     borderWidth: 1,
-    borderColor: '#f2c4be',
+    borderColor: 'rgba(255,90,82,0.45)',
     borderLeftWidth: 4,
     borderLeftColor: theme.color.danger,
     borderRadius: theme.radius.sm,
     padding: theme.space(3),
     marginBottom: theme.space(2),
   },
-  alertTitle: { color: '#8a2a1f', fontWeight: '800', fontSize: 12, letterSpacing: 0.5 },
-  alertBody: { color: '#8a2a1f', fontWeight: '700', fontSize: 15, marginTop: 2 },
+  alertTitle: { color: theme.color.dangerText, ...theme.font.caption, letterSpacing: 0.5 },
+  alertBody: { color: theme.color.dangerText, ...theme.font.body, marginTop: 2 },
   none: {
     backgroundColor: theme.color.bg,
     borderWidth: 1,
@@ -54,5 +54,5 @@ const s = StyleSheet.create({
     padding: theme.space(2),
     marginBottom: theme.space(2),
   },
-  noneText: { color: theme.color.textMuted, fontSize: 13 },
+  noneText: { color: theme.color.textMuted, ...theme.font.small },
 });

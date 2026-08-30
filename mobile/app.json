@@ -16,11 +16,20 @@
     },
     "android": {
       "package": "test.demo.meridianhms",
-      "permissions": ["USE_BIOMETRIC", "USE_FINGERPRINT"]
+      "permissions": [
+        "USE_BIOMETRIC",
+        "USE_FINGERPRINT"
+      ]
     },
-    "plugins": ["expo-router", "expo-secure-store", "expo-local-authentication"],
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-local-authentication",
+      "expo-asset",
+      "expo-font"
+    ],
     "extra": {
-      "apiOrigin": "http://192.168.1.10:3000"
+      "apiPort": 3000
     }
   }
 }

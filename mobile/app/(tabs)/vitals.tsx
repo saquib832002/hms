@@ -1,10 +1,9 @@
 import { useState } from 'react';
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useOutbox } from '@/lib/outbox-context';
 import { theme } from '@/lib/theme';
-import { Button, Card } from '@/components/ui';
+import { AppHeader, Button, Card, Screen } from '@/components/ui';
 
 type Field = 'systolic' | 'diastolic' | 'pulse' | 'temperatureC' | 'respiratoryRate' | 'spo2';
 
@@ -77,10 +76,8 @@ export default function VitalsScreen() {
 
   if (!Number.isInteger(id)) {
     return (
-      <SafeAreaView style={s.root} edges={['top']}>
-        <View style={s.header}>
-          <Text style={s.title}>Vitals</Text>
-        </View>
+      <Screen>
+        <AppHeader title={'Vitals'} />
         <View style={s.body}>
           <Card>
             <Text style={s.muted}>
@@ -89,20 +86,22 @@ export default function VitalsScreen() {
           </Card>
           <Button label="Go to ward" variant="secondary" onPress={() => router.push('/(tabs)')} />
         </View>
-      </SafeAreaView>
+      </Screen>
     );
   }
 
   return (
-    <SafeAreaView style={s.root} edges={['top']}>
+    <Screen>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <View style={s.header}>
-          <Text style={s.back} onPress={() => router.back()}>
-            ‹ Back
-          </Text>
-          <Text style={s.title}>{patientName ?? `Patient #${id}`}</Text>
-          <Text style={s.muted}>Recording observations</Text>
-        </View>
+        <AppHeader
+          title={patientName ?? `Patient #${id}`}
+          subtitle="Recording observations"
+          right={
+            <Text style={s.back} onPress={() => router.back()}>
+              Close
+            </Text>
+          }
+        />
 
         <ScrollView contentContainerStyle={s.body} keyboardShouldPersistTaps="handled">
           {/* The field being edited, big enough to read at arm's length. */}
@@ -168,22 +167,13 @@ export default function VitalsScreen() {
           <Text style={s.note}>Saved on this device and synced when there is signal</Text>
         </View>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </Screen>
   );
 }
 
 const s = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.color.bg },
-  header: {
-    paddingHorizontal: theme.space(4),
-    paddingBottom: theme.space(2),
-    backgroundColor: theme.color.surface,
-    borderBottomWidth: 1,
-    borderBottomColor: theme.color.border,
-  },
-  back: { color: theme.color.primary, fontSize: 15, marginBottom: 4 },
-  title: { fontSize: 22, fontWeight: '800', color: theme.color.text },
-  muted: { fontSize: 13, color: theme.color.textMuted },
+  back: { ...theme.font.bodyStrong, color: theme.color.onAccent },
+  muted: { ...theme.font.small, color: theme.color.textMuted },
   body: { padding: theme.space(3) },
   display: {
     backgroundColor: theme.color.surface,
@@ -195,14 +185,13 @@ const s = StyleSheet.create({
     marginBottom: theme.space(3),
   },
   displayLabel: {
-    fontSize: 12,
-    fontWeight: '700',
+    ...theme.font.caption,
     letterSpacing: 0.6,
     textTransform: 'uppercase',
     color: theme.color.textMuted,
   },
-  displayValue: { fontSize: 44, fontWeight: '800', color: theme.color.text, letterSpacing: -1 },
-  displayUnit: { fontSize: 16, fontWeight: '600', color: theme.color.textMuted },
+  displayValue: { ...theme.font.hero, color: theme.color.text, letterSpacing: -1 },
+  displayUnit: { ...theme.font.body, color: theme.color.textMuted },
   pad: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.space(2) },
   key: {
     width: '31%',
@@ -216,7 +205,7 @@ const s = StyleSheet.create({
   },
   keyDisabled: { opacity: 0, borderWidth: 0 },
   keyPressed: { backgroundColor: theme.color.primarySoft, borderColor: theme.color.primary },
-  keyText: { fontSize: 24, fontWeight: '600', color: theme.color.text },
+  keyText: { ...theme.font.display, color: theme.color.text },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.space(2), marginTop: theme.space(3) },
   chip: {
     flexGrow: 1,
@@ -230,12 +219,12 @@ const s = StyleSheet.create({
     alignItems: 'center',
   },
   chipActive: { borderColor: theme.color.primary, backgroundColor: theme.color.primarySoft },
-  chipLabel: { fontSize: 11, color: theme.color.textMuted, textTransform: 'uppercase' },
+  chipLabel: { ...theme.font.caption, color: theme.color.textMuted, textTransform: 'uppercase' },
   chipLabelActive: { color: theme.color.primary },
-  chipValue: { fontSize: 17, fontWeight: '700', color: theme.color.text },
+  chipValue: { ...theme.font.heading, color: theme.color.text },
   queued: {
     marginTop: theme.space(3),
-    fontSize: 12,
+    ...theme.font.caption,
     color: theme.color.warning,
     textAlign: 'center',
   },
@@ -246,7 +235,7 @@ const s = StyleSheet.create({
     backgroundColor: theme.color.surface,
   },
   note: {
-    fontSize: 12,
+    ...theme.font.caption,
     color: theme.color.textMuted,
     textAlign: 'center',
     marginTop: theme.space(2),

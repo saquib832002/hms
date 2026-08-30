@@ -1,11 +1,10 @@
 import { useEffect, useState } from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { api } from '@/lib/api';
 import { date, time } from '@/lib/format';
 import { theme } from '@/lib/theme';
-import { Button, Card, ErrorBanner } from '@/components/ui';
+import { Button, Card, ErrorBanner, Screen } from '@/components/ui';
 import { AllergyBanner } from '@/components/allergy-banner';
 import { PrescriptionSheet } from '@/components/prescription-sheet';
 import type { MedicalRecord, Patient, Prescription } from '@/lib/types';
@@ -45,7 +44,7 @@ export default function PatientScreen() {
   const active = (prescriptions ?? []).filter((p) => p.status !== 'CANCELLED').slice(0, 3);
 
   return (
-    <SafeAreaView style={s.root} edges={['top']}>
+    <Screen>
       <Stack.Screen options={{ headerShown: false }} />
 
       <View style={s.header}>
@@ -128,12 +127,11 @@ export default function PatientScreen() {
           }}
         />
       )}
-    </SafeAreaView>
+    </Screen>
   );
 }
 
 const s = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.color.bg },
   header: {
     paddingHorizontal: theme.space(4),
     paddingBottom: theme.space(2),
@@ -141,25 +139,24 @@ const s = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: theme.color.border,
   },
-  back: { color: theme.color.primary, fontSize: 15, marginBottom: 4 },
-  name: { fontSize: 22, fontWeight: '800', color: theme.color.text },
-  meta: { fontSize: 13, color: theme.color.textMuted, fontVariant: ['tabular-nums'] },
+  back: { color: theme.color.primary, ...theme.font.body, marginBottom: 4 },
+  name: { ...theme.font.display, color: theme.color.text },
+  meta: { ...theme.font.small, color: theme.color.textMuted, fontVariant: ['tabular-nums'] },
   body: { padding: theme.space(3), paddingBottom: theme.space(6) },
   section: {
-    fontSize: 11,
-    fontWeight: '800',
+    ...theme.font.caption,
     letterSpacing: 0.6,
     textTransform: 'uppercase',
     color: theme.color.textSubtle,
     marginTop: theme.space(3),
     marginBottom: theme.space(2),
   },
-  muted: { fontSize: 13, color: theme.color.textMuted },
-  mono: { fontSize: 15, fontWeight: '600', color: theme.color.text },
-  recordDate: { fontSize: 13, fontWeight: '700', color: theme.color.text },
-  recordDiagnosis: { fontSize: 15, color: theme.color.text, marginVertical: 2 },
+  muted: { ...theme.font.small, color: theme.color.textMuted },
+  mono: { ...theme.font.body, color: theme.color.text },
+  recordDate: { ...theme.font.small, color: theme.color.text },
+  recordDiagnosis: { ...theme.font.body, color: theme.color.text, marginVertical: 2 },
   footnote: {
-    fontSize: 12,
+    ...theme.font.caption,
     color: theme.color.textSubtle,
     textAlign: 'center',
     marginTop: theme.space(5),

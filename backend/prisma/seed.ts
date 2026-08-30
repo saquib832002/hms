@@ -277,10 +277,18 @@ async function seedHospital(
   }
 
   // ── doctors (user + profile) ──
+  /*
+   * Fees differ per doctor on purpose, and one is deliberately left unset.
+   *
+   * A seed where every doctor charges the same cannot show that the fee is
+   * per-doctor, and a seed where every doctor has one hides the case reception
+   * actually hits: checkout refusing because nobody set a price. Doctor Three
+   * has no fee, so that path is reachable the moment you open the app.
+   */
   const doctorSpecs = [
-    { email: `doctor@${domain}`, fullName: 'Demo Doctor One', specialization: 'Cardiology', dept: 0 },
-    { email: `doctor2@${domain}`, fullName: 'Demo Doctor Two', specialization: 'General Medicine', dept: 1 },
-    { email: `doctor3@${domain}`, fullName: 'Demo Doctor Three', specialization: 'Orthopaedics', dept: 2 },
+    { email: `doctor@${domain}`, fullName: 'Demo Doctor One', specialization: 'Cardiology', dept: 0, fee: '120.00' },
+    { email: `doctor2@${domain}`, fullName: 'Demo Doctor Two', specialization: 'General Medicine', dept: 1, fee: '60.00' },
+    { email: `doctor3@${domain}`, fullName: 'Demo Doctor Three', specialization: 'Orthopaedics', dept: 2, fee: null },
   ];
   const doctors = [];
   for (const [i, d] of doctorSpecs.entries()) {
@@ -296,6 +304,7 @@ async function seedHospital(
           specialization: d.specialization,
           departmentId: departments[d.dept].id,
           registrationNo: `DEMO-REG-${1000 + i}`,
+          consultationFee: d.fee,
         },
       }),
     );
@@ -319,6 +328,7 @@ async function seedHospital(
       userId: owner.id,
       fullName: 'Demo Owner Doctor',
       specialization: 'General Medicine',
+      consultationFee: '150.00',
       departmentId: departments[1].id,
       registrationNo: 'DEMO-REG-OWNER',
     },

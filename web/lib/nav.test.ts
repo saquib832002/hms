@@ -1,5 +1,8 @@
+import { readdirSync, statSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { landingFor, navFor, ROLE_LABEL } from './nav';
+import { canReach, isKnownRoute, landingFor, navFor, ROLE_LABEL } from './nav';
 import type { UserRole } from './types';
 
 /**
@@ -197,5 +200,84 @@ describe('role navigation', () => {
         expect(hrefs).not.toContain(clinical);
       }
     });
+  });
+});
+
+/**
+ * Reaching a screen, as distinct from being offered it.
+ *
+ * The menu was the only thing shaping this, and a menu holds until the first
+ * URL is typed. It stopped holding for real: an admin signed in with a stale
+ * `?next=/queue` in the address bar, landed on the doctor's queue, and the
+ * resulting `GET /me/queue` was refused by the API — correctly — and written
+ * into the hospital's audit log as a denied clinical access by an
+ * administrator. The refusal worked. The trail is what suffered: a denial row
+ * that means "somebody tried to reach clinical data they should not" is worth
+ * much less once the app generates them by accident.
+ */
+describe('route access', () => {
+  it('lets each role reach every screen in its own menu', () => {
+    for (const role of ALL_ROLES) {
+      for (const item of navFor(role)) {
+        expect(canReach(role, item.href), `${role} cannot reach its own ${item.href}`).toBe(true);
+      }
+    }
+  });
+
+  it('refuses a role a screen no menu offers it', () => {
+    // The exact case that happened. /me/queue is a doctor endpoint and the
+    // admin's 403 was the API doing its job — the app should not have asked.
+    expect(canReach('ADMIN', '/queue')).toBe(false);
+    expect(canReach('RECEPTIONIST', '/ward')).toBe(false);
+    expect(canReach('BILLING_STAFF', '/audit')).toBe(false);
+    expect(canReach('PHARMACIST', '/admin/users')).toBe(false);
+  });
+
+  it('ignores a query string and a trailing slash', () => {
+    // `usePathname()` gives neither, but `?next=` carries both, and a rule that
+    // a question mark defeats is not a rule.
+    expect(canReach('ADMIN', '/queue?date=2026-08-29')).toBe(false);
+    expect(canReach('ADMIN', '/queue/')).toBe(false);
+    expect(canReach('DOCTOR', '/queue?date=2026-08-29')).toBe(true);
+  });
+
+  it('treats an unknown path as a 404, not as a denial', () => {
+    /*
+     * A typo must reach Next's not-found page. Redirecting it to the role's
+     * landing screen would make every mistyped URL look like an access refusal
+     * and hide genuine broken links behind a silent bounce.
+     */
+    expect(isKnownRoute('/nonsense')).toBe(false);
+    for (const role of ALL_ROLES) expect(canReach(role, '/nonsense')).toBe(true);
+  });
+
+  it('gives every screen in the app at least one role', () => {
+    /*
+     * The load-bearing one. `canReach` is derived from NAV, so a page nobody
+     * has a menu entry for is reachable by everybody — the guard would wave it
+     * through while looking like it was checking. This fails the day a page is
+     * added without deciding who it is for, which is the moment to decide.
+     */
+    const here = fileURLToPath(new URL('.', import.meta.url));
+    const appDir = resolve(here, '../app/(app)');
+    const pages: string[] = [];
+
+    const walk = (dir: string, route: string) => {
+      for (const entry of readdirSync(dir)) {
+        const full = resolve(dir, entry);
+        if (statSync(full).isDirectory()) {
+          // (groups) do not appear in the URL; [dynamic] segments would need a
+          // pattern match rather than an exact one, so flag them here.
+          walk(full, entry.startsWith('(') ? route : `${route}/${entry}`);
+        } else if (entry === 'page.tsx') {
+          pages.push(route || '/');
+        }
+      }
+    };
+    walk(appDir, '');
+
+    expect(pages.length).toBeGreaterThan(10); // the walk actually found something
+    const orphans = pages.filter((p) => !isKnownRoute(p));
+    expect(orphans, 'screens with no role in nav.ts').toEqual([]);
   });
 });

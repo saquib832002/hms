@@ -1,12 +1,24 @@
 import { useState } from 'react';
 import { FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
-import { useRouter } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { Redirect, useRouter } from 'expo-router';
 import { useDoctorQueue } from '@/lib/use-queue';
 import { useAuth } from '@/lib/auth-context';
+import { landingFor } from '@/lib/nav';
 import { relativeAge, time } from '@/lib/format';
 import { statusColors, statusLabel, theme } from '@/lib/theme';
-import { Card, ErrorBanner, StatusPill } from '@/components/ui';
+import { api } from '@/lib/api';
+import { useLiveData } from '@/lib/use-live-data';
+import {
+  AppHeader,
+  Avatar,
+  Button,
+  Card,
+  EmptyState,
+  ErrorBanner,
+  Screen,
+  StatTile,
+  StatusPill,
+} from '@/components/ui';
 import type { QueueItem } from '@/lib/types';
 
 /**
@@ -18,9 +30,28 @@ import type { QueueItem } from '@/lib/types';
  */
 export default function QueueScreen() {
   const { user } = useAuth();
-  const { queue, loading, error, fetchedAt, stale, refresh } = useDoctorQueue();
+  /*
+   * The redirect below cannot prevent the fetch — hooks run before a component
+   * returns anything, so `<Redirect>` is evaluated after `useDoctorQueue` has
+   * already asked for a doctor's queue. Non-doctors were producing a 403, and
+   * therefore an audit denial, simply by signing in. The hook has to be told.
+   */
+  const isDoctor = user?.role === 'DOCTOR';
+  const { queue, loading, error, fetchedAt, stale, refresh } = useDoctorQueue(isDoctor);
   const [refreshing, setRefreshing] = useState(false);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const router = useRouter();
+
+  /*
+   * Refetches on focus and every 15s.
+   *
+   * `useDoctorQueue` fetched once on mount, so completing a consultation and
+   * coming back from the patient screen left the row still reading "with
+   * doctor" — and a doctor comparing that to the waiting room would reasonably
+   * think the app had not saved.
+   */
+  useLiveData(refresh);
 
   async function onRefresh() {
     setRefreshing(true);
@@ -28,30 +59,60 @@ export default function QueueScreen() {
     setRefreshing(false);
   }
 
-  // /me/queue is doctor-only server-side. A nurse reaching this route (deep
-  // link, stale navigation state) should see an explanation, not a 403.
-  if (user && user.role !== 'DOCTOR') {
-    return (
-      <SafeAreaView style={s.root} edges={['top']}>
-        <View style={s.header}>
-          <Text style={s.title}>Queue</Text>
-        </View>
-        <Card>
-          <Text style={s.empty}>The patient queue belongs to doctors. Your ward is on the Ward tab.</Text>
-        </Card>
-      </SafeAreaView>
-    );
+  /**
+   * Move an appointment along the status machine.
+   *
+   * Deliberately *not* queued through the offline outbox. The outbox exists for
+   * bedside observations, where the alternative is a nurse writing on her hand;
+   * a consultation status is only meaningful while the clinic day is running,
+   * and replaying "started consultation" an hour later would misreport when the
+   * patient was seen. If the network is down the doctor should see it fail.
+   */
+  async function advance(item: QueueItem, status: 'IN_PROGRESS' | 'COMPLETED') {
+    setBusyId(item.id);
+    setActionError(null);
+    try {
+      await api(`/appointments/${item.id}/status`, { method: 'PATCH', body: { status } });
+      // Refetch rather than patch in place: the queue's own stats — waiting,
+      // in progress, completed — are computed server-side and would otherwise
+      // disagree with the rows directly beneath them.
+      await refresh();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Could not update this appointment');
+    } finally {
+      setBusyId(null);
+    }
   }
 
+  /*
+   * Anyone who is not a doctor is sent to their own first screen.
+   *
+   * Expo Router opens the tab group on `index`, which is this screen, so every
+   * other role landed here regardless of who signed in — and read a refusal
+   * message as the first thing after login.
+   *
+   * The redirect lives here rather than in `AuthGate` because a `router.replace`
+   * fired from a provider above the navigator runs before the navigator has
+   * mounted and is silently dropped. That was the first attempt at this fix and
+   * it did nothing. `<Redirect>` is declarative and evaluated while this route
+   * is mounted, so it cannot lose the race.
+   */
+  if (user && !isDoctor) {
+    return <Redirect href={landingFor(user.role)} />;
+  }
+
+
   return (
-    <SafeAreaView style={s.root} edges={['top']}>
-      <View style={s.header}>
-        <Text style={s.title}>Today&apos;s Queue</Text>
-        <Text style={s.subtitle}>
-          {queue?.doctor?.fullName ?? '…'}
-          {queue?.doctor?.department ? ` · ${queue.doctor.department}` : ''}
-        </Text>
-      </View>
+    <Screen>
+      <AppHeader
+        title="Today's Queue"
+        subtitle={
+          queue?.doctor
+            ? `${queue.doctor.fullName}${queue.doctor.department ? ` · ${queue.doctor.department}` : ''}`
+            : 'Loading…'
+        }
+        right={<Avatar name={user?.fullName ?? ''} onPress={() => router.push('/(tabs)/me')} />}
+      />
 
       {/* Staleness is stated, never implied. A queue that silently stopped
           updating looks exactly like a quiet morning. */}
@@ -64,6 +125,9 @@ export default function QueueScreen() {
       )}
 
       {error && !queue && <ErrorBanner message={error} />}
+      {/* A failed status change is shown even when the queue rendered fine —
+          otherwise "Complete" appears to do nothing at all. */}
+      {actionError && <ErrorBanner message={actionError} />}
 
       <FlatList
         data={queue?.appointments ?? []}
@@ -73,102 +137,162 @@ export default function QueueScreen() {
         ListHeaderComponent={
           queue ? (
             <View style={s.stats}>
-              <Stat label="Total" value={queue.stats.total} />
-              <Stat label="Waiting" value={queue.stats.waiting} tone={theme.color.warning} />
-              <Stat label="Done" value={queue.stats.completed} tone={theme.color.success} />
+              <StatTile label="Total" value={queue.stats.total} />
+              <StatTile label="Waiting" value={queue.stats.waiting} tone={theme.color.warning} />
+              <StatTile label="Done" value={queue.stats.completed} tone={theme.color.success} />
             </View>
           ) : null
         }
         ListEmptyComponent={
           loading ? null : (
-            <Card>
-              <Text style={s.empty}>Nothing booked today.</Text>
-            </Card>
+            <EmptyState glyph="◷" title="Nothing booked today" body="Pull down to refresh." />
           )
         }
         renderItem={({ item }) => (
-          <QueueRow item={item} onPress={() => router.push(`/patient/${item.patient.id}`)} />
+          <QueueRow
+            item={item}
+            busy={busyId === item.id}
+            onPress={() => router.push(`/patient/${item.patient.id}`)}
+            onStatus={(status) => void advance(item, status)}
+          />
         )}
       />
-    </SafeAreaView>
+    </Screen>
   );
 }
 
-function QueueRow({ item, onPress }: { item: QueueItem; onPress: () => void }) {
+/**
+ * A queue row, and the two buttons that move the clinic day along.
+ *
+ * These were missing entirely until the first device run: the queue was
+ * read-only, so a doctor could open a patient and write a prescription but had
+ * no way to say "I am seeing this person now" or "I am done". The appointment
+ * stayed CHECKED_IN forever, reception's board never advanced, and the doctor's
+ * own stats always read zero completed.
+ *
+ * The web queue has had Start and Complete since Phase 1 — `endpoint-coverage`
+ * saw a caller for `PATCH /appointments/:id/status` and was satisfied, because
+ * it asks whether *a* client calls a route, not whether every client that needs
+ * it does. That is a real limit of that test, worth knowing.
+ *
+ * Which transitions are legal is the server's decision, not this screen's:
+ * CHECKED_IN → IN_PROGRESS → COMPLETED, doctor-only, and nothing moves
+ * backwards. The buttons mirror it so a doctor is not offered an action that
+ * will be refused.
+ */
+function QueueRow({
+  item,
+  busy,
+  onPress,
+  onStatus,
+}: {
+  item: QueueItem;
+  busy: boolean;
+  onPress: () => void;
+  onStatus: (status: 'IN_PROGRESS' | 'COMPLETED') => void;
+}) {
   const colors = statusColors(item.status);
-  return (
-    <Pressable onPress={onPress} accessibilityRole="button">
-      {({ pressed }) => (
-        <Card
-          style={{
-            opacity: pressed ? 0.7 : 1,
-            borderLeftWidth: item.status === 'IN_PROGRESS' ? 4 : 1,
-            borderLeftColor:
-              item.status === 'IN_PROGRESS' ? theme.color.danger : theme.color.border,
-          }}
-        >
-          <View style={s.rowTop}>
-            <Text style={s.rowTime}>{time(item.scheduledAt)}</Text>
-            <StatusPill label={statusLabel[item.status] ?? item.status} bg={colors.bg} fg={colors.fg} />
-          </View>
-          <View style={s.rowNameLine}>
-            <Text style={s.rowName}>{item.patient.fullName}</Text>
-            {/* A dot, not the substances. The detail belongs on a screen the
-                doctor deliberately opened — which is an audited read. */}
-            {item.patient.hasAllergies && (
-              <View style={s.allergyDot} accessibilityLabel="Has recorded allergies" />
-            )}
-          </View>
-          <Text style={s.rowMeta}>
-            {item.patient.age}y · {item.patient.gender.toLowerCase()}
-            {item.reason ? ` · ${item.reason}` : ''}
-          </Text>
-        </Card>
-      )}
-    </Pressable>
-  );
-}
+  const canStart = item.status === 'CHECKED_IN';
+  const canComplete = item.status === 'IN_PROGRESS';
 
-function Stat({ label, value, tone }: { label: string; value: number; tone?: string }) {
   return (
-    <View style={s.stat}>
-      <Text style={[s.statValue, tone ? { color: tone } : null]}>{value}</Text>
-      <Text style={s.statLabel}>{label}</Text>
-    </View>
+    <Card
+      style={{
+        borderLeftWidth: item.status === 'IN_PROGRESS' ? 4 : 1,
+        borderLeftColor: item.status === 'IN_PROGRESS' ? theme.color.danger : theme.color.border,
+      }}
+    >
+      <Pressable onPress={onPress} accessibilityRole="button">
+        {({ pressed }) => (
+          <View style={{ opacity: pressed ? 0.7 : 1 }}>
+            <View style={s.rowTop}>
+              <Text style={s.rowTime}>{time(item.scheduledAt)}</Text>
+              <StatusPill
+                label={statusLabel[item.status] ?? item.status}
+                bg={colors.bg}
+                fg={colors.fg}
+              />
+            </View>
+            <View style={s.rowNameLine}>
+              <Text style={s.rowName} numberOfLines={1}>
+                {item.patient.fullName}
+              </Text>
+              {/* A dot, not the substances. The detail belongs on a screen the
+                  doctor deliberately opened — which is an audited read. */}
+              {item.patient.hasAllergies && (
+                <View style={s.allergyDot} accessibilityLabel="Has recorded allergies" />
+              )}
+            </View>
+            <Text style={s.rowMeta}>
+              {item.patient.age}y · {item.patient.gender.toLowerCase()}
+              {item.reason ? ` · ${item.reason}` : ''}
+            </Text>
+          </View>
+        )}
+      </Pressable>
+
+      {(canStart || canComplete) && (
+        <View style={s.rowActions}>
+          {canStart && (
+            <Button
+              label="Start consultation"
+              busy={busy}
+              onPress={() => onStatus('IN_PROGRESS')}
+              style={s.grow}
+            />
+          )}
+          {canComplete && (
+            <>
+              <Button
+                label="Open"
+                variant="secondary"
+                onPress={onPress}
+                style={s.grow}
+              />
+              <Button
+                label="Complete"
+                busy={busy}
+                onPress={() => onStatus('COMPLETED')}
+                style={s.grow}
+              />
+            </>
+          )}
+        </View>
+      )}
+    </Card>
   );
 }
 
 const s = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.color.bg },
-  header: {
-    paddingHorizontal: theme.space(4),
-    paddingBottom: theme.space(2),
-    backgroundColor: theme.color.surface,
-    borderBottomWidth: 1,
-    borderBottomColor: theme.color.border,
-  },
-  title: { fontSize: 24, fontWeight: '800', color: theme.color.text },
-  subtitle: { fontSize: 13, color: theme.color.textMuted, marginTop: 2 },
-  staleBar: { backgroundColor: '#3d4148', paddingVertical: 6, paddingHorizontal: theme.space(4) },
-  staleText: { color: '#e6e9ec', fontSize: 12, textAlign: 'center' },
-  list: { padding: theme.space(3) },
-  stats: { flexDirection: 'row', gap: theme.space(2), marginBottom: theme.space(2) },
-  stat: {
-    flex: 1,
-    backgroundColor: theme.color.surface,
-    borderRadius: theme.radius.sm,
-    borderWidth: 1,
-    borderColor: theme.color.border,
+  staleBar: {
+    backgroundColor: theme.color.slateBar,
     paddingVertical: theme.space(2),
-    alignItems: 'center',
+    paddingHorizontal: theme.space(4),
   },
-  statValue: { fontSize: 20, fontWeight: '800', color: theme.color.text },
-  statLabel: { fontSize: 11, color: theme.color.textMuted, textTransform: 'uppercase' },
-  rowTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  rowTime: { fontVariant: ['tabular-nums'], fontSize: 14, fontWeight: '700', color: theme.color.textMuted },
-  rowNameLine: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
-  rowName: { fontSize: 18, fontWeight: '700', color: theme.color.text },
-  allergyDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: theme.color.danger },
-  rowMeta: { fontSize: 13, color: theme.color.textMuted, marginTop: 2 },
-  empty: { fontSize: 15, color: theme.color.textMuted, textAlign: 'center' },
+  staleText: { ...theme.font.caption, color: theme.color.text, textAlign: 'center' },
+  list: { padding: theme.space(4), gap: theme.space(3) },
+  stats: { flexDirection: 'row', gap: theme.space(2), marginBottom: theme.space(1) },
+  rowTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: theme.space(2),
+  },
+  rowTime: {
+    fontVariant: ['tabular-nums'],
+    ...theme.font.bodyStrong,
+    color: theme.color.textMuted,
+    flexShrink: 1,
+  },
+  rowNameLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: theme.space(1),
+  },
+  rowName: { ...theme.font.heading, color: theme.color.text, flexShrink: 1 },
+  allergyDot: { width: 9, height: 9, borderRadius: 5, backgroundColor: theme.color.danger },
+  rowMeta: { ...theme.font.small, color: theme.color.textMuted, marginTop: 2 },
+  rowActions: { flexDirection: 'row', gap: theme.space(2), marginTop: theme.space(4) },
+  grow: { flex: 1 },
 });

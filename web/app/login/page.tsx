@@ -3,8 +3,9 @@
 import { Suspense, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/lib/auth-context';
-import { landingFor } from '@/lib/nav';
+import { canReach, landingFor } from '@/lib/nav';
 import { Button, Input, Field } from '@/components/ui/primitives';
+import type { UserRole } from '@/lib/types';
 
 export default function LoginPage() {
   return (
@@ -30,6 +31,20 @@ function safeNext(next: string | null): string | null {
   return next;
 }
 
+/**
+ * `next` belongs to whoever was here before, which is not necessarily whoever
+ * just signed in.
+ *
+ * A shared desk machine keeps `?next=/queue` in the address bar after a
+ * doctor's session ends; the administrator who signs in next gets sent to the
+ * doctor's queue, sees a broken screen, and puts a denied clinical access into
+ * the hospital's audit log under their own name. The destination has to be
+ * checked against the role that actually arrived, not the one that left.
+ */
+function nextForRole(next: string | null, role: UserRole): string {
+  return next && canReach(role, next) ? next : landingFor(role);
+}
+
 function LoginForm() {
   const { user, loading, signIn } = useAuth();
   const router = useRouter();
@@ -43,7 +58,7 @@ function LoginForm() {
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    if (!loading && user) router.replace(next ?? landingFor(user.role));
+    if (!loading && user) router.replace(nextForRole(next, user.role));
   }, [user, loading, router, next]);
 
   async function onSubmit(e: React.FormEvent) {
@@ -52,7 +67,7 @@ function LoginForm() {
     setSubmitting(true);
     try {
       const u = await signIn(email, password);
-      router.replace(next ?? landingFor(u.role));
+      router.replace(nextForRole(next, u.role));
     } catch (err) {
       // The API returns the same message for unknown email and wrong password
       // on purpose — distinguishing them lets an attacker enumerate staff.

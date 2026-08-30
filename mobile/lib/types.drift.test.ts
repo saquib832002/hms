@@ -19,7 +19,11 @@ const MOBILE_TYPES = path.resolve(__dirname, './types.ts');
 
 /** Pulls a named `export interface X { ... }` or `export type X = ...;` block. */
 function extract(source: string, name: string): string | null {
-  const iface = new RegExp(`^export interface ${name} \\{`, 'm').exec(source);
+  // The optional `<...>` matters: `Paginated<T>` is shared like anything else,
+  // and a matcher that silently cannot see generic declarations reports them as
+  // missing from *both* clients — which reads as a drift failure and is really
+  // a broken extractor.
+  const iface = new RegExp(`^export interface ${name}(?:<[^>]*>)? \\{`, 'm').exec(source);
   if (iface) {
     const start = source.indexOf('{', iface.index);
     let depth = 0;
@@ -72,6 +76,39 @@ const SHARED = [
   'InventoryRow',
   'Inventory',
   'AdminDashboard',
+  // Reception and billing, added when mobile was opened to every role.
+  'PatientListItem',
+  'Doctor',
+  'Appointment',
+  'Slot',
+  'Availability',
+  'Paginated',
+  'AgingBucket',
+  'PaymentMethod',
+  'InvoiceLine',
+  'PaymentRecord',
+  'Invoice',
+  // Admin reporting, added when the overview gained takings and per-doctor
+  // figures. `AgingReport` comes along because `FinanceReport` names it — a
+  // shape is only pinned if everything it references is pinned too.
+  // Staff and role assignment, added when the phone gained the roles screen.
+  'StaffUser',
+  /*
+   * The owner's daily view and its drill-down.
+   *
+   * `AuditRow` was here and is not any more: the phone's activity screen used
+   * to open a person's audit trail, and that was removed for being a list of
+   * API action names rather than a description of anybody's work. Mobile is
+   * allowed to carry a subset, so the type went with the screen rather than
+   * lingering as a shape nothing reads.
+   */
+  'StaffActivityReport',
+  'LedgerRow',
+  'ConsultationLedger',
+  'AgingReport',
+  'FinanceReport',
+  'DoctorReportRow',
+  'DoctorReport',
 ];
 
 describe('web ↔ mobile type drift', () => {

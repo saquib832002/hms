@@ -110,6 +110,12 @@ export interface Doctor {
   specialization: string;
   registrationNo?: string | null;
   department?: { id: number; name: string } | null;
+  /**
+   * What this doctor charges for a consultation, as a string in the hospital's
+   * currency. `null` means no fee has been set — which is not the same as free,
+   * and checkout refuses rather than billing zero.
+   */
+  consultationFee?: string | null;
 }
 
 export interface Appointment {
@@ -120,7 +126,12 @@ export interface Appointment {
   patientId: number;
   doctorId: number;
   patient?: { id: number; fullName: string; dob: string; gender: string; phone: string | null };
-  doctor?: { id: number; fullName: string; specialization: string };
+  doctor?: { id: number; fullName: string; specialization: string; consultationFee?: string | null };
+  /**
+   * Set once this consultation has been billed. Only the id: whether a charge
+   * exists is administrative, what is on it is billing's business.
+   */
+  invoice?: { id: number } | null;
 }
 
 export interface QueueItem {
@@ -472,9 +483,174 @@ export interface AdminDashboard {
   };
   occupancy: { beds: number; occupied: number; available: number; percent: number };
   finance: { outstanding: string; collectedLastSevenDays: string; openInvoices: number };
-  staff: { active: number; lockedOut: number; awaitingPasswordChange: number };
+  staff: {
+    active: number;
+    lockedOut: number;
+    awaitingPasswordChange: number;
+    doctors: number;
+    /** Doctors with no consultation fee — reception's checkout refuses for these. */
+    doctorsWithoutFee: number;
+  };
   security: { deniedRequestsLastDay: number };
   catalogue: { medicines: number };
+}
+
+/**
+ * Takings and debts.
+ *
+ * Every `collected` figure comes from payment rows, not invoices — "what did we
+ * take today" is a question about when money arrived, not when it was charged.
+ * `aging` is the only part derived from invoices, because what is *owed*
+ * genuinely is invoice-shaped.
+ */
+export interface FinanceReport {
+  generatedAt: string;
+  timezone: string;
+  collected: {
+    today: string;
+    thisMonth: string;
+    paymentsToday: number;
+    paymentsThisMonth: number;
+  };
+  monthly: { month: string; label: string; collected: string; payments: number }[];
+  methods: {
+    method: string;
+    today: { amount: string; count: number };
+    month: { amount: string; count: number };
+  }[];
+  aging: AgingReport;
+}
+
+export interface DoctorReportRow {
+  id: number;
+  fullName: string;
+  specialization: string;
+  department: string | null;
+  /** Null means unpriced, which is not the same as free. */
+  consultationFee: string | null;
+  today: { booked: number; completed: number; noShow: number };
+  lastSevenDays: { booked: number; completed: number; noShow: number };
+  revenueThisMonth: { billed: string; collected: string };
+}
+
+export interface DoctorReport {
+  generatedAt: string;
+  timezone: string;
+  total: number;
+  withoutFee: number;
+  doctors: DoctorReportRow[];
+}
+
+/**
+ * One consultation, as an owner sees it.
+ *
+ * Attendance and money — who came, when, whether they turned up, what they
+ * were charged, whether they paid. Deliberately not the appointment reason, not
+ * what was prescribed, not a diagnosis. `prescriptionIssued` is a boolean
+ * because *that* a prescription exists is operational, while what is in it
+ * names a condition.
+ */
+export interface LedgerRow {
+  id: number;
+  scheduledAt: string;
+  status: AppointmentStatus;
+  patient: { id: number; fullName: string };
+  doctor: { id: number; fullName: string };
+  invoice: {
+    id: number;
+    total: string;
+    paid: string;
+    outstanding: string;
+    settled: boolean;
+  } | null;
+  prescriptionIssued: boolean;
+}
+
+export interface ConsultationLedger {
+  date: string;
+  timezone: string;
+  total: number;
+  appointments: LedgerRow[];
+}
+
+/**
+ * One row of the audit trail.
+ *
+ * `targetId` is a raw record id and stays that way. Resolving it to a patient
+ * name is the one thing no admin endpoint does — the trail proves *that* a
+ * record was touched without becoming a way to browse records.
+ */
+export interface AuditRow {
+  id: number;
+  createdAt: string;
+  actorEmail: string | null;
+  actorRole: string | null;
+  action: string;
+  method: string | null;
+  targetType: string | null;
+  targetId: number | null;
+  outcome: 'SUCCESS' | 'FAILURE';
+  statusCode: number | null;
+  ipAddress: string | null;
+  user: { id: number; fullName: string; email: string; role: string } | null;
+}
+
+/**
+ * One day's work, per member of staff.
+ *
+ * Counts and money only. There is deliberately no patient here — an
+ * administrator who needs named patients switches to a clinical role they hold
+ * and looks as that role, so the audit log records which hat was worn.
+ */
+export interface StaffActivityReport {
+  date: string;
+  timezone: string;
+  generatedAt: string;
+  doctors: {
+    userId: number;
+    /** The doctor-profile id, not the user id. The ledger filters on this. */
+    doctorId: number;
+    fullName: string;
+    specialization: string;
+    consultations: { booked: number; completed: number; noShow: number };
+    revenue: { billed: string; collected: string };
+  }[];
+  reception: {
+    userId: number;
+    fullName: string;
+    registrations: number;
+    bookings: number;
+    /**
+     * Check-ins, cancellations and reschedules together.
+     *
+     * The audit log records that an appointment's status changed, not what it
+     * changed *to*, so these cannot be split without recording the new status
+     * on the audit row.
+     */
+    updates: number;
+    invoicesRaised: number;
+  }[];
+  billing: {
+    userId: number;
+    fullName: string;
+    total: string;
+    count: number;
+    methods: { method: string; amount: string }[];
+  }[];
+  pharmacy: {
+    userId: number;
+    fullName: string;
+    dispensed: number;
+    prepared: number;
+    stockReceived: number;
+  }[];
+  nursing: {
+    userId: number;
+    fullName: string;
+    vitals: number;
+    doses: number;
+    admissions: number;
+  }[];
 }
 
 export interface ActivityReport {

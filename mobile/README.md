@@ -5,30 +5,76 @@ Expo / React Native. Doctor, nurse, pharmacist and administrator. Task parity pe
 ## Running it
 
 ```bash
-# 1. Backend must be reachable from the phone, not just the laptop.
-#    Find your LAN IP and put it in app.json → expo.extra.apiOrigin
-ipconfig            # Windows — look for IPv4 Address
-# e.g. "apiOrigin": "http://192.168.1.42:3000"
-
 cd mobile
 npm install
 npx expo start      # scan the QR with Expo Go, or press i / a
 ```
 
-`localhost` on a phone is the phone. This is the single most common reason the app appears to hang at sign-in.
+**No IP to configure.** The API host is derived from the Expo dev server your
+phone already downloaded the bundle from, so it follows you between networks and
+survives a new DHCP lease. It prints what it chose on boot:
 
-Sign in as `doctor@demo.test`, `nurse@demo.test`, `pharmacy@demo.test` or `admin@demo.test` / `ChangeMe123!`. Reception and billing are rejected at login with a message pointing them at the web app — their work is desk-bound and every call would 403 anyway.
+```
+[api] using http://192.168.1.42:3000 (derived from Expo dev server host 192.168.1.42)
+```
+
+If a connection fails, read that line first — it distinguishes "wrong address"
+from "address fine, something else is blocking".
+
+The backend still has to be reachable *from the phone*, which is two things
+beyond it running:
+
+```powershell
+# 1. Windows Firewall — your laptop is now serving a port to another device
+New-NetFirewallRule -DisplayName "HMS API dev" -Direction Inbound -LocalPort 3000 -Protocol TCP -Action Allow
+
+# 2. Prove the path from the phone's own browser before blaming the app
+#    http://<laptop-ip>:3000/api/v1/health  →  should return {"status":"ok"}
+```
+
+Phone and laptop must be on the same Wi-Fi — not mobile data, and not a guest
+network with client isolation, which blocks device-to-device traffic outright.
+
+Set `expo.extra.apiOrigin` in `app.json` only for a standalone build, where
+there is no dev server to derive from.
+
+Sign in as `doctor@demo.test`, `nurse@demo.test`, `pharmacy@demo.test`, `admin@demo.test`, `reception@demo.test` or `billing@demo.test` / `ChangeMe123!`.
+
+**Every role can use this app.** Reception and billing were refused at login for
+six phases, justified by a comment claiming the backend "would refuse every
+clinical call anyway" — which was untrue; reception has its own endpoints and
+always did. The real reason was that nobody had built reception screens, and an
+absence had acquired a rationale.
+
+It was also wrong for the clinics this is built for. A small practice where the
+receptionist has a phone and no desktop is the normal case, and check-in is
+*better* on a phone — you are standing next to the person you are checking in.
+`role-screens.test.ts` now fails the build if a role in `UserRole` has no tab,
+so this cannot happen again by omission.
 
 ## What it does, and what it deliberately doesn't
 
-| On mobile | Web only |
-|---|---|
-| Today's queue | Booking, rescheduling, cancelling |
-| Patient summary — allergies, active medication, last visit | Full history review |
-| Write a prescription | Printing a prescription |
-| Alerts | Patient registration, billing, reports, audit |
+Every role has screens; none has *every* screen. The rule is **task parity per
+role, not feature parity** — mobile carries the work that happens on your feet,
+and the desk work stays at the desk.
 
-The patient screen says so out loud rather than leaving a doctor hunting for a tab that isn't there.
+| Role | On mobile | Web only |
+|---|---|---|
+| Doctor | Today's queue, patient summary, write a prescription | Full history review, printing |
+| Nurse | Ward board, bedside vitals, medication round | — |
+| Pharmacist | Queue length, stock alerts (read-only) | Dispensing — needs the shelf in front of you |
+| Reception | Today's schedule, check-in, patient search, registration, booking | Rescheduling, cancelling, duplicate merging |
+| Billing | Outstanding invoices, take a payment | Aging reports, reconciliation, bulk invoice entry |
+| Admin | Aggregate overview (no patient reachable) | Users, departments, audit, reports |
+
+Screens say this out loud rather than leaving someone hunting for a tab that
+isn't there.
+
+Two exclusions worth their reasoning. **Pharmacist dispensing is absent on
+purpose**: it needs a batch number read off a box and a signature that
+decrements stock, and a "dispense" button pressable from a corridor invites
+signing for something not yet done. **Admin can reach no patient at all** — that
+mirrors the backend, where admin holds no clinical GET whatsoever.
 
 ## Security decisions worth knowing
 

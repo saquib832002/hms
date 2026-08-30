@@ -14,6 +14,16 @@ import LoginScreen from '@/components/login-screen';
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const { user, loading, locked, unlock, signOut } = useAuth();
 
+  /*
+   * Landing is NOT done here.
+   *
+   * A `router.replace` fired from this provider runs before the navigator below
+   * it has mounted, and Expo Router drops it — which is exactly what happened
+   * on the first attempt: reception still opened on the doctor's queue. The
+   * redirect lives in `(tabs)/index.tsx`, where the route is mounted and a
+   * declarative `<Redirect>` cannot lose that race.
+   */
+
   if (loading) {
     return (
       <View style={s.centre}>
@@ -53,9 +63,9 @@ const s = StyleSheet.create({
     backgroundColor: theme.color.bg,
     padding: theme.space(6),
   },
-  lockTitle: { fontSize: 24, fontWeight: '800', color: theme.color.text },
+  lockTitle: { ...theme.font.display, color: theme.color.text },
   lockBody: {
-    fontSize: 15,
+    ...theme.font.body,
     color: theme.color.textMuted,
     textAlign: 'center',
     marginTop: theme.space(2),

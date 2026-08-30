@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { AppointmentStatus } from '@prisma/client';
+import { AppointmentStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { parseDateParam, zonedTimeToUtc, hospitalDate } from '../common/utils/hospital-time';
 import { ClinicSettingsService } from '../common/tenancy/clinic-settings.service';
@@ -38,7 +38,14 @@ export class DoctorsService {
    */
   async updateProfile(
     id: number,
-    dto: { fullName?: string; specialization?: string; departmentId?: number | null; registrationNo?: string | null; phone?: string | null },
+    dto: {
+      fullName?: string;
+      specialization?: string;
+      departmentId?: number | null;
+      registrationNo?: string | null;
+      phone?: string | null;
+      consultationFee?: string;
+    },
   ) {
     const doctor = await this.findOne(id);
 
@@ -54,17 +61,29 @@ export class DoctorsService {
           ...(dto.departmentId !== undefined ? { departmentId: dto.departmentId } : {}),
           ...(dto.registrationNo !== undefined ? { registrationNo: dto.registrationNo } : {}),
           ...(dto.phone !== undefined ? { phone: dto.phone } : {}),
+          /*
+           * An empty string clears the fee; a value sets it.
+           *
+           * Cleared and zero are deliberately different. No fee means checkout
+           * refuses and tells reception to ask an administrator; zero means the
+           * consultation is genuinely free. Collapsing them would make a
+           * forgotten price look like a decision.
+           */
+          ...(dto.consultationFee !== undefined
+            ? { consultationFee: dto.consultationFee === '' ? null : dto.consultationFee }
+            : {}),
         },
         include: { department: { select: { id: true, name: true } } },
       });
     });
   }
 
-  findAll() {
-    return this.prisma.doctor.findMany({
+  async findAll() {
+    const doctors = await this.prisma.doctor.findMany({
       orderBy: { fullName: 'asc' },
       include: { department: { select: { id: true, name: true } } },
     });
+    return doctors.map((d) => this.shape(d));
   }
 
   async findOne(id: number) {
@@ -74,6 +93,25 @@ export class DoctorsService {
     });
     if (!doctor) throw new NotFoundException(`Doctor ${id} not found`);
     return doctor;
+  }
+
+  /**
+   * Money leaves as a string, like every other amount in this system.
+   *
+   * Prisma hands back a `Decimal` object here. Serialised straight to JSON it
+   * is neither a number a client can use nor the plain string the rest of the
+   * API sends, and the first thing a client would do is `parseFloat` it — the
+   * exact loss `billing/money.ts` exists to prevent.
+   *
+   * `null` is preserved rather than defaulted to "0.00": no fee set and a free
+   * consultation are different facts, and checkout depends on telling them
+   * apart.
+   */
+  private shape<T extends { consultationFee: Prisma.Decimal | null }>(doctor: T) {
+    return {
+      ...doctor,
+      consultationFee: doctor.consultationFee === null ? null : doctor.consultationFee.toFixed(2),
+    };
   }
 
   /**
