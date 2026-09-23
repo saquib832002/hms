@@ -5,7 +5,48 @@ decides whether any of the rest will be accepted.
 
 ---
 
-## 0. Read this before building anything: the target API level
+## 0. The target API level — settled, and worth knowing why
+
+**Since 31 August 2026 Play rejects any new app or update targeting below
+Android 16 (API 36).** This app now targets 36 on **Expo SDK 53** — AGP 8.8.2,
+Gradle 8.13, React 19, React Native 0.79 — and a prebuild confirms
+`android.targetSdkVersion=36` in the generated project.
+
+**The fault that cost a day was `compileSdkVersion`, not `targetSdkVersion`.**
+Setting both to 36 on SDK 52 made the build die configuring `:expo`:
+
+```
+> Could not get unknown property 'release' for SoftwareComponent container
+  Script '…/expo-modules-core/android/ExpoModulesCorePlugin.gradle' line: 95
+```
+
+Line 95 is `from components.release`, a component AGP registers when it
+configures an Android library. So the real meaning was *AGP never finished
+configuring the module* — and the message names publishing, which sends you to
+entirely the wrong file. The cause was the **compile** level: that AGP had been
+tested to 35 and would not go above it. AGP tolerates a *target* above its
+compile level; it only warns.
+
+So `app.config.js` raises the target and leaves compileSdk alone. Raising
+compileSdk buys nothing here — it decides which APIs the code may *call*, and
+this app calls none that are new in 36.
+
+If 36 ever misbehaves at runtime, the lever is still there:
+
+```powershell
+$env:ANDROID_TARGET_SDK = "35"     # builds; Play will not accept it
+```
+
+**One thing the upgrade switched on that only a device can judge.** At target 36
+Android draws content under the system bars and there is no opt-out, so
+`edgeToEdgeEnabled: true` is declared explicitly. The header already handles its
+top inset and the tab bar its bottom one — but check it on a handset before you
+trust it.
+
+<details>
+<summary>The previous wall, kept for the error signature</summary>
+
+## 0-old. Read this before building anything: the target API level
 
 **Since 31 August 2026, Google Play rejects any new app or update that targets
 below Android 16 (API 36).** That date has passed. Expo SDK 52 — what this app
@@ -19,33 +60,56 @@ Three ways through, in the order worth trying:
 to **1 November 2026**, requested from the app's page in Play Console. That buys
 time to do (b) without a rushed upgrade.
 
-**b. Override the target on SDK 52.** `expo-build-properties` can set the target
-without changing SDK:
+**b. Override the target on SDK 52 — tried, and it hits a wall.**
+`expo-build-properties` sets it, and prebuild does produce
+`android.compileSdkVersion=36` / `android.targetSdkVersion=36`. The config half
+works. The toolchain half does not, or not reliably:
 
-```bash
-npx expo install expo-build-properties
+> **SDK 52 pins Android Gradle Plugin 8.6.0**, which was tested to
+> `compileSdk 35`. Gradle 8.10.2 alongside it.
+
+The first `bundleRelease` fails configuring `:expo` with:
+
+```
+> Could not get unknown property 'release' for SoftwareComponent
+  container of type DefaultSoftwareComponentContainer
+  Script '…/expo-modules-core/android/ExpoModulesCorePlugin.gradle' line: 95
 ```
 
-then add to the `plugins` array in `app.config.js`:
+Line 95 is `from components.release`. That component is registered by AGP when
+it configures the Android library — so the message means **AGP never finished
+configuring the module**, and it names publishing rather than the SDK level,
+which sends you looking in the wrong place entirely.
 
-```js
-[
-  'expo-build-properties',
-  { android: { compileSdkVersion: 36, targetSdkVersion: 36, buildToolsVersion: '36.0.0' } },
-],
+`patch-signing.js` now writes `android.suppressUnsupportedCompileSdk=36` into
+`gradle.properties`, which tells AGP to attempt an SDK it does not know rather
+than refuse. **Try that first.** Also check the platform is actually installed —
+Android Studio → SDK Manager → *Android 16 (API 36)* — because a missing
+platform produces failures in the same area.
+
+If it still fails, stop fighting it:
+
+```powershell
+$env:ANDROID_TARGET_SDK = "35"     # builds; Play will not accept it
 ```
 
-This is the cheap attempt and it is not guaranteed. SDK 52 ships React Native
-0.76 with an Android Gradle Plugin from before API 36 existed, so the build can
-fail on the toolchain rather than on your code. If it builds, **test on a real
-Android 16 device** — a raised target turns on new runtime behaviour (stricter
-background limits, edge-to-edge by default) and the failures land at runtime,
-not at build time.
+That gets you an **installable AAB for real-hardware testing today**, which
+this app has never had, and that is worth more this week than a store listing.
+It does not get you published. For that, route (c).
+
+Either way, if a 36 build does succeed, **test it on a real Android 16 device
+before uploading**: raising the target switches on new runtime behaviour —
+stricter background limits, edge-to-edge by default — and those land at
+runtime, not at build time.
 
 **c. Upgrade the SDK.** SDK 55 and above target API 36 by default. This is the
 real answer and it is a piece of work: three SDK jumps, a React Native upgrade,
 and the first native build this app has ever had. Do it deliberately, not the
 afternoon before a release.
+
+*(Done — SDK 53, which was enough. See section 0 above.)*
+
+</details>
 
 ---
 
@@ -186,28 +250,113 @@ That origin needs a **real certificate**. Android rejects self-signed certs with
 a generic network error, which reads on a phone as "the app does not work"
 rather than as a TLS problem.
 
-### Building locally instead
+### 3b. Building locally, with no Expo account — the NewSMS flow
 
-If you would rather not use Expo's builders:
+This is set up, and it is the same shape as `NewSMS`: prebuild, patch the
+generated Gradle, `bundleRelease`. Nothing here talks to Expo's servers.
 
-```bash
-eas build --platform android --profile production --local
+**You need**, once: **JDK 17** (`java -version`), the **Android SDK** — Android
+Studio, or command-line tools plus `ANDROID_HOME` — and a **keystore**.
+
+#### One-time: the keystore
+
+```powershell
+cd mobile
+keytool -genkeypair -v -storetype PKCS12 `
+  -keystore upload.jks -alias upload `
+  -keyalg RSA -keysize 2048 -validity 10000
 ```
 
-Needs JDK 17, the Android SDK, and on Windows it needs WSL. Or drop EAS
-entirely:
+Then copy `keystore.properties.example` to `keystore.properties` and fill in
+the four values. **Unlike the NewSMS script, the passwords are not in
+`patch-signing.js`** — they are read from that file, which `.gitignore`
+refuses, along with `*.jks`. A keystore password committed to a repo stays in
+the history after it is deleted, and this is an app that carries patient data.
+Worth moving the NewSMS ones out too.
 
-```bash
-npx expo prebuild --platform android --clean
+Back the `.jks` up off this machine. If you accept Play App Signing at first
+upload — do — this is only the *upload* key and Play can reset it; the key
+phones verify is then Google's and cannot be lost.
+
+#### Every release
+
+```powershell
+cd mobile
+
+# 1. Bump the versionCode. Play refuses anything not strictly higher
+#    than the last upload, and it tells you that after the build.
+$env:ANDROID_VERSION_CODE = "2"
+$env:APP_ENV = "production"
+
+# 2. Generate android/ from app.config.js
+npm run prebuild:android
+
+# 3. Re-apply the signing config, ABI filter and lint settings
+npm run sign:android
+
+# 4. Build
 cd android
-./gradlew bundleRelease
-# → android/app/build/outputs/bundle/release/app-release.aab
+.\gradlew.bat bundleRelease
 ```
 
-That route makes signing your problem: `android/` is generated, so a signing
-config added to `build.gradle` is wiped by the next `prebuild`. If you go this
-way, commit `android/` and stop prebuilding, or keep the signing config in
-`gradle.properties` outside the generated tree. EAS exists to avoid this choice.
+Or all four at once, on Windows:
+
+```powershell
+$env:ANDROID_VERSION_CODE = "2"; $env:APP_ENV = "production"; npm run aab
+```
+
+The bundle lands at:
+
+```
+mobile/android/app/build/outputs/bundle/release/app-release.aab
+```
+
+Check it went out with the right key before you upload — a debug-signed bundle
+is refused by Play, and a debug-signed *APK* installed by a tester is worse,
+because it can never be updated:
+
+```powershell
+keytool -printcert -jarfile android\app\build\outputs\bundle\release\app-release.aab
+```
+
+On macOS or Linux the only differences are `./gradlew bundleRelease` and
+`ANDROID_VERSION_CODE=2 APP_ENV=production` in front of the command.
+
+#### Why step 3 exists at all
+
+`android/` is **generated**, and `--clean` deletes it first — so anything
+edited into `build.gradle` by hand disappears on the next prebuild without a
+word, and the build keeps succeeding with the *debug* key. `patch-signing.js`
+re-applies four things each time:
+
+| | What | Why |
+| --- | --- | --- |
+| 1 | a `release` block in `signingConfigs` | reads `keystore.properties`; Expo generates only a `debug` one |
+| 2 | release build type → `signingConfigs.release` | otherwise the release AAB is debug-signed |
+| 3 | `abiFilters "arm64-v8a", "x86_64"` | 32-bit cannot meet Android 15's 16 KB page size, and every API 36 device is 64-bit |
+| 4 | `lint { checkReleaseBuilds false }` | a lint finding in generated code should not be the thing between you and an upload |
+
+It is safe to run twice — each edit checks for itself first. Your NewSMS
+version is not: it appends a second `release { }` block on a second run, and
+Gradle then fails on a duplicate name well away from anything that explains it.
+
+`useLegacyPackaging`, `targetSdkVersion` and Proguard are **not** patched here,
+unlike NewSMS. They come from `expo-build-properties` in `app.config.js`, so
+they are in place the moment prebuild writes the project rather than being
+edited back in afterwards. Fewer moving parts, and they also apply if you ever
+run an EAS build.
+
+#### A bug this found, worth knowing if you copy the pattern
+
+The first version of `patch-signing.js` tested whether the release signing
+config already existed with a single lazy match across the whole file. That
+match ran straight past `signingConfigs` and found the `release` **build type**
+further down, so it reported "already present", skipped writing the block, and
+then pointed the release build at a `signingConfigs.release` that did not
+exist. Every edit is now scoped to its own block.
+
+It printed four green ticks while doing it. Run the script and read the
+generated `build.gradle` at least once rather than trusting the output.
 
 ### A staging build to put on a phone first
 

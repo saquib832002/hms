@@ -14,9 +14,26 @@ import { api } from './api';
  * a glance at a lock screen is not.
  */
 
+/*
+ * `shouldShowAlert` was one switch and is now two, as of expo-notifications
+ * 0.31 (SDK 53). The split is real rather than cosmetic: `shouldShowBanner` is
+ * the heads-up card that appears over whatever is on screen, and
+ * `shouldShowList` is whether it stays in the notification tray afterwards.
+ *
+ * Both are true here deliberately. A banner without a list entry is a message
+ * that vanishes if somebody is looking at a patient when it arrives — and the
+ * things this app notifies about are a critical value, a ward request and a
+ * partner's report, none of which should depend on being seen the instant they
+ * land. A list entry without a banner is the opposite failure and just as bad.
+ *
+ * The old field is dropped rather than left beside the new ones: it is
+ * deprecated, and two switches that claim to control the same thing are how
+ * somebody later changes the one that no longer does anything.
+ */
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
-    shouldShowAlert: true,
+    shouldShowBanner: true,
+    shouldShowList: true,
     shouldPlaySound: true,
     shouldSetBadge: true,
   }),

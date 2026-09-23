@@ -91,6 +91,32 @@ const BRAND_RED = '#E8262D';
  */
 const VERSION_CODE = Number(process.env.ANDROID_VERSION_CODE ?? 1);
 
+/**
+ * The Android SDK level this **targets**, and deliberately not what it
+ * compiles against.
+ *
+ * 36 because Play has refused anything lower since 31 August 2026.
+ *
+ * `compileSdkVersion` is left alone on purpose, and that distinction is the
+ * whole of a day lost. Setting *both* to 36 on SDK 52 broke the build with
+ * *"Could not get unknown property 'release' for SoftwareComponent
+ * container"* — a message about publishing, from `ExpoModulesCorePlugin`,
+ * naming nothing to do with an SDK level. The cause was the **compile**
+ * level: that AGP had been tested to 35 and would not configure the module
+ * above it. `targetSdkVersion` was never what it objected to.
+ *
+ * AGP tolerates a target above its compile level — it warns. SDK 53 brings
+ * AGP 8.8.2, and the sibling project on the same toolchain has shipped sixty
+ * releases targeting 36 with compileSdk untouched. Raising compileSdk buys
+ * nothing here: it decides which APIs the code may *call*, and this app calls
+ * none that are new in 36.
+ *
+ * The lever remains for the case where 36 turns out to misbehave at runtime:
+ *
+ *   $env:ANDROID_TARGET_SDK = "35"    # builds, but Play will not take it
+ */
+const ANDROID_SDK = Number(process.env.ANDROID_TARGET_SDK ?? 36);
+
 const config = ENVIRONMENTS[ENV];
 
 if (!config) {
@@ -157,6 +183,22 @@ module.exports = {
       package: config.packageId,
       versionCode: VERSION_CODE,
       permissions: ['USE_BIOMETRIC', 'USE_FINGERPRINT'],
+
+      /*
+       * Declared rather than inherited. At `targetSdkVersion` 36 Android draws
+       * app content under the status and navigation bars and **gives no way to
+       * opt out** — so leaving this unset does not keep the old behaviour, it
+       * only means Expo's plugin does not configure the transparent system bars
+       * that make the new one look deliberate.
+       *
+       * The app already survives it: `AppHeader` wraps itself in a
+       * `SafeAreaView edges={['top']}`, and the tab bar takes its bottom inset
+       * from react-navigation. What neither of those can prove is how it looks,
+       * and a header sitting under the clock is the kind of fault this project
+       * has twice found only by rendering something and looking at it. First
+       * thing to check on a real handset.
+       */
+      edgeToEdgeEnabled: true,
       /*
        * `backgroundColor` must equal the field the foreground was drawn
        * against. The heartbeat through the cross is a cut in that colour, not a
@@ -199,11 +241,12 @@ module.exports = {
        * afterwards — these have to be in place *before* `expo prebuild` writes
        * `android/`, because that is the moment the Gradle files are produced.
        *
-       * `targetSdkVersion: 36` is not a preference. Since 31 August 2026 Play
-       * rejects any upload targeting lower, and Expo SDK 52 defaults to 35 —
-       * so without this line the AAB builds, uploads, and is refused by the
-       * store with a message about the target SDK. SDK 55 and above default to
-       * 36 and this override becomes redundant rather than wrong.
+       * `targetSdkVersion` is not a preference. Since 31 August 2026 Play
+       * rejects any upload targeting lower than 36, and SDK 53 defaults to 35
+       * — so without this line the AAB builds, uploads, and is refused by the
+       * store. There is no matching `compileSdkVersion`, for the reason given
+       * where `ANDROID_SDK` is declared: raising *that* is what broke the
+       * build, and it buys nothing.
        *
        * `useLegacyPackaging: false` loads native libraries straight out of the
        * APK, which is what Android 15's 16 KB memory pages require. The old
@@ -218,8 +261,7 @@ module.exports = {
         'expo-build-properties',
         {
           android: {
-            targetSdkVersion: 36,
-            compileSdkVersion: 36,
+            targetSdkVersion: ANDROID_SDK,
             useLegacyPackaging: false,
             enableProguardInReleaseBuilds: true,
             enableShrinkResourcesInReleaseBuilds: true,
