@@ -1,4 +1,4 @@
-import { parseFrequency } from '../medications/dose-frequency';
+import { courseDays, estimateQuantity } from './course-quantity';
 
 /**
  * Choosing which stock to hand over, and how much.
@@ -79,58 +79,32 @@ export function inDateQuantity(batches: Batch[], now: Date = new Date()): number
 /**
  * How many units a course needs — when that can be worked out honestly.
  *
- * Same discipline as the frequency parser: a suggestion the pharmacist can
- * accept, never a number the system commits to on its own. Both the frequency
- * and the duration have to be confidently readable, otherwise this returns
- * null and the pharmacist types the quantity.
+ * A suggestion the pharmacist can accept, never a number the system commits to
+ * on its own. The dosage, frequency and duration all have to be confidently
+ * readable, otherwise this returns null and the pharmacist types the quantity.
  *
- * Getting this wrong means sending a patient home with the wrong number of
- * days of medicine, which is exactly the kind of quiet error that is worth
- * refusing to guess at.
+ * **The dosage is part of the sum, and for six phases it was not.** This used
+ * to be `timesPerDay × days`, which is wrong by a factor of the dose size:
+ * "2 tablets, three times daily, 5 days" came out as 15 against a real 30. The
+ * arithmetic now lives in `course-quantity.ts`, shared byte-for-byte with both
+ * prescribing screens so the counter and the prescription sheet cannot show
+ * different numbers for the same line.
  */
-export function suggestQuantity(frequency: string, duration: string): number | null {
-  const schedule = parseFrequency(frequency);
-  if (!schedule) return null;
-
-  const days = parseDurationDays(duration);
-  if (days === null) return null;
-
-  return schedule.timesPerDay * days;
+export function suggestQuantity(
+  dosage: string,
+  frequency: string,
+  duration: string,
+): number | null {
+  return estimateQuantity(dosage, frequency, duration).units;
 }
 
-/** Days in a duration string, or null when it is not unambiguous. */
-export function parseDurationDays(duration: string): number | null {
-  const text = duration.trim().toLowerCase().replace(/\s+/g, ' ');
-  if (!text) return null;
-
-  // "as directed", "ongoing", "until review" — a course with no end has no
-  // computable quantity.
-  if (/ongoing|as directed|until review|indefinite|continuous|prn|as needed/.test(text)) {
-    return null;
-  }
-
-  const match = /^(\d+)\s*(day|days|week|weeks|month|months)\b/.exec(text);
-  if (!match) return null;
-
-  const value = Number(match[1]);
-  if (!Number.isFinite(value) || value <= 0 || value > 365) return null;
-
-  switch (match[2]) {
-    case 'day':
-    case 'days':
-      return value;
-    case 'week':
-    case 'weeks':
-      return value * 7;
-    case 'month':
-    case 'months':
-      // 30 days, stated rather than assumed. Calendar months vary, and for
-      // counting tablets a fixed 30 is the convention.
-      return value * 30;
-    default:
-      return null;
-  }
-}
+/**
+ * Days in a duration string, or null when it is not unambiguous.
+ *
+ * Re-exported from the shared module rather than reimplemented — this was a
+ * second copy of the same rules and the two had already started to drift.
+ */
+export const parseDurationDays = courseDays;
 
 /** Batches expiring within `days`, soonest first — the stock to use or lose. */
 export function expiringSoon<T extends { expiresAt: Date }>(

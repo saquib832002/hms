@@ -1,4 +1,4 @@
-import { UserRole } from '@prisma/client';
+import { SubscriptionStatus, TenantModule, UserRole } from '@prisma/client';
 import { AuthUser } from '../common/types/auth-user';
 import {
   assignedRoles,
@@ -39,6 +39,9 @@ export interface SessionUserRow {
     slug: string;
     timezone: string;
     currency: string;
+    subscriptionStatus: SubscriptionStatus;
+    subscriptionEndsAt: Date | null;
+    modules: TenantModule[];
   };
 }
 
@@ -60,6 +63,23 @@ export function toSessionUser(user: SessionUserRow, activeRole?: UserRole): Auth
       slug: user.tenant.slug,
       timezone: user.tenant.timezone,
       currency: user.tenant.currency,
+      /*
+       * Carried on the session because `SubscriptionGuard` needs it on every
+       * write, and re-reading the tenant per request would be a second query
+       * for something this row already has. Re-read per request like the role
+       * and the currency, so restoring a subscription takes effect on the next
+       * request rather than at the next login — which matters, because the
+       * person who just paid is standing over somebody waiting to work.
+       */
+      subscriptionStatus: user.tenant.subscriptionStatus,
+      subscriptionEndsAt: user.tenant.subscriptionEndsAt,
+      /*
+       * Re-read per request like everything else here, so a vendor granting a
+       * module takes effect on the next request rather than at the next login.
+       * The person who has just bought the lab is usually on the telephone
+       * asking why they cannot see it.
+       */
+      modules: user.tenant.modules,
     },
     email: user.email,
     fullName: user.fullName,
@@ -92,5 +112,15 @@ export function toSessionUser(user: SessionUserRow, activeRole?: UserRole): Auth
 export const SESSION_USER_INCLUDE = {
   doctorProfile: { select: { id: true } },
   roleAssignments: { select: { role: true } },
-  tenant: { select: { name: true, slug: true, timezone: true, currency: true } },
+  tenant: {
+    select: {
+      name: true,
+      slug: true,
+      timezone: true,
+      currency: true,
+      subscriptionStatus: true,
+      subscriptionEndsAt: true,
+      modules: true,
+    },
+  },
 } as const;

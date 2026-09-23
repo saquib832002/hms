@@ -1,13 +1,15 @@
 import { Body, Controller, Get, Param, ParseIntPipe, Post } from '@nestjs/common';
-import { UserRole } from '@prisma/client';
+import { UserRole, TenantModule } from '@prisma/client';
 import { MedicalRecordsService } from './medical-records.service';
 import { CreateMedicalRecordDto } from './dto/create-medical-record.dto';
 import { Roles } from '../common/decorators/roles.decorator';
+import { RequiresModule } from '../common/decorators/requires-module.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { AuditAction } from '../common/decorators/audit.decorator';
 import { AuthUser } from '../common/types/auth-user';
 
 @Controller('patients/:patientId/records')
+@RequiresModule(TenantModule.CLINIC)
 export class MedicalRecordsController {
   constructor(private readonly records: MedicalRecordsService) {}
 

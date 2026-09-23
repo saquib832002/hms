@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AuthUser } from '../common/types/auth-user';
 import { parseDateParam } from '../common/utils/hospital-time';
 import { ClinicSettingsService } from '../common/tenancy/clinic-settings.service';
+import { rankShortcuts, rankValues, type PrescribedItem } from './prescribing-history';
 
 /**
  * Aggregate endpoint for the doctor's queue screen.
@@ -91,6 +92,67 @@ export class MeService {
       })),
     };
   }
+
+  /**
+   * What this doctor prescribes, so they can stop retyping it.
+   *
+   * Prescribing is repetitive to a degree that makes free-text entry an odd
+   * choice: the same clinician writes the same three lines most days. This
+   * returns their own most-used combinations so a repeat is one tap.
+   *
+   * WHAT IT IS NOT
+   * --------------
+   * It suggests nothing the doctor has not already prescribed themselves.
+   * Proposing a treatment is clinical decision support — a regulated medical
+   * device in most places, needing clinical validation rather than a plausible
+   * ranking — and it is exactly the kind of feature that gets trusted long
+   * before anybody checks it. Recall is a different thing from advice, and only
+   * one of them belongs in a text field.
+   *
+   * Ranked in application code rather than SQL because Prisma cannot group by
+   * columns on a related model, and because the ranking is a judgement worth
+   * unit-testing on its own.
+   */
+  async prescribing(user: AuthUser) {
+    if (!user.doctorId) {
+      throw new ForbiddenException('Only a doctor has a prescribing history');
+    }
+
+    /*
+     * A window, not everything. A doctor with years of history does not need
+     * all of it to know what they wrote last week, and an unbounded read on a
+     * screen that opens mid-consultation is the wrong trade.
+     */
+    const rows = await this.prisma.prescriptionItem.findMany({
+      where: { prescription: { doctorId: user.doctorId } },
+      select: {
+        medicineName: true,
+        medicineId: true,
+        dosage: true,
+        frequency: true,
+        duration: true,
+        prescription: { select: { issuedAt: true } },
+      },
+      orderBy: { id: 'desc' },
+      take: 500,
+    });
+
+    const items: PrescribedItem[] = rows.map((r) => ({
+      medicineName: r.medicineName,
+      medicineId: r.medicineId,
+      dosage: r.dosage,
+      frequency: r.frequency,
+      duration: r.duration,
+      issuedAt: r.prescription.issuedAt,
+    }));
+
+    return {
+      shortcuts: rankShortcuts(items),
+      frequencies: rankValues(items, 'frequency'),
+      durations: rankValues(items, 'duration'),
+    };
+  }
+
 }
 
 function ageFrom(dob: Date): number {

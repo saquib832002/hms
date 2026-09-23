@@ -9,6 +9,7 @@ import { StatusChip } from '@/components/ui/status-chip';
 import { Freshness } from '@/components/freshness';
 import { useAutoRefresh } from '@/lib/use-auto-refresh';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { useMoney } from '@/lib/use-money';
 
 /**
  * Reception's landing screen.
@@ -17,13 +18,26 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog';
  * reading screen. One click per row and no confirmation dialogs for routine
  * status changes; a receptionist does this forty times a morning.
  */
+/**
+ * Billable from arrival onwards — never before, never after cancellation.
+ *
+ * Mirrors the server's list. SCHEDULED is excluded because a patient who has
+ * not arrived may never arrive; CANCELLED and NO_SHOW are revenue invented from
+ * an empty chair. The API enforces this — the list here only decides whether to
+ * draw a button.
+ */
+const BILLABLE: AppointmentStatus[] = ['CHECKED_IN', 'IN_PROGRESS', 'COMPLETED'];
+
 export default function CheckInPage() {
+  const money = useMoney();
   const [date, setDate] = useState(isoDate());
   const [rows, setRows] = useState<Appointment[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [cursor, setCursor] = useState(0);
   const [noShow, setNoShow] = useState<Appointment | null>(null);
+  /** Confirmation of a raised invoice — the amount has to be read out loud. */
+  const [billed, setBilled] = useState<{ name: string; amount: string } | null>(null);
 
   // Does NOT clear `rows` — this runs every 15 seconds, and blanking the table
   // to a skeleton on each tick would make the screen flicker constantly.
@@ -47,6 +61,47 @@ export default function CheckInPage() {
     void refreshNow();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [date]);
+
+  /**
+   * Raise the consultation invoice for a patient who has arrived.
+   *
+   * Shown from check-in onwards, because that is the moment: the patient
+   * arrives, pays at the desk, and then waits to be seen. Billing only after
+   * the consultation means chasing someone who has already left the building.
+   *
+   * OFFERED, NOT REQUIRED
+   * ---------------------
+   * Nothing in the clinical path checks whether this happened. The doctor sees
+   * the patient whether or not they have paid, and the charge can be raised or
+   * settled afterwards — COMPLETED is still billable. That is a safety
+   * position, not an oversight: a payment gate fails at the only moment it
+   * matters, which is the patient who deteriorated in the waiting room or the
+   * one the clinic chose to treat for nothing.
+   *
+   * A deliberate click rather than automatic on check-in, too. Free follow-ups
+   * and written-off visits are ordinary, and each auto-invoiced one would need
+   * voiding — an audit trail full of corrections is worse than one tap.
+   */
+  async function raiseInvoice(a: Appointment) {
+    setBusyId(a.id);
+    setError(null);
+    try {
+      const invoice = await api<{ id: number; totalAmount: string }>(
+        `/appointments/${a.id}/invoice`,
+        { method: 'POST' },
+      );
+      setRows((prev) =>
+        prev?.map((r) => (r.id === a.id ? { ...r, invoice: { id: invoice.id } } : r)) ?? null,
+      );
+      setBilled({ name: a.patient?.fullName ?? 'this patient', amount: invoice.totalAmount });
+    } catch (err) {
+      // The server explains why: no fee set for that doctor, already invoiced,
+      // or a status that cannot be billed.
+      setError(err instanceof ApiError ? err.message : 'Could not raise the invoice');
+    } finally {
+      setBusyId(null);
+    }
+  }
 
   async function setStatus(id: number, status: AppointmentStatus) {
     setBusyId(id);
@@ -177,6 +232,22 @@ export default function CheckInPage() {
                           No-show
                         </Button>
                       </div>
+                    ) : BILLABLE.includes(a.status) ? (
+                      /* Arrived. The charge can be raised from here until the
+                         consultation is finished and beyond — payment is never
+                         a precondition for being seen. */
+                      a.invoice ? (
+                        <span className="text-xs text-success">Invoiced</span>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="primary"
+                          disabled={busyId === a.id}
+                          onClick={() => void raiseInvoice(a)}
+                        >
+                          Bill
+                        </Button>
+                      )
                     ) : (
                       <span className="text-text-subtle">—</span>
                     )}
@@ -203,6 +274,21 @@ export default function CheckInPage() {
           setNoShow(null);
         }}
         onCancel={() => setNoShow(null)}
+      />
+
+      {/* The amount is read out to the patient standing at the desk, so it is
+          stated rather than left to be found on the invoices screen. */}
+      <ConfirmDialog
+        open={billed !== null}
+        title="Invoice raised"
+        consequence={
+          billed
+            ? `${money(billed.amount)} due from ${billed.name}. Take payment now on the Invoices screen, or later — the doctor will see them either way.`
+            : ''
+        }
+        confirmLabel="Done"
+        onConfirm={() => setBilled(null)}
+        onCancel={() => setBilled(null)}
       />
 
       <div className="shrink-0 border-t border-border bg-surface px-4 py-1 text-xxs text-text-subtle">

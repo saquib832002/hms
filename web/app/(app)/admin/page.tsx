@@ -3,7 +3,14 @@
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { api } from '@/lib/api';
-import type { ActivityReport, AdminDashboard, FinanceReport, StaffReport } from '@/lib/types';
+import type {
+  ActivityReport,
+  AdminDashboard,
+  FinanceReport,
+  StaffReport,
+  TenantModule,
+} from '@/lib/types';
+import { useAuth } from '@/lib/auth-context';
 import { titleCase } from '@/lib/format';
 import { Card, ErrorState, Skeleton } from '@/components/ui/primitives';
 import { Freshness } from '@/components/freshness';
@@ -26,6 +33,20 @@ export default function AdminDashboardPage() {
   const [staff, setStaff] = useState<StaffReport | null>(null);
   const [finance, setFinance] = useState<FinanceReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const { user } = useAuth();
+  /*
+   * The dashboard is the floor — every tenant has one — but almost every tile
+   * on it belonged to a module. A pharmacy-only tenant's owner opened this and
+   * read appointments, bed occupancy and a doctor count, all zero, with nothing
+   * about the shop they run. Zeroes for something you were never sold read as a
+   * broken system rather than as a quiet default.
+   */
+  const has = (m: TenantModule) => user?.hospital.modules.includes(m) ?? true;
+  const clinic = has('CLINIC');
+  const wards = has('WARDS');
+  const billing = has('BILLING');
+  const pharmacy = has('PHARMACY');
+  const laboratory = has('LABORATORY');
 
   const load = useCallback(async () => {
     setError(null);
@@ -77,36 +98,99 @@ export default function AdminDashboardPage() {
       ) : (
         <>
           <div className="grid grid-cols-4 gap-3">
-            <Metric
-              label="Appointments today"
-              value={dashboard.appointments.today}
-              sub={`${dashboard.appointments.completedToday} completed`}
-            />
-            <Metric
-              label="Bed occupancy"
-              value={`${dashboard.occupancy.percent}%`}
-              sub={`${dashboard.occupancy.occupied} of ${dashboard.occupancy.beds} beds`}
-              tone={dashboard.occupancy.percent > 90 ? 'danger' : undefined}
-            />
+            {clinic && (
+              <Metric
+                label="Appointments today"
+                value={dashboard.appointments.today}
+                sub={`${dashboard.appointments.completedToday} completed`}
+              />
+            )}
+            {wards && (
+              <Metric
+                label="Bed occupancy"
+                value={`${dashboard.occupancy.percent}%`}
+                sub={`${dashboard.occupancy.occupied} of ${dashboard.occupancy.beds} beds`}
+                tone={dashboard.occupancy.percent > 90 ? 'danger' : undefined}
+              />
+            )}
+            {/*
+              Today's trade, first on the screen for a shop.
+
+              A standalone pharmacy's owner opens this to ask one question —
+              what went out today, and did any of it go out unpriced. That was
+              previously not on the screen at all.
+            */}
+            {pharmacy && (
+              <Metric
+                label="Dispensed today"
+                value={dashboard.pharmacy.dispensesToday}
+                tone={dashboard.pharmacy.unpricedSalesToday > 0 ? 'warning' : undefined}
+                sub={
+                  dashboard.pharmacy.unpricedSalesToday > 0
+                    ? `${dashboard.pharmacy.unpricedSalesToday} went out unpriced`
+                    : `${dashboard.pharmacy.reversalsToday} reversed`
+                }
+              />
+            )}
+            {/*
+              Resulted-but-not-authorised is the backlog worth leading with: the
+              work looks finished from the bench and is invisible to the doctor
+              who asked, because unverified values are deliberately withheld.
+            */}
+            {laboratory && (
+              <Metric
+                label="Tests ordered today"
+                value={dashboard.laboratory.ordersToday}
+                tone={dashboard.laboratory.awaitingAuthorisation > 0 ? 'warning' : undefined}
+                sub={`${dashboard.laboratory.awaitingAuthorisation} awaiting authorisation`}
+              />
+            )}
             {/* Takings, counted from payments received today — not from
                 invoices raised today, which is a different number and the one
                 this dashboard used to show. */}
+            {/*
+              NET is the headline, not gross.
+              -----------------------------
+              This showed `collected.today`, so a £500 payment refunded in full
+              still read as £500 taken — while billing's payments ledger, which
+              is signed, showed nothing for the same day. Two screens
+              disagreeing about one day is worse than either being wrong alone,
+              because it makes both unusable.
+
+              The gross pair stays in the subtitle rather than disappearing:
+              reconciling against a bank statement needs it, since a day that
+              took 5,000 and refunded 500 is not the same day as one that took
+              4,500.
+            */}
+            {billing && (
             <Metric
-              label="Collected today"
-              value={finance ? fmt(finance.collected.today) : '—'}
-              sub={finance ? `${finance.collected.paymentsToday} payments` : undefined}
+              label="Kept today"
+              value={finance ? fmt(finance.net.today) : '—'}
+              sub={
+                finance
+                  ? `${fmt(finance.collected.today)} in · ${fmt(finance.refunded.today)} back · ${finance.collected.paymentsToday} payments`
+                  : undefined
+              }
               tone="success"
               mono
             />
+            )}
+            {billing && (
             <Metric
-              label="Collected this month"
-              value={finance ? fmt(finance.collected.thisMonth) : '—'}
-              sub={finance ? `${finance.collected.paymentsThisMonth} payments` : undefined}
+              label="Kept this month"
+              value={finance ? fmt(finance.net.thisMonth) : '—'}
+              sub={
+                finance
+                  ? `${fmt(finance.collected.thisMonth)} in · ${fmt(finance.refunded.thisMonth)} back`
+                  : undefined
+              }
               mono
             />
+            )}
           </div>
 
           <div className="mt-3 grid grid-cols-4 gap-3">
+            {billing && (
             <Metric
               label="Outstanding"
               value={fmt(dashboard.finance.outstanding)}
@@ -119,15 +203,19 @@ export default function AdminDashboardPage() {
               tone={finance && finance.aging.totalOverdue !== '0.00' ? 'warning' : undefined}
               mono
             />
+            )}
+            {clinic && (
             <Metric
               label="No-show rate, 7 days"
               value={`${dashboard.appointments.noShowRate}%`}
               sub={`${dashboard.appointments.noShowsLastSevenDays} of ${dashboard.appointments.lastSevenDays}`}
               tone={dashboard.appointments.noShowRate > 15 ? 'warning' : undefined}
             />
+            )}
             {/* Unpriced doctors are a dashboard item because they break
                 reception's checkout — the receptionist finds out standing in
                 front of a patient, which is the worst place to find out. */}
+            {clinic && (
             <Metric
               label="Doctors"
               value={dashboard.staff.doctors}
@@ -138,6 +226,20 @@ export default function AdminDashboardPage() {
                   : 'all priced'
               }
             />
+            )}
+            {/*
+              The lab's own queue, beside the hospital's figures rather than
+              inside them. Ordered-but-not-collected is what blocks everything
+              downstream, and it is the queue a patient is physically waiting in.
+            */}
+            {laboratory && (
+              <Metric
+                label="Awaiting collection"
+                value={dashboard.laboratory.awaitingCollection}
+                tone={dashboard.laboratory.awaitingCollection > 0 ? 'warning' : undefined}
+                sub={`${dashboard.laboratory.onTheBench} on the bench`}
+              />
+            )}
           </div>
 
           <div className="mt-3 grid grid-cols-4 gap-3">
@@ -164,12 +266,31 @@ export default function AdminDashboardPage() {
                 nowhere until now. Beds free is the other one an admin actually
                 acts on — an occupancy percentage does not tell you whether the
                 next admission has somewhere to go. */}
-            <Metric
-              label="Beds available"
-              value={dashboard.occupancy.available}
-              tone={dashboard.occupancy.available === 0 ? 'danger' : undefined}
-              sub={`${dashboard.catalogue.medicines} medicines in catalogue`}
-            />
+            {wards && (
+              <Metric
+                label="Beds available"
+                value={dashboard.occupancy.available}
+                tone={dashboard.occupancy.available === 0 ? 'danger' : undefined}
+              />
+            )}
+            {/*
+              The catalogue moved off the beds tile, where it was a subtitle on
+              an unrelated number. Unpriced medicines belong beside the count for
+              the same reason unpriced doctors do: blank is not zero, and the
+              first symptom is a month of stock that was never charged for.
+            */}
+            {pharmacy && (
+              <Metric
+                label="Medicines"
+                value={dashboard.catalogue.medicines}
+                tone={dashboard.catalogue.withoutPrice > 0 ? 'warning' : undefined}
+                sub={
+                  dashboard.catalogue.withoutPrice > 0
+                    ? `${dashboard.catalogue.withoutPrice} with no price`
+                    : 'all priced'
+                }
+              />
+            )}
           </div>
 
           <div className="mt-4 grid grid-cols-2 gap-3">

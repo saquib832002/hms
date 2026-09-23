@@ -5,7 +5,10 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import type { Paginated, PatientListItem, Vital, VitalFlag } from '@/lib/types';
 import { dateTime } from '@/lib/format';
-import { Card, EmptyState, ErrorState, Input, Skeleton } from '@/components/ui/primitives';
+import { useAuth } from '@/lib/auth-context';
+import { Button, Card, EmptyState, ErrorState, Input, Skeleton } from '@/components/ui/primitives';
+import { RecordVitalsSheet } from '@/components/record-vitals-sheet';
+import { ObservationPanel } from '@/components/observation-panel';
 
 export default function VitalsPage() {
   return (
@@ -16,11 +19,25 @@ export default function VitalsPage() {
 }
 
 /**
- * Observation history.
+ * Observations: the plan, the chart, and recording a set.
  *
- * Read-only on web. Entry lives on the phone, because observations are taken
- * at the bedside and typing them into a desktop afterwards is how transcription
- * errors happen — this screen exists to review a chart, not to write one.
+ * WHY THIS STOPPED BEING READ-ONLY
+ * --------------------------------
+ * It said "observations are recorded on the mobile app at the bedside; this is
+ * the review view" — a reasonable sentence describing a screen that could never
+ * show anything. `POST /vitals` had exactly one caller in the codebase, the
+ * mobile offline outbox, and mobile has never run on hardware. So the screen
+ * was always empty, for everybody, since Phase 3.
+ *
+ * The transcription argument behind the rule is real: numbers copied from paper
+ * to a desktop an hour later are numbers that get copied wrong. It is not an
+ * argument for having no way to record them at all, and it does not cover the
+ * two commonest cases — a ward terminal or computer-on-wheels beside the bed,
+ * and an outpatient whose BP is taken at the clinic desk before the doctor.
+ *
+ * The second of those was impossible in a stronger sense: `Vital.admissionId`
+ * has always been nullable, so the data model expected clinic observations, and
+ * nothing in either client could produce one.
  */
 function VitalsView() {
   const router = useRouter();
@@ -85,11 +102,14 @@ function VitalsView() {
 
       <div className="scroll-thin flex-1 overflow-y-auto p-4">
         {patientId ? (
-          <VitalsHistory patientId={patientId} />
+          <VitalsHistory
+            patientId={patientId}
+            patientName={list?.find((p) => p.id === patientId)?.fullName ?? 'this patient'}
+          />
         ) : (
           <EmptyState
             title="Select a patient"
-            description="Observations are recorded on the mobile app at the bedside; this is the review view."
+            description="Their observation plan, chart, and a form to record a new set."
           />
         )}
       </div>
@@ -97,22 +117,92 @@ function VitalsView() {
   );
 }
 
-function VitalsHistory({ patientId }: { patientId: number }) {
+function VitalsHistory({ patientId, patientName }: { patientId: number; patientName: string }) {
+  const { user } = useAuth();
   const [rows, setRows] = useState<Vital[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [recording, setRecording] = useState(false);
+  /*
+   * The current stay, if there is one.
+   *
+   * Observations do not need an admission — the model has always allowed a
+   * clinic reading — but the *plan* does, because a frequency belongs to a stay
+   * rather than to a person. So an outpatient gets the chart and the record
+   * form, and no plan panel, which is the honest shape rather than an empty one.
+   */
+  const [admissionId, setAdmissionId] = useState<number | null>(null);
+  /** Bumped after recording, so the plan re-reads "last observed" and "due". */
+  const [tick, setTick] = useState(0);
 
-  useEffect(() => {
-    setRows(null);
+  const load = useCallback(() => {
     setError(null);
     api<{ data: Vital[] }>(`/patients/${patientId}/vitals?limit=100`)
       .then((r) => setRows(r.data))
       .catch((e) => setError(e instanceof Error ? e.message : 'Could not load observations'));
   }, [patientId]);
 
+  useEffect(() => {
+    setRows(null);
+    setAdmissionId(null);
+    load();
+    api<{ data: { id: number; status: string }[] }>(`/patients/${patientId}/admissions`)
+      .then((r) => setAdmissionId(r.data.find((a) => a.status === 'ADMITTED')?.id ?? null))
+      // An outpatient legitimately has none, and a failure here must not stop
+      // the chart rendering — the observations are the point of the screen.
+      .catch(() => setAdmissionId(null));
+  }, [patientId, load]);
+
+  return (
+    <>
+      <div className="mb-3 flex items-center gap-3">
+        <h2 className="text-md font-semibold text-text">{patientName}</h2>
+        <Button variant="primary" className="ml-auto" onClick={() => setRecording(true)}>
+          Record observations
+        </Button>
+      </div>
+
+      {admissionId !== null && (
+        <div className="mb-3">
+          <ObservationPanel
+            admissionId={admissionId}
+            /*
+             * Only a doctor may relax the frequency. The panel shows the looser
+             * options disabled rather than hiding them, so a nurse can see that
+             * 12-hourly exists and that changing to it is somebody else's call.
+             */
+            canRelax={user?.role === 'DOCTOR'}
+            refreshKey={tick}
+          />
+        </div>
+      )}
+
+      <VitalsTable rows={rows} error={error} />
+
+      <RecordVitalsSheet
+        open={recording}
+        patientId={patientId}
+        patientName={patientName}
+        onClose={() => setRecording(false)}
+        onRecorded={() => {
+          setRecording(false);
+          load();
+          setTick((t) => t + 1);
+        }}
+      />
+    </>
+  );
+}
+
+function VitalsTable({ rows, error }: { rows: Vital[] | null; error: string | null }) {
   if (error) return <ErrorState message={error} />;
   if (!rows) return <Skeleton className="h-48 w-full" />;
   if (rows.length === 0)
-    return <EmptyState title="No observations recorded" description="Nothing has been charted for this patient yet." />;
+    return (
+      <EmptyState
+        title="No observations recorded"
+        description="Nothing has been charted for this patient yet. Record the first set above."
+      />
+    );
 
   return (
     <Card className="p-0">

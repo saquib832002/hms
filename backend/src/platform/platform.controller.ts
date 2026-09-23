@@ -6,7 +6,9 @@ import {
   HttpCode,
   Param,
   ParseIntPipe,
+  Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
@@ -14,6 +16,14 @@ import { PlatformRoute } from '../common/decorators/platform-route.decorator';
 import { CurrentPlatformUser, PlatformGuard, PlatformPrincipal } from './platform-auth';
 import { PlatformService } from './platform.service';
 import { OpenGrantDto, PlatformLoginDto } from './dto/platform.dto';
+import {
+  ApplicationQueryDto,
+  ApproveApplicationDto,
+  CreateTenantDto,
+  RejectApplicationDto,
+  SetSubscriptionDto,
+} from './dto/provisioning.dto';
+import { SetModulesDto } from './dto/set-modules.dto';
 
 /**
  * Vendor sign-in. Separate controller from the rest on purpose.
@@ -57,6 +67,91 @@ export class PlatformController {
   @Get('tenants')
   tenants() {
     return this.platform.tenants();
+  }
+
+  // ── onboarding ────────────────────────────────────────────────────────────
+
+  /**
+   * The signup queue.
+   *
+   * Note what is *not* here: no break-glass grant is needed to read it. A
+   * grant is what buys a look inside somebody's hospital, and an application is
+   * the vendor's own record about a hospital that does not exist yet.
+   */
+  @Get('applications')
+  applications(@Query() query: ApplicationQueryDto) {
+    return this.platform.applications(query.status);
+  }
+
+  /**
+   * Approve, and create the hospital.
+   *
+   * The response carries the administrator's temporary password, once. It is
+   * stored only as a hash, so there is no second chance to read it — which is
+   * why the console shows it on a screen the reviewer has to dismiss rather
+   * than in a toast.
+   */
+  @Post('applications/:id/approve')
+  approveApplication(
+    @CurrentPlatformUser() actor: PlatformPrincipal,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: ApproveApplicationDto,
+  ) {
+    return this.platform.approveApplication(actor, id, dto);
+  }
+
+  @Post('applications/:id/reject')
+  rejectApplication(
+    @CurrentPlatformUser() actor: PlatformPrincipal,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: RejectApplicationDto,
+  ) {
+    return this.platform.rejectApplication(actor, id, dto.reason);
+  }
+
+  /** Onboard a hospital directly, with no application behind it. */
+  @Post('tenants')
+  createTenant(@CurrentPlatformUser() actor: PlatformPrincipal, @Body() dto: CreateTenantDto) {
+    return this.platform.provision(actor, dto);
+  }
+
+  /**
+   * Where a hospital stands commercially.
+   *
+   * The only lever the vendor has over a running hospital, and a blunt one on
+   * purpose: it stops writes and never stops reads. A clinician must not lose
+   * access to a patient record because of a billing event — see
+   * `common/subscription/subscription.ts`.
+   */
+  @Patch('tenants/:id/subscription')
+  setSubscription(
+    @CurrentPlatformUser() actor: PlatformPrincipal,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: SetSubscriptionDto,
+  ) {
+    return this.platform.setSubscription(actor, id, dto);
+  }
+
+  /**
+   * What a hospital has been sold.
+   *
+   * Separate from the subscription, and the separation is the point: one is
+   * what they bought, the other is whether they have paid. An overdue invoice
+   * must not silently take a module away, and a payment must not silently give
+   * one back — different decisions, different people, different moments.
+   *
+   * Removing one blocks new work and leaves every existing record readable.
+   * The response reports how much data is stranded behind anything removed, so
+   * the console can say so rather than leaving the vendor to hear it from the
+   * customer.
+   */
+  @Patch('tenants/:id/modules')
+  setModules(
+    @CurrentPlatformUser() actor: PlatformPrincipal,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: SetModulesDto,
+  ) {
+    return this.platform.setModules(actor, id, dto.modules);
   }
 
   @Post('break-glass')

@@ -4,12 +4,60 @@ import { PrismaService } from '../prisma/prisma.service';
 import { TokenService } from './token.service';
 import { LoginDto } from './dto/login.dto';
 import { SESSION_USER_INCLUDE, toSessionUser } from './session-user';
+import {
+  hasModule,
+  MODULE_LABEL,
+  roleBlockedBy,
+} from '../common/modules/tenant-modules';
 import { AuthUser } from '../common/types/auth-user';
-import { UserRole } from '@prisma/client';
+import { Prisma, UserRole } from '@prisma/client';
 import { canActAs } from '../users/role-assignment';
 
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCKOUT_MINUTES = 15;
+
+/**
+ * Why an address did not resolve to exactly one account.
+ *
+ * **For the log and never for the response.** Every one of these produces the
+ * identical `Invalid email or password`, because naming them would tell an
+ * attacker whether an address is registered and at how many hospitals — the
+ * enumeration oracle the signup form and the partner lookup are also shaped
+ * around.
+ *
+ * They are worth distinguishing anyway, because they are not equally the
+ * caller's fault:
+ *
+ * - `no-such-address` — nothing here. The ordinary case, and usually a typo.
+ * - `ambiguous` — the address exists at two or more hospitals and no code was
+ *   given. **The person typing has done nothing wrong and cannot guess what to
+ *   change**, which is why it was reported as a temporary password not working.
+ * - `no-such-hospital` / `not-at-that-hospital` — a code was given and is wrong,
+ *   or right and holds no such account.
+ * - `row-not-readable` — `app_login_lookup` found the row and the scoped read
+ *   did not, which means the function and the policy disagree. Not the caller's
+ *   fault in any sense, and the shape that took login down completely once.
+ */
+type LoginRefusal =
+  | 'no-such-address'
+  | 'ambiguous'
+  | 'no-such-hospital'
+  | 'not-at-that-hospital'
+  | 'row-not-readable';
+
+/**
+ * Exactly what the scoped read returns, derived rather than restated.
+ *
+ * `SESSION_USER_INCLUDE` is shared so that a new field on the session user is
+ * one edit rather than two; writing this shape out by hand would reintroduce
+ * the second edit through the back door, and the copy that drifts is always the
+ * one nothing points at.
+ */
+type SessionUserRecord = Prisma.UserGetPayload<{ include: typeof SESSION_USER_INCLUDE }>;
+
+type LoginCandidate =
+  | { user: SessionUserRecord; reason: null; hospitals?: undefined }
+  | { user: null; reason: LoginRefusal; hospitals?: number };
 
 export interface LoginResult {
   accessToken: string;
@@ -64,10 +112,27 @@ export class AuthService {
    *    oracle telling an attacker where an address is registered.
    *
    * The practical consequence is that anyone holding accounts at two hospitals
-   * must send the slug. That is the UI's job (subdomain or a remembered
-   * choice), not something to solve by leaking.
+   * must send the slug. **That was described as "the UI's job" and no UI did
+   * it** — `signIn(email, password)` on both clients, so `hospital` was a field
+   * the DTO accepted, this comment relied on, and nothing could fill. Reported
+   * as *"newly created tenant's password is not working"*: the password was
+   * fine and the account was never found, because the address already existed
+   * at another hospital. Sixth instance of a setting with no route in, and the
+   * quietest yet — the other five produced a 404 or a refusal that read as
+   * broken, and this one produces *Invalid email or password*, which reads as
+   * correct.
+   *
+   * WHY THE REFUSAL STILL DOES NOT SAY WHICH
+   * ----------------------------------------
+   * It returns `reason` for the *log*, never for the response. Telling the
+   * client "that address is at two hospitals, pick one" confirms the address is
+   * real and registered more than once — the enumeration oracle this method
+   * exists to close, and the same concern that shapes the signup form and the
+   * partner lookup. So the message is byte-identical for every failure and the
+   * server writes down which branch fired, which is what turns the next report
+   * like this into one log line.
    */
-  private async findLoginCandidate(dto: LoginDto) {
+  private async findLoginCandidate(dto: LoginDto): Promise<LoginCandidate> {
     const email = dto.email.toLowerCase();
 
     /*
@@ -90,6 +155,8 @@ export class AuthService {
       // inferred parameter type has to match the function signature exactly.
     >`SELECT user_id, tenant_id FROM app_login_lookup(${email}::text)`;
 
+    if (candidates.length === 0) return { user: null, reason: 'no-such-address' };
+
     let match: { user_id: number; tenant_id: number } | undefined;
 
     if (dto.hospital) {
@@ -99,27 +166,44 @@ export class AuthService {
         where: { slug: dto.hospital.toLowerCase() },
         select: { id: true, isActive: true },
       });
-      if (!tenant || !tenant.isActive) return null;
+      if (!tenant || !tenant.isActive) return { user: null, reason: 'no-such-hospital' };
       match = candidates.find((c) => c.tenant_id === tenant.id);
+      if (!match) return { user: null, reason: 'not-at-that-hospital' };
     } else {
       // Exactly one, or nothing. Asking "which hospital did you mean" would
       // tell an attacker where an address is registered.
       match = candidates.length === 1 ? candidates[0] : undefined;
+      if (!match) {
+        return { user: null, reason: 'ambiguous', hospitals: candidates.length };
+      }
     }
 
-    if (!match) return null;
     const { user_id, tenant_id } = match;
 
-    return this.prisma.forTenant(tenant_id, () =>
+    const user = await this.prisma.forTenant(tenant_id, () =>
       this.prisma.user.findUnique({
         where: { id: user_id },
         include: SESSION_USER_INCLUDE,
       }),
     );
+
+    /*
+     * The lookup found the row and the scoped read did not.
+     *
+     * Should be impossible — `app_login_lookup` reads the same table — so it
+     * means the policy and the function disagree, which is the failure that
+     * took login down completely once before when ownership of the SECURITY
+     * DEFINER functions moved. Worth its own reason precisely because it is
+     * the one that is not the user's fault at all.
+     */
+    if (!user) return { user: null, reason: 'row-not-readable' };
+
+    return { user, reason: null };
   }
 
   async login(dto: LoginDto): Promise<LoginResult> {
-    const user = await this.findLoginCandidate(dto);
+    const candidate = await this.findLoginCandidate(dto);
+    const user = candidate.user;
 
     // Every failure below returns the same message. Distinguishing "no such
     // user" from "wrong password" hands an attacker a way to enumerate which
@@ -127,6 +211,26 @@ export class AuthService {
     const invalid = () => new UnauthorizedException('Invalid email or password');
 
     if (!user) {
+      /*
+       * The one place the branches are distinguishable, and it is a log line.
+       *
+       * `Invalid email or password` covers four different situations, and
+       * `ambiguous` is the only one where the person typing has done nothing
+       * wrong and cannot possibly guess what to change. It was reported as a
+       * temporary password not working; the password was never checked.
+       *
+       * The address is included because `AllExceptionsFilter` already writes it
+       * to the audit trail on a failed login — so this reveals nothing new to
+       * anybody who can read the server's logs, and without it the line says
+       * that *somebody* failed to sign in, which is the part nobody needs.
+       */
+      this.logger.warn(
+        `Login refused (${candidate.reason}) for ${dto.email}` +
+          (candidate.reason === 'ambiguous'
+            ? `: registered at ${candidate.hospitals} hospitals and no hospital code was given. The client should offer one.`
+            : ''),
+      );
+
       // Spend roughly the same time as a real verification would, so response
       // timing does not reveal whether the account exists.
       await verify(
@@ -215,6 +319,28 @@ export class AuthService {
       // authenticated and this is a UI-visible list, so naming the problem
       // helps them and tells an attacker nothing they could not already see.
       throw new ForbiddenException(`You do not hold the ${role} role`);
+    }
+
+    /*
+     * Holding a role is not the same as being able to act as one.
+     *
+     * A commercial change at the vendor never strips an assignment — that would
+     * take a role off a member of staff mid-shift as a side effect of an
+     * invoice — so somebody can still *hold* DOCTOR at a hospital whose clinic
+     * module has gone. Switching into it would put them on a session with no
+     * screens and a 403 behind every one, which is the state `hasAnyScreen`
+     * exists to explain rather than a state worth entering deliberately.
+     *
+     * The assignment stays, and comes back the moment the module does. Both
+     * clients narrow the switcher from the same rule; this is the boundary,
+     * because the switcher is a list on a page and `POST /auth/switch-role` is
+     * one curl away.
+     */
+    const blocking = roleBlockedBy(role);
+    if (blocking && !hasModule(user.tenant.modules, blocking)) {
+      throw new ForbiddenException(
+        `${MODULE_LABEL[blocking]} is not part of your hospital’s plan, so there is nothing to do as ${role}. Your provider can add it.`,
+      );
     }
 
     const accessToken = await this.tokens.issueAccessToken(user, role);

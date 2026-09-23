@@ -5,7 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/lib/auth-context';
 import { canReach, landingFor } from '@/lib/nav';
 import { Button, Input, Field } from '@/components/ui/primitives';
-import type { UserRole } from '@/lib/types';
+import type { TenantModule, UserRole } from '@/lib/types';
 
 export default function LoginPage() {
   return (
@@ -41,8 +41,11 @@ function safeNext(next: string | null): string | null {
  * the hospital's audit log under their own name. The destination has to be
  * checked against the role that actually arrived, not the one that left.
  */
-function nextForRole(next: string | null, role: UserRole): string {
-  return next && canReach(role, next) ? next : landingFor(role);
+function nextForRole(next: string | null, role: UserRole, modules: TenantModule[]): string {
+  // Checked against the modules too. A `?next=/lab/worklist` left in the bar at
+  // a hospital that has since had the laboratory removed is the same trap as a
+  // `?next=` belonging to another role.
+  return next && canReach(role, next, modules) ? next : landingFor(role, modules);
 }
 
 function LoginForm() {
@@ -57,8 +60,37 @@ function LoginForm() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  /**
+   * The hospital's own code, shown only after something has already failed.
+   *
+   * WHY THIS FIELD EXISTS
+   * ---------------------
+   * An email address is unique *per hospital*, so one person can hold accounts
+   * at two — and login refuses to guess between them, deliberately, because
+   * asking "which hospital did you mean" confirms to anyone who asks that the
+   * address is registered and at more than one place. The way out is to say
+   * which, and the API has accepted `hospital` since login was written while
+   * **neither client could send it**. Anybody in that position got *Invalid
+   * email or password* against a perfectly correct password, which is the
+   * quietest possible version of a dead end.
+   *
+   * WHY IT APPEARS ONLY AFTER A FAILURE, AND ONLY AFTER *ANY* FAILURE
+   * -----------------------------------------------------------------
+   * Almost nobody has two accounts, so a third box on every sign-in is clutter
+   * on the most-used screen in the product. Revealing it after a failure keeps
+   * the form clean and still puts it in front of the one person who needs it.
+   *
+   * The important half is that it appears after *every* failure — a wrong
+   * password included — and not only after the ambiguous one. Showing it only
+   * when the address is genuinely at two hospitals would leak exactly what the
+   * single refusal message exists to hide, by the shape of the form rather than
+   * by its words. The server never says which case it was; neither does this.
+   */
+  const [hospital, setHospital] = useState('');
+  const [failed, setFailed] = useState(false);
+
   useEffect(() => {
-    if (!loading && user) router.replace(nextForRole(next, user.role));
+    if (!loading && user) router.replace(nextForRole(next, user.role, user.hospital.modules));
   }, [user, loading, router, next]);
 
   async function onSubmit(e: React.FormEvent) {
@@ -66,12 +98,14 @@ function LoginForm() {
     setError(null);
     setSubmitting(true);
     try {
-      const u = await signIn(email, password);
-      router.replace(nextForRole(next, u.role));
+      const u = await signIn(email, password, hospital.trim() || undefined);
+      router.replace(nextForRole(next, u.role, u.hospital.modules));
     } catch (err) {
       // The API returns the same message for unknown email and wrong password
       // on purpose — distinguishing them lets an attacker enumerate staff.
       setError(err instanceof Error ? err.message : 'Could not sign in');
+      // Reveal the hospital code on any failure — see the note on `hospital`.
+      setFailed(true);
     } finally {
       setSubmitting(false);
     }
@@ -113,6 +147,21 @@ function LoginForm() {
               required
             />
           </Field>
+
+          {/*
+            Shown after any failure, never only after the ambiguous one — the
+            form's shape must not say what the message deliberately will not.
+          */}
+          {failed && (
+            <Field label="Hospital code" hint="Only if you have accounts at more than one hospital. An administrator there can read it off the clinic settings screen.">
+              <Input
+                value={hospital}
+                onChange={(e) => setHospital(e.target.value)}
+                placeholder="e.g. meridian-clinic"
+                autoComplete="organization"
+              />
+            </Field>
+          )}
 
           {error && (
             <div

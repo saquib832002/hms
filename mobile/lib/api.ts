@@ -2,6 +2,7 @@ import Constants from 'expo-constants';
 import * as SecureStore from 'expo-secure-store';
 import { SecureSession, SecureStorage } from './secure-session';
 import type { AuthUser, UserRole } from './types';
+import { actableRoles } from './nav';
 
 /**
  * Every role has screens here.
@@ -35,6 +36,7 @@ export const MOBILE_ROLES: UserRole[] = [
   'ADMIN',
   'RECEPTIONIST',
   'BILLING_STAFF',
+  'LAB_TECHNICIAN',
 ];
 
 /**
@@ -81,7 +83,10 @@ export const session = new SecureSession(expoStorage);
  * stale.
  *
  * `extra.apiOrigin` still wins when there is no dev server — a standalone or
- * production build — where a real hostname has to be configured.
+ * production build — where a real hostname has to be configured. That value
+ * comes from `app.config.js`, chosen by `APP_ENV` at build time, so shipping a
+ * release no longer means editing a committed file and remembering to change
+ * it back.
  */
 function devServerHost(): string | null {
   // hostUri is the modern field; the others are fallbacks across SDK versions
@@ -114,11 +119,18 @@ let loggedOrigin = false;
 
 export function apiOrigin(): string {
   const extra = Constants.expoConfig?.extra as
-    | { apiOrigin?: string; apiPort?: number }
+    | { apiOrigin?: string | null; apiPort?: number; appEnv?: string }
     | undefined;
   const port = extra?.apiPort ?? 3000;
 
   const host = devServerHost();
+  /*
+   * The dev server's host wins where there is one — that is what makes the app
+   * work on any LAN without configuration. `extra.apiOrigin` is set by
+   * `app.config.js` per environment and is what a standalone build falls back
+   * to, which is precisely when a wrong value is hardest to spot: no Metro
+   * terminal, no log to read, just "network request failed".
+   */
   const resolved = host ? `http://${host}:${port}` : (extra?.apiOrigin ?? `http://localhost:${port}`);
 
   /*
@@ -133,11 +145,23 @@ export function apiOrigin(): string {
     loggedOrigin = true;
     console.log(
       `[api] using ${resolved}` +
-        (host ? ` (derived from Expo dev server host ${host})` : ' (no dev server — from app.json)'),
+        (host ? ` (derived from Expo dev server host ${host})` : ' (no dev server — from app.config.js)'),
     );
   }
 
   return resolved;
+}
+
+/**
+ * Which build this is — `development`, `staging` or `production`.
+ *
+ * Shown on the Account screen. Two builds with different package ids can sit on
+ * one phone, and telling them apart by icon alone is how somebody records
+ * vitals into the wrong database.
+ */
+export function appEnv(): string {
+  const extra = Constants.expoConfig?.extra as { appEnv?: string } | undefined;
+  return extra?.appEnv ?? 'development';
 }
 
 export class ApiError extends Error {
@@ -243,11 +267,24 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
-export async function login(email: string, password: string): Promise<AuthUser> {
+/**
+ * `hospital` is the tenant's own code, needed only by somebody whose address
+ * exists at more than one hospital.
+ *
+ * The API has accepted it since login was written and neither client could send
+ * it, so anybody in that position got *Invalid email or password* against a
+ * correct password. Omitted when blank rather than sent empty, which the DTO's
+ * slug pattern would refuse outright.
+ */
+export async function login(
+  email: string,
+  password: string,
+  hospital?: string,
+): Promise<AuthUser> {
   const res = await fetch(`${apiOrigin()}/api/v1/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, ...(hospital ? { hospital } : {}) }),
   });
   if (!res.ok) throw await parseError(res);
 
@@ -302,9 +339,22 @@ export async function switchRole(role: string): Promise<AuthUser> {
   return data.user;
 }
 
-/** The roles this app can actually show, out of those the user holds. */
+/**
+ * The roles this app can actually show, out of those the user holds.
+ *
+ * Two narrowings, and they answer different questions. `MOBILE_ROLES` is which
+ * roles the phone has screens for — a curated subset, deliberately. `actableRoles`
+ * is which the *hospital* can use: a module removed at the vendor never strips
+ * an assignment, so somebody can still hold DOCTOR at a hospital that gave up
+ * the clinic, and offering it would mean switching into an app with no tabs.
+ *
+ * `POST /auth/switch-role` refuses the same set, so this is the picker rather
+ * than the boundary.
+ */
 export function switchableRoles(user: AuthUser | null): AuthUser['role'][] {
-  return (user?.availableRoles ?? []).filter((r) => MOBILE_ROLES.includes(r));
+  return actableRoles(user?.availableRoles ?? [], user?.hospital.modules).filter((r) =>
+    MOBILE_ROLES.includes(r),
+  );
 }
 
 /**

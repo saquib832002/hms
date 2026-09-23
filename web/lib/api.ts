@@ -105,7 +105,12 @@ async function doRefresh(): Promise<string | null> {
  * still get the result; anyone arriving afterwards correctly starts a new
  * refresh rather than reusing a token that has since been rotated again.
  */
-async function refreshAccessToken(): Promise<string | null> {
+/**
+ * Exported for `lib/documents.ts`, which fetches PDFs rather than JSON and so
+ * cannot go through `api()` — but must share the one in-flight refresh, or a
+ * print and a page load racing each other would each start their own.
+ */
+export async function refreshAccessToken(): Promise<string | null> {
   refreshInFlight ??= doRefresh().finally(() => {
     refreshInFlight = null;
   });
@@ -154,12 +159,26 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
-export async function login(email: string, password: string): Promise<AuthUser> {
+/**
+ * `hospital` is the tenant's own code, and it is only needed by somebody whose
+ * address exists at more than one hospital.
+ *
+ * The API has accepted it since login was written and neither client could send
+ * it, so anybody in that position got *Invalid email or password* against a
+ * password that was perfectly correct — reported as a newly provisioned
+ * hospital's temporary password not working. Omitted when blank rather than
+ * sent as an empty string, which the DTO's slug pattern would refuse outright.
+ */
+export async function login(
+  email: string,
+  password: string,
+  hospital?: string,
+): Promise<AuthUser> {
   const res = await fetch('/api/v1/auth/login', {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, ...(hospital ? { hospital } : {}) }),
   });
   if (!res.ok) throw await parseError(res);
 

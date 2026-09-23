@@ -1,12 +1,14 @@
 import { Body, Controller, Get, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
 import { Type } from 'class-transformer';
 import { IsBooleanString, IsEnum, IsInt, IsOptional } from 'class-validator';
-import { InvoiceStatus, UserRole } from '@prisma/client';
+import { InvoiceStatus, UserRole, TenantModule } from '@prisma/client';
 import { BillingService } from './billing.service';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { RecordPaymentDto } from './dto/record-payment.dto';
 import { VoidInvoiceDto } from './dto/void-invoice.dto';
+import { RefundDto } from './dto/refund.dto';
 import { Roles } from '../common/decorators/roles.decorator';
+import { RequiresModule } from '../common/decorators/requires-module.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { AuditAction } from '../common/decorators/audit.decorator';
 import { AuthUser } from '../common/types/auth-user';
@@ -27,23 +29,27 @@ class InvoiceQueryDto {
  */
 @Controller('billing')
 @Roles(UserRole.BILLING_STAFF, UserRole.ADMIN)
+@RequiresModule(TenantModule.BILLING)
 export class BillingController {
   constructor(private readonly billing: BillingService) {}
 
   @Get('invoices')
   @AuditAction('INVOICE_LIST')
-  findAll(@Query() query: InvoiceQueryDto) {
-    return this.billing.findAll({
-      status: query.status,
-      patientId: query.patientId,
-      overdueOnly: query.overdueOnly === 'true',
-    });
+  findAll(@Query() query: InvoiceQueryDto, @CurrentUser() user: AuthUser) {
+    return this.billing.findAll(
+      {
+        status: query.status,
+        patientId: query.patientId,
+        overdueOnly: query.overdueOnly === 'true',
+      },
+      user.role,
+    );
   }
 
   @Get('invoices/:id')
   @AuditAction('INVOICE_VIEW')
-  findOne(@Param('id', ParseIntPipe) id: number) {
-    return this.billing.findOne(id);
+  findOne(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: AuthUser) {
+    return this.billing.findOne(id, user.role);
   }
 
   @Post('invoices')
@@ -66,6 +72,24 @@ export class BillingController {
     @CurrentUser() user: AuthUser,
   ) {
     return this.billing.recordPayment(id, dto, user);
+  }
+
+  /**
+   * Give money back.
+   *
+   * Its own audit action rather than a variant of PAYMENT_RECORD: money leaving
+   * the clinic is the direction somebody will eventually be asked to account
+   * for, and "who issued refunds, and why" must be answerable without unpicking
+   * a generic payment action.
+   */
+  @Post('invoices/:id/refunds')
+  @AuditAction('REFUND_ISSUE')
+  refund(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: RefundDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.billing.refund(id, dto, user);
   }
 
   @Get('payments')

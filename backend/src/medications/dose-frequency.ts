@@ -70,6 +70,22 @@ const PATTERNS: { test: RegExp; timesPerDay: number; label: string }[] = [
  */
 const NEVER_SCHEDULED = /\b(prn|as needed|as required|when required|if needed|stat|once only)\b/;
 
+/**
+ * Is this an "as needed" medicine?
+ *
+ * Distinct from "the parser could not read it", and the two must not be
+ * collapsed even though both come back unscheduled. An unreadable frequency
+ * wants a nurse to set the times; a PRN medicine must **never** be given times,
+ * because a row saying a dose is *due* is the opposite of what PRN means and
+ * invites giving a medicine the patient did not need.
+ *
+ * So the chart offers different actions for the two, and needs to tell them
+ * apart to do it.
+ */
+export function isAsNeeded(raw: string): boolean {
+  return NEVER_SCHEDULED.test(raw.trim().toLowerCase().replace(/\s+/g, ' '));
+}
+
 export function parseFrequency(raw: string): DoseSchedule | null {
   const text = raw.trim().toLowerCase().replace(/\s+/g, ' ');
   if (!text) return null;

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
-import type { BedRow, Ward, WardBoard } from '@/lib/types';
+import type { BedRow, ObservationFrequency, Ward, WardBoard } from '@/lib/types';
 import { dateTime, time } from '@/lib/format';
 import { api, ApiError } from '@/lib/api';
 import { Button, EmptyState, ErrorState, Select, TableSkeleton } from '@/components/ui/primitives';
@@ -11,6 +11,7 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { useAutoRefresh } from '@/lib/use-auto-refresh';
 import { AdmitSheet, TransferSheet } from '@/components/admit-sheet';
 import { ScheduleMedicationSheet } from '@/components/schedule-medication-sheet';
+import { DrugChartSheet } from '@/components/drug-chart-sheet';
 
 /**
  * The ward board.
@@ -21,14 +22,40 @@ import { ScheduleMedicationSheet } from '@/components/schedule-medication-sheet'
  */
 export default function WardPage() {
   const [wards, setWards] = useState<Ward[]>([]);
+  /*
+   * Distinct from `wards.length === 0`, and the distinction is the whole bug.
+   *
+   * A hospital with no wards configured left `wardId` null, so `load()`
+   * returned immediately, so `board` stayed null — and `{!board && <Skeleton>}`
+   * spun forever with no error and nothing on screen saying why. Reported as
+   * "the ward board never loads, is the backend slow". Nothing was slow: the
+   * hospital had no wards, and this screen had no way to say so.
+   *
+   * Every tenant provisioned through the platform was in that state, because
+   * wards were created by `seed.ts` and by nothing else until now.
+   */
+  const [wardsLoaded, setWardsLoaded] = useState(false);
   const [wardId, setWardId] = useState<number | null>(null);
   const [board, setBoard] = useState<WardBoard | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [admitting, setAdmitting] = useState(false);
   const [transferring, setTransferring] = useState<BedRow | null>(null);
   const [scheduling, setScheduling] = useState<BedRow | null>(null);
+  const [charting, setCharting] = useState<BedRow | null>(null);
   const [discharging, setDischarging] = useState<BedRow | null>(null);
   const [dischargeBusy, setDischargeBusy] = useState(false);
+  /*
+   * A request that never resolves looks exactly like a fast one while the
+   * skeleton is up, which is how a working screen gets reported as a hung
+   * backend. This does not change the wait — it only says the server has not
+   * answered yet, which is the fact the skeleton was hiding.
+   */
+  const [slow, setSlow] = useState(false);
+
+  useEffect(() => {
+    const t = setTimeout(() => setSlow(true), 8_000);
+    return () => clearTimeout(t);
+  }, []);
 
   useEffect(() => {
     api<Ward[]>('/wards')
@@ -36,7 +63,8 @@ export default function WardPage() {
         setWards(w);
         setWardId((prev) => prev ?? w[0]?.id ?? null);
       })
-      .catch((e) => setError(e instanceof Error ? e.message : 'Could not load wards'));
+      .catch((e) => setError(e instanceof Error ? e.message : 'Could not load wards'))
+      .finally(() => setWardsLoaded(true));
   }, []);
 
   const load = useCallback(async () => {
@@ -52,7 +80,7 @@ export default function WardPage() {
   // Paused while any sheet is open — the bed list must not shift under a
   // half-completed admission.
   const { lastUpdated, refreshing, refreshNow } = useAutoRefresh(load, {
-    enabled: !admitting && !transferring && !scheduling && !discharging,
+    enabled: !admitting && !transferring && !scheduling && !discharging && !charting,
   });
 
   async function confirmDischarge() {
@@ -80,6 +108,22 @@ export default function WardPage() {
   }, [wardId]);
 
   if (error && !board) return <ErrorState message={error} onRetry={() => void refreshNow()} />;
+
+  /*
+   * Said plainly, before anything else renders.
+   *
+   * A skeleton means "this is coming"; nothing was coming. An empty state that
+   * names the missing precondition and who can fix it is the difference
+   * between a nurse waiting and a nurse asking the right person.
+   */
+  if (wardsLoaded && wards.length === 0) {
+    return (
+      <EmptyState
+        title="No wards have been set up yet"
+        description="Beds live inside wards, so nobody can be admitted until at least one exists. An administrator adds them under Settings → Wards & Beds."
+      />
+    );
+  }
 
   return (
     <>
@@ -123,8 +167,23 @@ export default function WardPage() {
       )}
 
       <div className="scroll-thin flex-1 overflow-y-auto bg-surface">
-        {!board && <TableSkeleton cols={7} />}
-        {board?.beds.length === 0 && <EmptyState title="This ward has no beds configured" />}
+        {!board && (
+          <>
+            {slow && (
+              <p className="border-b border-border px-4 py-2 text-xs text-text-subtle">
+                Still waiting for the server. Nothing has failed yet — if this does not clear,
+                the API may not be running.
+              </p>
+            )}
+            <TableSkeleton cols={7} />
+          </>
+        )}
+        {board?.beds.length === 0 && (
+          <EmptyState
+            title="This ward has no beds configured"
+            description="Nobody can be admitted to a ward with no beds. An administrator adds them under Settings → Wards & Beds."
+          />
+        )}
 
         {board && board.beds.length > 0 && (
           <table className="w-full border-collapse">
@@ -145,6 +204,7 @@ export default function WardPage() {
                 <BedTableRow
                   key={row.bed.id}
                   row={row}
+                  onChart={() => setCharting(row)}
                   onTransfer={() => setTransferring(row)}
                   onSchedule={() => setScheduling(row)}
                   onDischarge={() => setDischarging(row)}
@@ -181,6 +241,12 @@ export default function WardPage() {
         onScheduled={() => void refreshNow()}
       />
 
+      <DrugChartSheet
+        row={charting}
+        onClose={() => setCharting(null)}
+        onChanged={() => void refreshNow()}
+      />
+
       <ConfirmDialog
         open={discharging !== null}
         title="Discharge this patient?"
@@ -198,13 +264,32 @@ export default function WardPage() {
   );
 }
 
+/**
+ * Kept beside the board rather than imported from the server response, because
+ * the board renders it on every row of every 15-second refresh and a label is
+ * not worth a payload. The server sends the same strings on the observation
+ * summary, and `FREQUENCY_LABEL` there is the source those were copied from.
+ */
+const FREQUENCY_LABEL: Record<ObservationFrequency, string> = {
+  QUARTER_HOURLY: 'every 15 min',
+  HALF_HOURLY: 'every 30 min',
+  HOURLY: 'hourly',
+  TWO_HOURLY: '2-hourly',
+  FOUR_HOURLY: '4-hourly',
+  SIX_HOURLY: '6-hourly',
+  TWELVE_HOURLY: '12-hourly',
+  DAILY: 'once daily',
+};
+
 function BedTableRow({
   row,
+  onChart,
   onTransfer,
   onSchedule,
   onDischarge,
 }: {
   row: BedRow;
+  onChart: () => void;
   onTransfer: () => void;
   onSchedule: () => void;
   onDischarge: () => void;
@@ -278,13 +363,41 @@ function BedTableRow({
             Up to date
           </span>
         )}
+        {/*
+          The frequency, beside the flag. "Overdue" alone means different things
+          for a patient on 15-minute observations and one on 12-hourly, and a
+          nurse deciding what to do next needs to know which.
+        */}
+        <div className="mt-0.5 text-xxs text-text-subtle">
+          {FREQUENCY_LABEL[admission.observationFrequency] ?? ''}
+        </div>
+        {/*
+          An escalation nobody answered is the most useful thing that can be on
+          this row, which is why it is a count here rather than something you
+          have to open a screen to find.
+        */}
+        {admission.openEscalations > 0 && (
+          <div className="mt-0.5 font-semibold text-danger">
+            {admission.openEscalations} escalation
+            {admission.openEscalations === 1 ? '' : 's'} unanswered
+          </div>
+        )}
       </td>
       <td className="border-b border-[#f0f2f4] px-3 py-2 text-right">
         <div className="flex justify-end gap-1.5">
-          {/* No drug chart yet means the medication round will never show this
-              patient — worth making obvious rather than leaving to discovery. */}
+          {/*
+            Two different actions, and they were one for six phases.
+            "Chart" opens what this patient is on and what they have had — the
+            question a nurse taking over actually asks, and one nothing in the
+            system could answer. "Add chart" builds doses from a prescription.
+            Labelling the second as though it were the first is why there was
+            no route to the first at all.
+          */}
+          <Button size="sm" onClick={onChart}>
+            Chart
+          </Button>
           <Button size="sm" onClick={onSchedule}>
-            {admission.nextDose ? 'Chart' : 'Add chart'}
+            {admission.nextDose ? 'Add doses' : 'Add chart'}
           </Button>
           <Button size="sm" onClick={onTransfer}>
             Move

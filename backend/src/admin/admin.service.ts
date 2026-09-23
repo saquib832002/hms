@@ -4,7 +4,9 @@ import {
   AdmissionStatus,
   AppointmentStatus,
   AuditOutcome,
+  InvoiceKind,
   InvoiceStatus,
+  LabOrderStatus,
   PaymentMethod,
   UserRole,
 } from '@prisma/client';
@@ -113,6 +115,16 @@ export class AdminService {
         clinicStartHour: next.clinicStartHour,
         clinicEndHour: next.clinicEndHour,
         currency: next.currency,
+        pharmacyBilling: next.pharmacyBilling,
+        hasPharmacy: next.hasPharmacy,
+        acceptsExternalPrescriptions: next.acceptsExternalPrescriptions,
+        labBilling: next.labBilling,
+        hasLab: next.hasLab,
+        acceptsExternalLabOrders: next.acceptsExternalLabOrders,
+        acceptedReferralBilling: next.acceptedReferralBilling,
+        taxEnabled: next.taxEnabled,
+        pricesIncludeTax: next.pricesIncludeTax,
+        consultationTaxRateId: next.consultationTaxRateId,
       },
     });
 
@@ -151,6 +163,7 @@ export class AdminService {
       lowStockCount,
       doctorCount,
       doctorsWithoutFee,
+      medicinesWithoutPrice,
     ] = await Promise.all([
       this.prisma.appointment.count({ where: { scheduledAt: { gte: todayStart, lt: todayEnd } } }),
       this.prisma.appointment.count({ where: { scheduledAt: { gte: weekAgo } } }),
@@ -183,6 +196,10 @@ export class AdminService {
       // because it is untidy: a doctor with no fee cannot be billed for, and the
       // first symptom is a receptionist stuck in front of a patient.
       this.prisma.doctor.count({ where: { consultationFee: null } }),
+      // The same failure one shelf over: an unpriced medicine is dispensed,
+      // leaves stock, and is charged nothing. Nobody notices until a month of
+      // sales turns out to be missing, so it is surfaced rather than waited for.
+      this.prisma.medicine.count({ where: { isActive: true, sellingPrice: null } }),
     ]);
 
     const outstandingMinor = sumMinor(
@@ -200,11 +217,90 @@ export class AdminService {
      * arrived later. Both errors are silent: the number looks plausible, moves
      * when takings move, and is simply not the figure it is labelled as.
      */
-    const recentPayments = await this.prisma.payment.findMany({
-      where: { receivedAt: { gte: weekAgo } },
-      select: { amount: true },
-    });
+    const [recentPayments, recentRefunds] = await Promise.all([
+      this.prisma.payment.findMany({
+        where: { receivedAt: { gte: weekAgo } },
+        select: { amount: true },
+      }),
+      /*
+       * Refunds, because money given back is not money taken.
+       *
+       * This figure previously summed payments alone, so a £500 payment
+       * refunded in full still read as £500 collected — while the billing
+       * screen, which shows a signed ledger, showed nothing. Two screens
+       * disagreeing about the same day is worse than either being wrong on its
+       * own, because it destroys trust in both. Reported from use.
+       */
+      this.prisma.refund.findMany({
+        where: { refundedAt: { gte: weekAgo } },
+        select: { amount: true },
+      }),
+    ]);
+
     const collectedWeekMinor = sumMinor(recentPayments.map((p) => minorOf(p.amount)));
+    const refundedWeekMinor = sumMinor(recentRefunds.map((r) => minorOf(r.amount)));
+
+    /*
+     * What this hospital's own trade looks like, for the parts of the product
+     * it actually bought.
+     *
+     * Reported from use: a pharmacy-only tenant's owner opened the dashboard and
+     * read appointments, bed occupancy and a doctor count, all zero, and nothing
+     * at all about the shop they run. Zeroes for a module you were never sold
+     * are not a quiet default — they read as a broken system, and they push the
+     * one figure that matters off the screen entirely.
+     *
+     * Counted here rather than fetched from `/pharmacy/dashboard` and
+     * `/lab/worklist` by the client, so the admin screen stays one request and
+     * an administrator needs no pharmacy or laboratory role to see their own
+     * hospital's totals.
+     *
+     * Counts and money only. No patient, no medicine name, no test name — the
+     * rule that `access-matrix.spec.ts` enforces as "admin gets no clinical
+     * READ endpoint at all" applies here as much as anywhere, and a test name
+     * is the sharpest leak in the system.
+     */
+    const [
+      dispensesToday,
+      reversalsToday,
+      unpricedSalesToday,
+      labOrdersToday,
+      labAwaitingCollection,
+      labOnTheBench,
+      labAwaitingAuthorisation,
+    ] = await Promise.all([
+      this.prisma.dispenseEvent.count({
+        where: { dispensedAt: { gte: todayStart, lt: todayEnd }, reversedAt: null },
+      }),
+      this.prisma.dispenseEvent.count({
+        where: { reversedAt: { gte: todayStart, lt: todayEnd } },
+      }),
+      /*
+       * A handover with no price still leaves the shelf. This is the number
+       * nothing else surfaces daily, and it is how a month of unbilled stock
+       * happens — the same argument that puts unpriced doctors on this screen.
+       */
+      this.prisma.dispenseEvent.count({
+        where: {
+          dispensedAt: { gte: todayStart, lt: todayEnd },
+          reversedAt: null,
+          invoiceId: null,
+        },
+      }),
+      this.prisma.labOrder.count({ where: { orderedAt: { gte: todayStart, lt: todayEnd } } }),
+      // Ordered and not yet collected: the queue that blocks everything after
+      // it, and the one a patient is physically waiting in.
+      this.prisma.labOrder.count({ where: { status: LabOrderStatus.ORDERED } }),
+      this.prisma.labOrder.count({
+        where: { status: { in: [LabOrderStatus.COLLECTED, LabOrderStatus.IN_PROGRESS] } },
+      }),
+      /*
+       * Resulted but not verified. Values on a bench are not a report and the
+       * ordering doctor cannot see them, so a backlog here is invisible work
+       * that looks finished from the lab's side and missing from the ward's.
+       */
+      this.prisma.labOrder.count({ where: { status: LabOrderStatus.RESULTED } }),
+    ]);
 
     return {
       generatedAt: now,
@@ -225,7 +321,20 @@ export class AdminService {
       },
       finance: {
         outstanding: fromMinor(outstandingMinor),
+        /*
+         * Gross in, gross out, net derived — all three, never one that hides
+         * the others.
+         *
+         * `net` is what a screen should lead with, because it is the figure
+         * that agrees with the payments ledger billing staff read. The two
+         * gross figures stay because reconciliation against a bank statement
+         * needs them: a day that took 5,000 and refunded 500 is not the same
+         * day as one that took 4,500, and only the gross pair can tell them
+         * apart.
+         */
         collectedLastSevenDays: fromMinor(collectedWeekMinor),
+        refundedLastSevenDays: fromMinor(refundedWeekMinor),
+        netLastSevenDays: fromMinor(collectedWeekMinor - refundedWeekMinor),
         openInvoices: invoices.filter((i) => i.status !== InvoiceStatus.PAID).length,
       },
       staff: {
@@ -240,6 +349,27 @@ export class AdminService {
       },
       catalogue: {
         medicines: lowStockCount,
+        /** Active medicines nobody has priced. Blank is not zero. */
+        withoutPrice: medicinesWithoutPrice,
+      },
+      /*
+       * Always returned, rendered only where the module is. Computing them
+       * unconditionally is a handful of counts and keeps this endpoint's shape
+       * fixed — a response whose keys change with the plan is one every caller
+       * has to guard, and the client already knows which modules it has.
+       */
+      pharmacy: {
+        dispensesToday,
+        reversalsToday,
+        /** Went out of the shop with nothing to charge for it. */
+        unpricedSalesToday,
+      },
+      laboratory: {
+        ordersToday: labOrdersToday,
+        awaitingCollection: labAwaitingCollection,
+        onTheBench: labOnTheBench,
+        /** Resulted, not authorised — invisible to the doctor who asked. */
+        awaitingAuthorisation: labAwaitingAuthorisation,
       },
     };
   }
@@ -314,14 +444,45 @@ export class AdminService {
     const { start: monthStart } = hospitalMonthRange(now, tz);
     const window = recentMonths(now, tz, Math.min(Math.max(months, 1), 24));
 
-    const [rows, invoices] = await Promise.all([
+    /*
+     * The invoice each payment settled comes back with it, because the kind of
+     * invoice decides whose takings it is.
+     *
+     * WHY THIS MATTERS MORE THAN IT LOOKS
+     * -----------------------------------
+     * In SEPARATE mode the pharmacy is a different business, and a "collected
+     * today" that silently adds a shop's counter takings to the hospital's is
+     * the same class of error as the one this report was rewritten to fix:
+     * summing invoices issued instead of payments received. Both produce a
+     * plausible number that moves when takings move and answers a question
+     * nobody asked.
+     *
+     * `invoice: { select: { kind: true } }` rather than `invoice: true`, for
+     * the reason `reports.spec.ts` pins elsewhere — the wide include pulls a
+     * `patientId` into a finance report as valid, unremarkable data.
+     */
+    const [rows, refundRows, invoices] = await Promise.all([
       this.prisma.payment.findMany({
         where: { receivedAt: { gte: window.start } },
-        select: { amount: true, method: true, receivedAt: true },
+        select: {
+          amount: true,
+          method: true,
+          receivedAt: true,
+          invoice: { select: { kind: true } },
+        },
+      }),
+      this.prisma.refund.findMany({
+        where: { refundedAt: { gte: window.start } },
+        select: {
+          amount: true,
+          method: true,
+          refundedAt: true,
+          invoice: { select: { kind: true } },
+        },
       }),
       this.prisma.invoice.findMany({
         where: { voidedAt: null, status: { notIn: [InvoiceStatus.CANCELLED] } },
-        select: { id: true, dueDate: true, totalAmount: true, amountPaid: true },
+        select: { id: true, kind: true, dueDate: true, totalAmount: true, amountPaid: true },
       }),
     ]);
 
@@ -330,7 +491,39 @@ export class AdminService {
       monthKey: hospitalMonthKey(p.receivedAt, tz),
       method: p.method,
       receivedAt: p.receivedAt,
+      kind: p.invoice?.kind ?? InvoiceKind.HOSPITAL,
     }));
+
+    /*
+     * Refunds are carried alongside, never subtracted into `collected`.
+     *
+     * A month showing £4,000 could be £4,000 taken, or £5,000 taken with
+     * £1,000 given back — and those are different months. Netting them into one
+     * figure makes the second invisible, and it is the one somebody has to
+     * explain. Gross in, gross out, net stated separately.
+     */
+    const refunds: ReportablePayment[] = refundRows.map((r) => ({
+      amountMinor: minorOf(r.amount),
+      monthKey: hospitalMonthKey(r.refundedAt, tz),
+      method: r.method,
+      receivedAt: r.refundedAt,
+      kind: r.invoice?.kind ?? InvoiceKind.HOSPITAL,
+    }));
+
+    /*
+     * Split by whose books the money is on.
+     *
+     * `hospitalPayments` is what the headline figures report, so a hospital
+     * running a separately-billed pharmacy sees its own takings and not a
+     * flattering total that includes a shop. The pharmacy's own figures are
+     * reported beside them, never inside them.
+     */
+    const hospitalPayments = payments.filter((p) => p.kind === InvoiceKind.HOSPITAL);
+    const hospitalRefunds = refunds.filter((r) => r.kind === InvoiceKind.HOSPITAL);
+    const pharmacyPayments = payments.filter((p) => p.kind === InvoiceKind.PHARMACY);
+    const pharmacyRefunds = refunds.filter((r) => r.kind === InvoiceKind.PHARMACY);
+    const labPayments = payments.filter((p) => p.kind === InvoiceKind.LAB);
+    const labRefunds = refunds.filter((r) => r.kind === InvoiceKind.LAB);
 
     // Every method the schema knows, so a method that took nothing today shows
     // a zero rather than being absent from the table.
@@ -340,21 +533,103 @@ export class AdminService {
       generatedAt: now,
       timezone: tz,
       collected: {
-        today: collectedSince(payments, todayStart),
-        thisMonth: collectedSince(payments, monthStart),
-        paymentsToday: payments.filter((p) => p.receivedAt >= todayStart).length,
-        paymentsThisMonth: payments.filter((p) => p.receivedAt >= monthStart).length,
+        today: collectedSince(hospitalPayments, todayStart),
+        thisMonth: collectedSince(hospitalPayments, monthStart),
+        paymentsToday: hospitalPayments.filter((p) => p.receivedAt >= todayStart).length,
+        paymentsThisMonth: hospitalPayments.filter((p) => p.receivedAt >= monthStart).length,
       },
-      monthly: monthlyTotals(payments, window.keys),
-      methods: methodSplit(payments, todayStart, monthStart, methods),
+      refunded: {
+        today: collectedSince(hospitalRefunds, todayStart),
+        thisMonth: collectedSince(hospitalRefunds, monthStart),
+        refundsToday: hospitalRefunds.filter((r) => r.receivedAt >= todayStart).length,
+        refundsThisMonth: hospitalRefunds.filter((r) => r.receivedAt >= monthStart).length,
+      },
+      /*
+       * Net is computed here rather than in each client, so two screens cannot
+       * disagree about what the day is worth — and in minor units, because
+       * subtracting two money strings in a browser is how a penny goes missing.
+       */
+      net: {
+        today: fromMinor(
+          toMinor(collectedSince(hospitalPayments, todayStart)) -
+            toMinor(collectedSince(hospitalRefunds, todayStart)),
+        ),
+        thisMonth: fromMinor(
+          toMinor(collectedSince(hospitalPayments, monthStart)) -
+            toMinor(collectedSince(hospitalRefunds, monthStart)),
+        ),
+      },
+      monthly: monthlyTotals(hospitalPayments, window.keys),
+      monthlyRefunds: monthlyTotals(hospitalRefunds, window.keys),
+      methods: methodSplit(hospitalPayments, todayStart, monthStart, methods),
+      /*
+       * Aging is the hospital's debtors only.
+       *
+       * A pharmacy sale is paid at the counter or it does not happen; an
+       * unsettled one is a till that has not been reconciled, not an account
+       * receivable to chase at 30, 60 and 90 days. Mixing them makes the aging
+       * report read as though the clinic is owed money it never expected.
+       */
       aging: buildAgingReport(
-        invoices.map((i) => ({
-          id: i.id,
-          dueDate: i.dueDate,
-          outstandingMinor: minorOf(i.totalAmount) - minorOf(i.amountPaid),
-        })),
+        invoices
+          .filter((i) => i.kind === InvoiceKind.HOSPITAL)
+          .map((i) => ({
+            id: i.id,
+            dueDate: i.dueDate,
+            outstandingMinor: minorOf(i.totalAmount) - minorOf(i.amountPaid),
+          })),
         now,
       ),
+
+      /*
+       * The pharmacy, counted on its own.
+       *
+       * Reported beside the hospital's figures rather than folded into them,
+       * whichever mode the tenant is in. In SEPARATE mode they are two
+       * businesses and an owner needs both; in COMBINED mode the medicines are
+       * on hospital invoices and this reads as zero, which is the honest answer
+       * rather than a missing section.
+       */
+      pharmacy: {
+        collectedToday: collectedSince(pharmacyPayments, todayStart),
+        collectedThisMonth: collectedSince(pharmacyPayments, monthStart),
+        refundedToday: collectedSince(pharmacyRefunds, todayStart),
+        refundedThisMonth: collectedSince(pharmacyRefunds, monthStart),
+        netToday: fromMinor(
+          toMinor(collectedSince(pharmacyPayments, todayStart)) -
+            toMinor(collectedSince(pharmacyRefunds, todayStart)),
+        ),
+        netThisMonth: fromMinor(
+          toMinor(collectedSince(pharmacyPayments, monthStart)) -
+            toMinor(collectedSince(pharmacyRefunds, monthStart)),
+        ),
+        monthly: monthlyTotals(pharmacyPayments, window.keys),
+      },
+
+      /*
+       * The lab, counted on its own, on exactly the same terms.
+       *
+       * A separate section rather than a second "ancillary" total added to the
+       * pharmacy's, because a hospital may run one, both or neither and an
+       * owner reconciling a till needs to know which counter a number came
+       * from. In COMBINED mode this reads as zero, which is the honest answer
+       * rather than a missing section — the same argument as the pharmacy's.
+       */
+      lab: {
+        collectedToday: collectedSince(labPayments, todayStart),
+        collectedThisMonth: collectedSince(labPayments, monthStart),
+        refundedToday: collectedSince(labRefunds, todayStart),
+        refundedThisMonth: collectedSince(labRefunds, monthStart),
+        netToday: fromMinor(
+          toMinor(collectedSince(labPayments, todayStart)) -
+            toMinor(collectedSince(labRefunds, todayStart)),
+        ),
+        netThisMonth: fromMinor(
+          toMinor(collectedSince(labPayments, monthStart)) -
+            toMinor(collectedSince(labRefunds, monthStart)),
+        ),
+        monthly: monthlyTotals(labPayments, window.keys),
+      },
     };
   }
 
@@ -493,7 +768,7 @@ export class AdminService {
     const tz = await this.tz();
     const { start, end } = parseDateParam(dateParam, tz);
 
-    const [appointments, invoices, auditRows, payments, staff] = await Promise.all([
+    const [appointments, invoices, auditRows, payments, refunds, staff] = await Promise.all([
       this.prisma.appointment.findMany({
         where: { scheduledAt: { gte: start, lt: end } },
         select: { doctorId: true, status: true, scheduledAt: true },
@@ -521,6 +796,20 @@ export class AdminService {
         where: { receivedAt: { gte: start, lt: end } },
         select: { receivedById: true, amount: true, method: true },
       }),
+      /*
+       * Attributed to whoever *issued* the refund, not whoever took the
+       * original payment.
+       *
+       * Both attributions are defensible and they answer different questions.
+       * This report is "what did each member of staff do today", so the person
+       * who handed money back is the person whose day it belongs to — and it is
+       * also the only attribution that keeps the column footing to the
+       * hospital's own net for the day.
+       */
+      this.prisma.refund.findMany({
+        where: { refundedAt: { gte: start, lt: end } },
+        select: { refundedById: true, amount: true },
+      }),
       this.prisma.user.findMany({
         select: {
           id: true,
@@ -546,6 +835,7 @@ export class AdminService {
         amountMinor: minorOf(p.amount),
         method: p.method,
       })),
+      refunds.map((r) => ({ refundedById: r.refundedById, amountMinor: minorOf(r.amount) })),
     );
     const reception = countActions(auditRows, ACTIVITY_ACTIONS.RECEPTIONIST);
     const pharmacy = countActions(auditRows, ACTIVITY_ACTIONS.PHARMACIST);
@@ -606,7 +896,14 @@ export class AdminService {
         .map((u) => ({
           userId: u.id,
           fullName: u.fullName,
-          ...(collections.get(u.id) ?? { total: '0.00', count: 0, methods: [] }),
+          ...(collections.get(u.id) ?? {
+            total: '0.00',
+            refunded: '0.00',
+            net: '0.00',
+            count: 0,
+            refunds: 0,
+            methods: [],
+          }),
         })),
       pharmacy: staff
         .filter((u) => holds(u, UserRole.PHARMACIST))

@@ -80,6 +80,27 @@ export function toPatientResponse(p: PatientWithAllergies, role: UserRole) {
     case UserRole.PHARMACIST:
       return { ...demographics(p), ...clinicalBasics(p) };
 
+    /*
+     * The lab gets demographics and nothing clinical — not even allergies.
+     *
+     * Tempting to hand over the same shape as the pharmacist, since both are
+     * "clinical support". They are not the same: a pharmacist needs allergies
+     * because giving somebody a drug they react to is the failure dispensing
+     * exists to prevent. A technician running a full blood count cannot harm a
+     * patient with an allergy they do not know about, so under
+     * minimum-necessary they do not get to read one.
+     *
+     * What the lab does need is age and sex, and those are in `demographics`:
+     * reference ranges are age- and sex-banded, so a haemoglobin cannot be
+     * flagged correctly without them. The clinical *question* travels on the
+     * order itself (`LabOrder.clinicalDetails`), deliberately, because a lab
+     * that does not know why a test was asked for cannot comment usefully on
+     * the answer — and that is one field the requesting doctor chose to send,
+     * not the whole record.
+     */
+    case UserRole.LAB_TECHNICIAN:
+      return demographics(p);
+
     case UserRole.DOCTOR:
     case UserRole.NURSE:
       return { ...demographics(p), ...clinicalBasics(p) };

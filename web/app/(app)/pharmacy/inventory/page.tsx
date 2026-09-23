@@ -14,6 +14,8 @@ import {
   TableSkeleton,
 } from '@/components/ui/primitives';
 import { Sheet } from '@/components/ui/sheet';
+import { MedicineSheet } from '@/components/medicine-sheet';
+import { MedicinePicker } from '@/components/medicine-picker';
 
 /**
  * Stock, organised around the two questions a pharmacist actually asks:
@@ -27,24 +29,42 @@ export default function InventoryPage() {
   const [inventory, setInventory] = useState<Inventory | null>(null);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<'all' | 'low' | 'expiring' | 'expired'>('all');
+  /*
+   * Expiry first by default.
+   *
+   * The list's job is "what should leave the shelf next", and alphabetical
+   * order answers a different question. FEFO already decides which *batch* is
+   * dispensed — this decides which *medicine* the pharmacist thinks to push,
+   * which is a judgement they can only make if the screen tells them.
+   *
+   * Name order stays available because checking a count against a physical
+   * shelf runs alphabetically.
+   */
+  const [sort, setSort] = useState<'expiry' | 'name'>('expiry');
   const [error, setError] = useState<string | null>(null);
   const [receiving, setReceiving] = useState(false);
+  /** `{ medicine: null }` adds; `{ medicine }` corrects. */
+  const [editing, setEditing] = useState<{ medicine: Medicine | null } | null>(null);
 
-  const load = useCallback(async (q: string) => {
+  const load = useCallback(async (q: string, order: 'expiry' | 'name') => {
     setError(null);
     try {
-      setInventory(await api<Inventory>(`/pharmacy/inventory${q ? `?q=${encodeURIComponent(q)}` : ''}`));
+      const params = new URLSearchParams({ sort: order });
+      if (q) params.set('q', q);
+      setInventory(await api<Inventory>(`/pharmacy/inventory?${params}`));
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not load inventory');
     }
   }, []);
 
   useEffect(() => {
-    const t = setTimeout(() => void load(query.trim()), query ? 250 : 0);
+    const t = setTimeout(() => void load(query.trim(), sort), query ? 250 : 0);
     return () => clearTimeout(t);
-  }, [query, load]);
+  }, [query, sort, load]);
 
-  if (error && !inventory) return <ErrorState message={error} onRetry={() => void load(query)} />;
+  if (error && !inventory) {
+    return <ErrorState message={error} onRetry={() => void load(query, sort)} />;
+  }
 
   const rows = (inventory?.data ?? []).filter((r) => {
     if (filter === 'low') return r.belowReorderLevel;
@@ -79,6 +99,19 @@ export default function InventoryPage() {
             <option value="expiring">Expiring soon</option>
             <option value="expired">Has expired stock</option>
           </Select>
+          <Select
+            value={sort}
+            onChange={(e) => setSort(e.target.value as typeof sort)}
+            className="w-auto text-sm"
+            title="What should be sold first"
+          >
+            <option value="expiry">Expiring first</option>
+            <option value="name">By name</option>
+          </Select>
+          {/* Adding a medicine comes first in the workflow — you cannot
+              receive stock for something the catalogue does not know about,
+              which on a fresh hospital means every medicine. */}
+          <Button onClick={() => setEditing({ medicine: null })}>Add medicine</Button>
           <Button variant="primary" onClick={() => setReceiving(true)}>
             Receive stock
           </Button>
@@ -95,9 +128,9 @@ export default function InventoryPage() {
           <table className="w-full border-collapse">
             <thead>
               <tr>
-                {['Medicine', 'Form', 'Class', 'In date', 'Reorder at', 'Batches'].map((h) => (
+                {['Medicine', 'Form', 'Class', 'In date', 'Expires', 'Reorder at', 'Batches', ''].map((h, i) => (
                   <th
-                    key={h}
+                    key={`${h}-${i}`}
                     className="sticky top-0 border-b border-border bg-surface px-3 py-2 text-left text-xxs font-semibold uppercase tracking-wider text-text-subtle"
                   >
                     {h}
@@ -107,7 +140,32 @@ export default function InventoryPage() {
             </thead>
             <tbody>
               {rows.map((r) => (
-                <InventoryTableRow key={r.id} row={r} />
+                <InventoryTableRow
+                  key={r.id}
+                  row={r}
+                  onEdit={() =>
+                    setEditing({
+                      /*
+                       * The inventory row carries everything `Medicine` needs
+                       * except `isActive`, which the sheet does not edit — so
+                       * it is passed straight through rather than refetched.
+                       * `sellingPrice` was added to the row for exactly this:
+                       * omitting it would make every edit silently clear the
+                       * price, because the sheet sends `null` for a blank box.
+                       */
+                      medicine: {
+                        id: r.id,
+                        name: r.name,
+                        form: r.form,
+                        strength: r.strength,
+                        drugClass: r.drugClass,
+                        isControlled: r.isControlled,
+                        reorderLevel: r.reorderLevel,
+                        sellingPrice: r.sellingPrice,
+                      },
+                    })
+                  }
+                />
               ))}
             </tbody>
           </table>
@@ -119,14 +177,21 @@ export default function InventoryPage() {
         onClose={() => setReceiving(false)}
         onReceived={() => {
           setReceiving(false);
-          void load(query.trim());
+          void load(query.trim(), sort);
         }}
+      />
+
+      <MedicineSheet
+        open={editing !== null}
+        medicine={editing?.medicine ?? null}
+        onClose={() => setEditing(null)}
+        onSaved={() => void load(query.trim(), sort)}
       />
     </>
   );
 }
 
-function InventoryTableRow({ row }: { row: InventoryRow }) {
+function InventoryTableRow({ row, onEdit }: { row: InventoryRow; onEdit: () => void }) {
   const critical = row.inDateQuantity === 0;
   return (
     <tr className={critical ? 'bg-danger-soft' : 'hover:bg-[#fafbfc]'}>
@@ -152,6 +217,23 @@ function InventoryTableRow({ row }: { row: InventoryRow }) {
         {row.expiredQuantity > 0 && (
           <span title="Expired stock, excluded from the usable total" className="ml-1.5 text-danger">
             (+{row.expiredQuantity} expired)
+          </span>
+        )}
+      </td>
+      {/* The soonest sellable unit to go out of date. Colour-coded because a
+          date on its own is a number somebody has to do arithmetic on, and the
+          whole point of this column is to be readable at a glance. */}
+      <td className="border-b border-[#f0f2f4] px-3 py-2 font-mono text-xs">
+        {row.earliestExpiry === null ? (
+          <span className="text-text-subtle">—</span>
+        ) : (
+          <span
+            className={
+              row.expiringSoon.length > 0 ? 'font-semibold text-warning' : 'text-text-muted'
+            }
+            title={row.expiringSoon.length > 0 ? 'Expiring soon — sell or use this first' : undefined}
+          >
+            {date(row.earliestExpiry)}
           </span>
         )}
       </td>
@@ -181,6 +263,14 @@ function InventoryTableRow({ row }: { row: InventoryRow }) {
           </div>
         )}
       </td>
+      {/* Correcting an entry matters more than it looks: a medicine
+          catalogued under the wrong drug class produces allergy checks that
+          run and find nothing. Without this there was no way to fix one. */}
+      <td className="border-b border-[#f0f2f4] px-3 py-2 text-right">
+        <button onClick={onEdit} className="text-xs text-primary hover:underline">
+          Edit
+        </button>
+      </td>
     </tr>
   );
 }
@@ -194,26 +284,31 @@ function ReceiveStockSheet({
   onClose: () => void;
   onReceived: () => void;
 }) {
-  const [medicines, setMedicines] = useState<Medicine[]>([]);
-  const [medicineId, setMedicineId] = useState('');
+  const [medicine, setMedicine] = useState<Medicine | null>(null);
   const [batchNumber, setBatchNumber] = useState('');
   const [expiresAt, setExpiresAt] = useState('');
   const [quantity, setQuantity] = useState('');
+  const [costPrice, setCostPrice] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (!open) {
-      setMedicineId('');
+      setMedicine(null);
       setBatchNumber('');
       setExpiresAt('');
       setQuantity('');
+      setCostPrice('');
       setError(null);
-      return;
     }
-    api<{ data: Medicine[] }>('/medicines')
-      .then((r) => setMedicines(r.data))
-      .catch(() => setMedicines([]));
+    /*
+     * The whole catalogue is no longer fetched here.
+     *
+     * It fed a `<Select>` of every medicine, which is fine against the demo
+     * seed and unusable against a real catalogue of several hundred. The
+     * picker searches the server as you type instead — see
+     * `medicine-picker.tsx`.
+     */
   }, [open]);
 
   async function submit() {
@@ -223,10 +318,14 @@ function ReceiveStockSheet({
       await api('/pharmacy/stock', {
         method: 'POST',
         body: {
-          medicineId: Number(medicineId),
+          medicineId: medicine!.id,
           batchNumber: batchNumber.trim(),
           expiresAt: new Date(`${expiresAt}T00:00:00Z`).toISOString(),
           quantity: Number(quantity),
+          // Omitted rather than sent empty: the server treats `undefined` as
+          // "leave whatever was recorded before", which is right for a repeat
+          // delivery whose cost has not changed.
+          ...(costPrice.trim() ? { costPrice: costPrice.trim() } : {}),
         },
       });
       onReceived();
@@ -237,7 +336,7 @@ function ReceiveStockSheet({
     }
   }
 
-  const valid = medicineId && batchNumber.trim() && expiresAt && Number(quantity) > 0;
+  const valid = medicine !== null && batchNumber.trim() && expiresAt && Number(quantity) > 0;
 
   return (
     <Sheet
@@ -253,15 +352,12 @@ function ReceiveStockSheet({
         </>
       }
     >
-      <Field label="Medicine" required>
-        <Select value={medicineId} onChange={(e) => setMedicineId(e.target.value)}>
-          <option value="">Select…</option>
-          {medicines.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.name} {m.strength} ({m.form})
-            </option>
-          ))}
-        </Select>
+      <Field
+        label="Medicine"
+        required
+        hint="Type two or three characters of the name as printed on the carton."
+      >
+        <MedicinePicker value={medicine} onChange={setMedicine} autoFocus />
       </Field>
 
       <Field
@@ -281,14 +377,32 @@ function ReceiveStockSheet({
         />
       </Field>
 
-      <Field label="Quantity" required>
-        <Input
-          type="number"
-          min={1}
-          value={quantity}
-          onChange={(e) => setQuantity(e.target.value)}
-        />
-      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Quantity" required>
+          <Input
+            type="number"
+            min={1}
+            value={quantity}
+            onChange={(e) => setQuantity(e.target.value)}
+          />
+        </Field>
+
+        {/* On the batch rather than the medicine, because it is a property of
+            this delivery — the same tablet costs differently from a different
+            supplier next month, and one figure on the catalogue would restate
+            the margin on every past sale each time a box arrived. */}
+        <Field
+          label="Cost price"
+          hint="Per unit, what you paid. Optional — used for margin reporting only."
+        >
+          <Input
+            value={costPrice}
+            onChange={(e) => setCostPrice(e.target.value)}
+            inputMode="decimal"
+            placeholder="0.1200"
+          />
+        </Field>
+      </div>
 
       {error && (
         <div

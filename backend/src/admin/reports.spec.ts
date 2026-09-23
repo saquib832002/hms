@@ -290,9 +290,17 @@ describe('money taken per person', () => {
 
   it('totals exactly and splits by method', () => {
     const byStaff = collectionsByStaff(payments);
+    /*
+     * The exact key set, not a subset. A `toMatchObject` here would still pass
+     * if `refunded` and `net` quietly disappeared — which is precisely the
+     * regression that made an admin's screen disagree with billing's ledger.
+     */
     expect(byStaff.get(3)).toEqual({
       total: '165.00',
+      refunded: '0.00',
+      net: '165.00',
       count: 3,
+      refunds: 0,
       methods: [
         { method: 'CARD', amount: '90.00' },
         { method: 'CASH', amount: '75.00' },
@@ -474,5 +482,114 @@ describe('what an admin report must never contain', () => {
     // an operational label.
     const body = method('doctorsReport');
     expect(body).not.toMatch(/groupBy[\s\S]{0,80}department/);
+  });
+});
+
+/**
+ * Money given back is not money taken, and every screen must agree about it.
+ *
+ * THE BUG
+ * -------
+ * Reception raised a 500 invoice, billing took 500, billing refunded 500. The
+ * payments ledger — which is signed — showed the day netting to nothing. The
+ * admin dashboard showed 500 collected, because every takings figure summed
+ * `Payment` rows and nothing else.
+ *
+ * Two screens disagreeing about the same day is worse than either being wrong
+ * on its own: it makes both unusable, and the person who has to explain the
+ * difference is a finance clerk who did nothing wrong.
+ *
+ * THE FIX IS NOT "SUBTRACT REFUNDS FROM COLLECTED"
+ * ------------------------------------------------
+ * That would be the opposite error. A day that took 5,000 and refunded 500 is
+ * not the same day as one that took 4,500, and only the gross pair can tell
+ * them apart when somebody reconciles against a bank statement. Gross in,
+ * gross out, net derived — and the *net* is what a screen leads with.
+ */
+describe('takings never hide a refund', () => {
+  const staff = (payments: { by: number; amount: number; method?: string }[],
+                 refunds: { by: number; amount: number }[] = []) =>
+    collectionsByStaff(
+      payments.map((p) => ({
+        receivedById: p.by,
+        amountMinor: p.amount,
+        method: p.method ?? 'CASH',
+      })),
+      refunds.map((r) => ({ refundedById: r.by, amountMinor: r.amount })),
+    );
+
+  it('nets a fully refunded payment to nothing', () => {
+    // The reported case, exactly.
+    const row = staff([{ by: 1, amount: 50_000 }], [{ by: 1, amount: 50_000 }]).get(1)!;
+    expect(row.total).toBe('500.00');
+    expect(row.refunded).toBe('500.00');
+    expect(row.net).toBe('0.00');
+  });
+
+  it('keeps the gross pair rather than collapsing to the net', () => {
+    /*
+     * The assertion that stops the tempting simplification. If `total` ever
+     * becomes the net, a bank reconciliation loses the ability to see that
+     * money moved in both directions.
+     */
+    const row = staff([{ by: 1, amount: 500_000 }], [{ by: 1, amount: 50_000 }]).get(1)!;
+    expect(row.total).toBe('5000.00');
+    expect(row.refunded).toBe('500.00');
+    expect(row.net).toBe('4500.00');
+  });
+
+  it('gives somebody who only issued refunds a row of their own', () => {
+    // Otherwise a day spent processing refunds disappears from the report
+    // because no positive payment shares the key.
+    const row = staff([], [{ by: 7, amount: 12_500 }]).get(7);
+    expect(row).toBeDefined();
+    expect(row!.net).toBe('-125.00');
+    expect(row!.count).toBe(0);
+    expect(row!.refunds).toBe(1);
+  });
+
+  it('leaves the method breakdown gross', () => {
+    /*
+     * `methods` answers "what was in the card terminal". A refund does not
+     * remove a card payment from that batch — it appears as its own reversal —
+     * so netting it here would make the figure disagree with the terminal.
+     */
+    const row = staff([{ by: 1, amount: 50_000, method: 'CARD' }], [{ by: 1, amount: 50_000 }]).get(1)!;
+    expect(row.methods).toEqual([{ method: 'CARD', amount: '500.00' }]);
+  });
+
+  it('subtracts in minor units, never as floats', () => {
+    // 0.1 + 0.2 is the reason. Across a month of rows a float subtraction
+    // loses pennies nobody can account for.
+    const src = readFileSync(resolve(__dirname, './reports.ts'), 'utf8');
+    const start = src.indexOf('export function collectionsByStaff');
+    const body = src.slice(start, src.indexOf('\n}', start));
+    expect(body).toContain('takenMinor - refundedMinor');
+    expect(body).not.toMatch(/Number\(.*total.*\)\s*-/);
+  });
+});
+
+describe('every collected figure the API returns has a refund beside it', () => {
+  /*
+   * Structural, because the failure is a *missing* field and nothing else
+   * catches that. A new report that adds `collectedThisQuarter` and forgets the
+   * refund is the same bug again, and it will look correct.
+   */
+  const SERVICE = readFileSync(resolve(__dirname, './admin.service.ts'), 'utf8');
+
+  it('pairs collectedLastSevenDays with a refunded and a net', () => {
+    expect(SERVICE).toContain('collectedLastSevenDays:');
+    expect(SERVICE).toContain('refundedLastSevenDays:');
+    expect(SERVICE).toContain('netLastSevenDays:');
+  });
+
+  it('reads refunds from the Refund table, not from invoice balances', () => {
+    /*
+     * `amountPaid` on an invoice is already net of refunds, so deriving the
+     * day's refunds from it would silently miss any refund against an invoice
+     * raised on another day — the same class of error as the original
+     * "sum invoices issued" bug this report was rewritten to fix.
+     */
+    expect(SERVICE).toMatch(/refund\.findMany\(\{\s*where:\s*\{\s*refundedAt/);
   });
 });

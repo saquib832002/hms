@@ -48,12 +48,25 @@ export default function PaymentsPage() {
 
   const rows = (payments ?? []).filter((p) => !method || p.method === method);
 
-  // Summed in integer minor units, from the strings the API sent — never via
-  // parseFloat, which is how a totals row ends up a penny out.
-  const totalMinor = rows.reduce((minor, p) => {
-    const [whole, fraction = '00'] = p.amount.split('.');
-    return minor + Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
-  }, 0);
+  /*
+   * Summed in integer minor units from `signedAmount`, so a refund subtracts.
+   *
+   * The list carries both directions now — a ledger that showed only money
+   * coming in could not answer "what happened to that payment", which is the
+   * main reason anyone opens it. `signedAmount` is negative for a refund and is
+   * computed server-side, so this total is net without the client having to
+   * know which rows point which way.
+   *
+   * Never via parseFloat, which is how a totals row ends up a penny out.
+   */
+  const toMinor = (amount: string) => {
+    const negative = amount.startsWith('-');
+    const [whole, fraction = '00'] = amount.replace('-', '').split('.');
+    const minor = Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
+    return negative ? -minor : minor;
+  };
+  const totalMinor = rows.reduce((minor, p) => minor + toMinor(p.signedAmount), 0);
+  const refundCount = rows.filter((p) => p.kind === 'REFUND').length;
 
   return (
     <>
@@ -62,12 +75,18 @@ export default function PaymentsPage() {
           <div className="font-mono text-lg font-bold tracking-tight text-success">
             {fmt((totalMinor / 100).toFixed(2))}
           </div>
-          <div className="text-xxs uppercase tracking-wider text-text-muted">Shown</div>
+          <div className="text-xxs uppercase tracking-wider text-text-muted">Net shown</div>
         </div>
         <div>
           <div className="text-lg font-bold tracking-tight">{rows.length}</div>
-          <div className="text-xxs uppercase tracking-wider text-text-muted">Payments</div>
+          <div className="text-xxs uppercase tracking-wider text-text-muted">Transactions</div>
         </div>
+        {refundCount > 0 && (
+          <div>
+            <div className="text-lg font-bold tracking-tight text-danger">{refundCount}</div>
+            <div className="text-xxs uppercase tracking-wider text-text-muted">Refunds</div>
+          </div>
+        )}
 
         <Select
           value={method}
@@ -104,7 +123,7 @@ export default function PaymentsPage() {
           <table className="w-full border-collapse">
             <thead>
               <tr>
-                {['Received', 'Amount', 'Method', 'Reference', 'Patient', 'Invoice'].map((h) => (
+                {['When', 'Amount', 'Method', 'Reference', 'Patient', 'Invoice'].map((h) => (
                   <th
                     key={h}
                     className="sticky top-0 border-b border-border bg-surface px-3 py-2 text-left text-xxs font-semibold uppercase tracking-wider text-text-subtle"
@@ -117,22 +136,45 @@ export default function PaymentsPage() {
             <tbody>
               {rows.map((p) => (
                 <tr
-                  key={p.id}
+                  // A payment and a refund can share an id — the key has to
+                  // carry both, or React reconciles two different rows as one.
+                  key={`${p.kind}-${p.id}`}
                   onClick={() => setSelected(p.invoiceId)}
                   className="cursor-pointer hover:bg-[#fafbfc]"
                 >
                   <td className="border-b border-[#f0f2f4] px-3 py-2 font-mono text-xs text-text-muted">
                     {dateTime(p.receivedAt)}
                   </td>
-                  <td className="border-b border-[#f0f2f4] px-3 py-2 font-mono text-xs font-semibold">
+                  {/* Signed, because the direction is the point. A refund that
+                      reads like a payment is a ledger nobody can balance. */}
+                  <td
+                    className={`border-b border-[#f0f2f4] px-3 py-2 font-mono text-xs font-semibold ${
+                      p.kind === 'REFUND' ? 'text-danger' : ''
+                    }`}
+                  >
+                    {p.kind === 'REFUND' ? '−' : ''}
                     {fmt(p.amount)}
                   </td>
-                  <td className="border-b border-[#f0f2f4] px-3 py-2">{titleCase(p.method)}</td>
+                  <td className="border-b border-[#f0f2f4] px-3 py-2">
+                    {titleCase(p.method)}
+                    {p.kind === 'REFUND' && (
+                      <span className="ml-1.5 rounded-full bg-danger-soft px-1.5 py-0.5 text-xxs font-semibold text-danger">
+                        refund
+                      </span>
+                    )}
+                  </td>
                   <td className="border-b border-[#f0f2f4] px-3 py-2 font-mono text-xs text-text-muted">
-                    {p.reference ?? '—'}
+                    {/* The transaction it reverses — the reference an accountant
+                        looks for when a refund appears out of context. */}
+                    {p.reversesPaymentId
+                      ? `reverses #${p.reversesPaymentId}`
+                      : (p.reference ?? '—')}
                   </td>
                   <td className="border-b border-[#f0f2f4] px-3 py-2 font-medium">
                     {p.patient?.fullName ?? '—'}
+                    {p.reason && (
+                      <div className="text-xxs italic text-text-subtle">{p.reason}</div>
+                    )}
                   </td>
                   <td className="border-b border-[#f0f2f4] px-3 py-2 font-mono text-xs">
                     INV-{String(p.invoiceId).padStart(4, '0')}

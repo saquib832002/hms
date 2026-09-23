@@ -14,9 +14,19 @@ import {
 const clinic = (over: Partial<ClinicSettings> = {}): ClinicSettings => ({
   timezone: 'America/Chicago',
   currency: 'GBP',
+  taxEnabled: false,
+  pricesIncludeTax: false,
+  consultationTaxRateId: null,
   slotMinutes: 30,
   clinicStartHour: 9,
   clinicEndHour: 17,
+  pharmacyBilling: 'SEPARATE',
+  hasPharmacy: true,
+  acceptsExternalPrescriptions: false,
+  labBilling: 'SEPARATE',
+  hasLab: true,
+  acceptsExternalLabOrders: false,
+  acceptedReferralBilling: ['ORIGIN_PAYS'],
   ...over,
 });
 

@@ -182,16 +182,23 @@ export default function DailyActivityPage() {
             />
 
             <Section
-              title="Billing — money taken"
+              title="Billing — money taken and given back"
               empty="Nobody holds the billing role."
               rows={report.billing}
-              head={['Person', 'Payments', 'Total', 'By method']}
+              head={['Person', 'Payments', 'Taken', 'Refunded', 'Kept', 'By method']}
               render={(b) => (
                 <>
                   <Td>{b.fullName}</Td>
                   <Td mono>{b.count}</Td>
-                  <Td mono className={b.count > 0 ? 'font-semibold' : ''}>
-                    {fmt(b.total)}
+                  <Td mono>{fmt(b.total)}</Td>
+                  {/* Attributed to whoever issued it. Shown separately rather
+                      than folded into the total, so a day that took a lot and
+                      gave a lot back is distinguishable from a quiet one. */}
+                  <Td mono className={b.refunds > 0 ? 'text-danger' : 'text-text-subtle'}>
+                    {b.refunds > 0 ? `−${fmt(b.refunded)}` : '—'}
+                  </Td>
+                  <Td mono className={b.count > 0 || b.refunds > 0 ? 'font-semibold' : ''}>
+                    {fmt(b.net)}
                   </Td>
                   <Td className="text-xs text-text-muted">
                     {b.methods.length === 0

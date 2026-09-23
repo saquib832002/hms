@@ -17,7 +17,7 @@ interface AuthState {
   user: AuthUser | null;
   /** True until the initial silent refresh has settled. */
   loading: boolean;
-  signIn: (email: string, password: string) => Promise<AuthUser>;
+  signIn: (email: string, password: string, hospital?: string) => Promise<AuthUser>;
   signOut: () => Promise<void>;
   /**
    * Act as a different one of your own roles.
@@ -77,8 +77,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => setSessionExpiredHandler(null);
   }, [router, pathname]);
 
-  const signIn = useCallback(async (email: string, password: string) => {
-    const u = await apiLogin(email, password);
+  const signIn = useCallback(async (email: string, password: string, hospital?: string) => {
+    const u = await apiLogin(email, password, hospital);
     setUser(u);
     return u;
   }, []);

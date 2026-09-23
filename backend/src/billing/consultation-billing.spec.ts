@@ -30,10 +30,21 @@ const ACCESS_MATRIX = readFileSync(
 );
 
 /** The block of `invoiceForAppointment`, which is what actually builds a line. */
+/**
+ * The method body, with comments stripped.
+ *
+ * Stripping matters: the assertions below look for words like "medicine" that
+ * must not appear in the *code*, and a comment explaining why they must not
+ * appear would fail the test it is explaining. This repo has now been caught
+ * by that five times — a test matching its own prose — so the extraction does
+ * it rather than each assertion working around it.
+ */
 function invoiceForAppointment(): string {
   const start = SERVICE.indexOf('async invoiceForAppointment(');
   expect(start).toBeGreaterThan(-1);
-  return SERVICE.slice(start, SERVICE.indexOf('\n  async ', start + 10));
+  return SERVICE.slice(start, SERVICE.indexOf('\n  async ', start + 10))
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/.*$/gm, '');
 }
 
 describe('the consultation invoice line', () => {
@@ -168,5 +179,86 @@ describe('where the checkout route lives', () => {
   it('is audited under its own action name', () => {
     // "who charged this patient, and when" must be answerable from the trail.
     expect(APPT_CONTROLLER).toContain("@AuditAction('APPOINTMENT_INVOICE_RAISED')");
+  });
+});
+
+/**
+ * The refund loop, and where it ends.
+ *
+ * Found in use, not by a test: refunding gave the money back and left the
+ * charge standing, so the balance reappeared under "outstanding", the invoice
+ * could be paid again, refunded again, and so on. There was no terminal state.
+ *
+ * A refund and a credit answer different questions — "we gave the money back"
+ * and "we should not have charged for it" — and the loop existed because only
+ * the first was implemented.
+ */
+describe('a refund can cancel the charge it reverses', () => {
+  const SERVICE = readFileSync(resolve(__dirname, './billing.service.ts'), 'utf8');
+
+  function refundBody(): string {
+    const start = SERVICE.indexOf('async refund(');
+    expect(start).toBeGreaterThan(-1);
+    return SERVICE.slice(start, SERVICE.indexOf('\n  async ', start + 10));
+  }
+
+  it('credits the invoice by default, so no balance reappears', () => {
+    const body = refundBody();
+    // Opt *out*, not opt in. The overwhelmingly common case is that the charge
+    // was wrong too, and defaulting the other way recreates the loop.
+    expect(body).toContain('dto.cancelCharge === false');
+    expect(body).toContain('creditedAmount');
+  });
+
+  it('caps the credit at what is still chargeable', () => {
+    // Otherwise repeated partial refunds credit more than was ever billed, and
+    // the invoice ends up owing the patient money it never charged.
+    expect(refundBody()).toMatch(/Math\.min\([\s\S]{0,80}chargeableMinor/);
+  });
+
+  it('closes an invoice that has been fully refunded and fully credited', () => {
+    /*
+     * The exit. Nothing left to charge and nothing held means the invoice is
+     * finished — it leaves both the outstanding and the paid views rather than
+     * sitting in one of them forever.
+     */
+    const body = refundBody();
+    expect(body).toContain('nextCreditedMinor >= totalMinor && outcome.paidMinor === 0');
+    expect(body).toContain('InvoiceStatus.CANCELLED');
+    // Voided, not deleted — the charge, the reversal and the reason all survive.
+    expect(body).toContain('voidReason');
+  });
+
+  it('still allows a refund that leaves the charge standing', () => {
+    // A returned deposit against money the patient genuinely still owes. Rare,
+    // real, and the reason the credit is a choice rather than implied.
+    expect(refundBody()).toContain('dto.cancelCharge === false');
+  });
+
+  it('computes what is owed from the credited total, not the original charge', () => {
+    /*
+     * `total - paid` is what made a refund reopen a balance nobody was
+     * chasing. The charge minus what was cancelled minus what is held is the
+     * figure that means something.
+     */
+    expect(SERVICE).toContain('const outstandingMinor = chargeableMinor - paidMinor');
+  });
+
+  it('never rewrites what the invoice says it charged', () => {
+    /*
+     * An invoice that quietly changes its own total is not a record — a
+     * printed copy and the database would disagree about the charge, and only
+     * one of them is in front of the patient. The reduction lives beside it as
+     * `creditedAmount`.
+     *
+     * Asserted against the *write*, not the whole file: `shape()` reads
+     * `totalAmount` and must go on doing so.
+     */
+    const body = refundBody();
+    const update = body.slice(body.indexOf('tx.invoice.update'));
+    expect(update.length).toBeGreaterThan(50);
+    // `select` above reads totalAmount, and must. The write must not touch it.
+    expect(update).not.toMatch(/totalAmount:/);
+    expect(update).toContain('creditedAmount:');
   });
 });

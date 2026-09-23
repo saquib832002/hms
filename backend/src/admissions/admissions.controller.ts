@@ -1,10 +1,11 @@
 import { Body, Controller, Get, Param, ParseIntPipe, Patch, Post } from '@nestjs/common';
-import { UserRole } from '@prisma/client';
+import { UserRole, TenantModule } from '@prisma/client';
 import { AdmissionsService } from './admissions.service';
 import { AdmitDto } from './dto/admit.dto';
 import { TransferDto } from './dto/transfer.dto';
 import { DischargeDto } from './dto/discharge.dto';
 import { Roles } from '../common/decorators/roles.decorator';
+import { RequiresModule } from '../common/decorators/requires-module.decorator';
 import { AuditAction } from '../common/decorators/audit.decorator';
 
 /**
@@ -24,6 +25,7 @@ import { AuditAction } from '../common/decorators/audit.decorator';
  */
 @Controller('admissions')
 @Roles(UserRole.ADMIN, UserRole.NURSE, UserRole.DOCTOR)
+@RequiresModule(TenantModule.WARDS)
 export class AdmissionsController {
   constructor(private readonly admissions: AdmissionsService) {}
 

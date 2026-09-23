@@ -1,8 +1,7 @@
-import { readdirSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { canReach, isKnownRoute, landingFor, navFor, ROLE_LABEL } from './nav';
+import { canReach, isKnownRoute, landingFor, navFor, ROLE_LABEL, ALL_ROLES } from './nav';
 import type { UserRole } from './types';
 
 /**
@@ -14,14 +13,14 @@ import type { UserRole } from './types';
  * knowing exists for that patient.
  */
 
-const ALL_ROLES: UserRole[] = [
-  'ADMIN',
-  'DOCTOR',
-  'NURSE',
-  'RECEPTIONIST',
-  'PHARMACIST',
-  'BILLING_STAFF',
-];
+/*
+ * Imported, not retyped.
+ *
+ * This file used to declare its own copy, which meant the test that asserts
+ * "every role has a menu" quietly stopped covering the newest role the moment
+ * one was added — a test that looks like it checks every role and checks the
+ * six somebody remembered.
+ */
 
 /** Routes that render diagnoses, prescriptions, vitals or the clinical queue. */
 const CLINICAL_ROUTES = ['/queue', '/vitals', '/medications', '/ward'];
@@ -258,8 +257,25 @@ describe('route access', () => {
      * through while looking like it was checking. This fails the day a page is
      * added without deciding who it is for, which is the moment to decide.
      */
-    const here = fileURLToPath(new URL('.', import.meta.url));
-    const appDir = resolve(here, '../app/(app)');
+    /*
+     * Located from the working directory rather than `import.meta.url`.
+     *
+     * This suite runs under `environment: 'jsdom'`, where `import.meta.url` is
+     * an `http:` URL rather than a `file:` one — so `fileURLToPath` threw and
+     * this test could not run at all. It is the load-bearing assertion in the
+     * file, and a test that cannot run asserts nothing.
+     *
+     * Vitest sets the working directory to its config root, which is `web/`.
+     * The walk up covers being invoked from the repository root instead, and
+     * the `pages.length` guard below still catches the case where neither
+     * worked.
+     */
+    const appDir = [
+      resolve(process.cwd(), 'app/(app)'),
+      resolve(process.cwd(), 'web/app/(app)'),
+    ].find((candidate) => existsSync(candidate));
+
+    expect(appDir, 'could not locate web/app/(app)').toBeDefined();
     const pages: string[] = [];
 
     const walk = (dir: string, route: string) => {
@@ -274,7 +290,7 @@ describe('route access', () => {
         }
       }
     };
-    walk(appDir, '');
+    walk(appDir!, '');
 
     expect(pages.length).toBeGreaterThan(10); // the walk actually found something
     const orphans = pages.filter((p) => !isKnownRoute(p));

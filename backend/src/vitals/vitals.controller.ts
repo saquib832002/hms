@@ -1,10 +1,11 @@
 import { Body, Controller, Get, Param, ParseIntPipe, Post, Query } from '@nestjs/common';
 import { Type } from 'class-transformer';
 import { IsInt, IsOptional, Max, Min } from 'class-validator';
-import { UserRole } from '@prisma/client';
+import { UserRole, TenantModule } from '@prisma/client';
 import { VitalsService } from './vitals.service';
 import { CreateVitalDto } from './dto/create-vital.dto';
 import { Roles } from '../common/decorators/roles.decorator';
+import { RequiresModule } from '../common/decorators/requires-module.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { AuditAction } from '../common/decorators/audit.decorator';
 import { AuthUser } from '../common/types/auth-user';
@@ -14,6 +15,7 @@ class VitalsQueryDto {
 }
 
 @Controller('vitals')
+@RequiresModule(TenantModule.WARDS)
 export class VitalsController {
   constructor(private readonly vitals: VitalsService) {}
 
@@ -30,6 +32,7 @@ export class VitalsController {
 }
 
 @Controller('patients/:patientId/vitals')
+@RequiresModule(TenantModule.WARDS)
 export class PatientVitalsController {
   constructor(private readonly vitals: VitalsService) {}
 

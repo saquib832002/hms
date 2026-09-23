@@ -19,6 +19,96 @@ export interface ClinicSettings {
   slotMinutes: number;
   clinicStartHour: number;
   clinicEndHour: number;
+  /** SEPARATE or COMBINED — see `PharmacyBillingMode` in the schema. */
+  pharmacyBilling: 'SEPARATE' | 'COMBINED';
+  /**
+   * Does this hospital run a pharmacy at all?
+   *
+   * When false the doctor is never asked where a prescription goes — every one
+   * is external — and the dispensing screens have nothing to show.
+   */
+  hasPharmacy: boolean;
+
+  /**
+   * Tax off entirely, and off by default.
+   *
+   * Explicit rather than inferred from "are any rates defined", so a hospital
+   * can build and check its rate table before any of it reaches a bill — and
+   * so the screens have something to gate on, letting a clinic that charges no
+   * tax never see a tax column at all.
+   */
+  taxEnabled: boolean;
+
+  /**
+   * Whether the prices staff type already contain tax.
+   *
+   * India: the MRP on the box includes GST and is what the patient expects to
+   * pay, so tax is extracted from it. United States: the shelf price is net
+   * and tax is added at the till. Both are "the price is 10.00" and they mean
+   * different amounts of money.
+   */
+  pricesIncludeTax: boolean;
+
+  /**
+   * The rate applied to consultation fees, or null for untaxed.
+   *
+   * Separate from the medicine default deliberately. Indian healthcare
+   * services are largely exempt while the medicines dispensed at the same
+   * visit are not; one rate covering both would be wrong for whichever was
+   * configured second.
+   */
+  consultationTaxRateId: number | null;
+  /**
+   * Will this pharmacy accept prescriptions written at another hospital?
+   *
+   * The receiving half of a two-sided opt-in, and the only thing that makes
+   * this tenant findable by a partner. Off by default.
+   */
+  acceptsExternalPrescriptions: boolean;
+
+  /** SEPARATE or COMBINED — see `LabBillingMode` in the schema. */
+  labBilling: 'SEPARATE' | 'COMBINED';
+
+  /**
+   * Does this hospital run a lab at all?
+   *
+   * When false the doctor is never offered an in-house destination — every
+   * order leaves the building — and the worklist has nothing to show. Most
+   * small clinics draw the blood and send it out.
+   */
+  hasLab: boolean;
+
+  /**
+   * Will this lab accept test orders raised at another hospital?
+   *
+   * The receiving half of a two-sided opt-in, and the only thing that makes
+   * this tenant findable by a partner. Off by default.
+   *
+   * IT HAS TO BE ON A SCREEN, AND FOR A WHILE IT WAS NOT. Adding the column and
+   * the lookup without the switch made every `POST /lab-partners` refuse with
+   * "no lab is accepting orders under that code" — a refusal that is correct,
+   * unexplainable, and impossible to clear. Exactly the shape this project has
+   * hit repeatedly: a precondition the system names and nobody can satisfy.
+   */
+  acceptsExternalLabOrders: boolean;
+
+  /**
+   * Which billing arrangements this lab will take referred work under.
+   *
+   * The receiving half of a two-sided decision about *money*, which is what
+   * makes it different from the flag above. `acceptsExternalLabOrders` answers
+   * "will you do work for other hospitals"; this answers "and who settles it" —
+   * and a lab with no accounts-receivable function genuinely cannot take an
+   * institutional debt, however willing it is to run the test.
+   *
+   * An empty array is legal and means exactly that: work accepted under no
+   * arrangement, which is a real state while a lab is being set up. The partner
+   * lookup says so rather than reporting the lab as not found — the refusal
+   * that has to name what is missing, because the person meeting it is at the
+   * other company and cannot see this screen.
+   */
+  acceptedReferralBilling: ('ORIGIN_PAYS' | 'PATIENT_PAYS')[];
+
   /** ISO 4217. Display only — see the note on Tenant.currency. */
   currency: string;
 }
@@ -29,7 +119,19 @@ export const DEFAULT_CLINIC: ClinicSettings = {
   slotMinutes: 30,
   clinicStartHour: 9,
   clinicEndHour: 17,
+  pharmacyBilling: 'SEPARATE',
+  hasPharmacy: true,
+  acceptsExternalPrescriptions: false,
+  labBilling: 'SEPARATE',
+  hasLab: true,
+  acceptsExternalLabOrders: false,
+  acceptedReferralBilling: ['ORIGIN_PAYS'],
   currency: 'GBP',
+  // Tax off, exclusive, no consultation rate. Every hospital that has not
+  // deliberately switched tax on behaves exactly as it did before tax existed.
+  taxEnabled: false,
+  pricesIncludeTax: false,
+  consultationTaxRateId: null,
 };
 
 /**

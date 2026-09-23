@@ -1,6 +1,13 @@
-import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import path from 'node:path';
 import { PrismaClient } from '@prisma/client';
 import {
+  migrationsOnDisk,
+  pendingMigrations,
+  pendingMigrationWarning,
+} from './pending-migrations';
+import {
+  GLOBAL_MODELS,
   TENANT_SCOPED_MODELS,
   currentScope,
   tenantStorage,
@@ -24,8 +31,49 @@ import {
  */
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger('Prisma');
+
   async onModuleInit() {
     await this.$connect();
+    await this.warnAboutPendingMigrations();
+  }
+
+  /**
+   * Says once, at boot, that the database is behind the code.
+   *
+   * The Prisma client is generated from the schema; the database is changed by
+   * a migration. Between those two steps the API queries columns that do not
+   * exist, and the failure arrives as a 500 naming a column — which sends
+   * whoever reads it looking at the feature that column belongs to rather than
+   * at the one command nobody ran. That has happened three times on this
+   * project. See `pending-migrations.ts`.
+   *
+   * Never fatal. A pending migration touching one feature must not take down
+   * the screens that work without it — the same reasoning that makes a lapsed
+   * subscription read-only rather than a lockout.
+   */
+  private async warnAboutPendingMigrations() {
+    try {
+      const onDisk = migrationsOnDisk(path.resolve(__dirname, '../../prisma/migrations'));
+      if (onDisk.length === 0) return;
+
+      const rows = await this.$queryRawUnsafe<{ migration_name: string }[]>(
+        'SELECT migration_name FROM _prisma_migrations WHERE finished_at IS NOT NULL',
+      );
+      const pending = pendingMigrations(
+        onDisk,
+        rows.map((r) => r.migration_name),
+      );
+
+      if (pending.length > 0) this.logger.error(pendingMigrationWarning(pending));
+    } catch {
+      /*
+       * A database with no `_prisma_migrations` table has never been migrated
+       * at all, and `db:setup` is the answer there — not this warning. Failing
+       * silently is right: this check exists to make one specific confusion
+       * legible, and must never itself become a reason the API will not start.
+       */
+    }
   }
 
   async onModuleDestroy() {
@@ -103,7 +151,37 @@ export function createTenantAwarePrisma(base: PrismaService): PrismaService {
        */
       if (prop === 'unscoped') return target;
 
-      if (scope && typeof prop === 'string' && TENANT_SCOPED_MODELS.has(prop)) {
+      /*
+       * Scoped models go through the request's transaction, as always.
+       *
+       * GLOBAL models now do too, and that is a bug fix rather than tidiness.
+       *
+       * THE DEADLOCK THIS CLOSES
+       * ------------------------
+       * `TenantInterceptor` wraps every authenticated request in an
+       * interactive transaction, which holds ONE pool connection for the whole
+       * request. Reading a global table off the base client — `tenants`, for
+       * the timezone, on nearly every request — asked the same pool for a
+       * SECOND connection while the first was still held.
+       *
+       * With Prisma's default pool (roughly 2×CPUs + 1), that is a
+       * self-deadlock: once that many requests are in flight, each holds one
+       * connection and waits for another that nobody can release. Requests
+       * stall until the pool timeout fires, the 15-second auto-refresh on the
+       * ward board and queue screens re-fires them, and the page never loads.
+       * It looks like a slow query and is not one.
+       *
+       * Routing global models through the transaction is safe: they carry no
+       * RLS policy, so `app.tenant_id` does not change what they return.
+       * `unscoped` stays available for the handful of places that genuinely
+       * need to escape the request's transaction — provisioning, and the
+       * cross-tenant referral write.
+       */
+      if (
+        scope &&
+        typeof prop === 'string' &&
+        (TENANT_SCOPED_MODELS.has(prop) || GLOBAL_MODELS.has(prop))
+      ) {
         return (scope.tx as unknown as Record<string, unknown>)[prop];
       }
 

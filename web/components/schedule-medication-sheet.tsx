@@ -128,8 +128,15 @@ export function ScheduleMedicationSheet({
                 {result.unscheduled.length} medicine
                 {result.unscheduled.length === 1 ? '' : 's'} not scheduled
               </div>
+              {/*
+                This used to end here, and that was the whole problem: the
+                sentence told the nurse to do something and no screen anywhere
+                could do it. The drug chart now can, so the message points at it.
+              */}
               <p className="mt-0.5 text-xs">
-                These need a nurse to set the times. They are deliberately not guessed at.
+                These are deliberately not guessed at. Set the times — or record an as-needed
+                dose — on the patient&rsquo;s <strong>drug chart</strong>, from the Chart button on
+                the ward board.
               </p>
               <ul className="mt-2 space-y-1.5">
                 {result.unscheduled.map((u) => (

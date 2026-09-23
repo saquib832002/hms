@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import Link from 'next/link';
 import { api } from '@/lib/api';
 import type { DispenseQueueItem } from '@/lib/types';
 import { dateTime } from '@/lib/format';
@@ -24,6 +25,8 @@ export default function PharmacyQueuePage() {
   const [dispensing, setDispensing] = useState<number | null>(null);
   const [mapping, setMapping] = useState(false);
   const [history, setHistory] = useState(false);
+  /** How many prescriptions from other hospitals are waiting on Incoming. */
+  const [incoming, setIncoming] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
@@ -32,6 +35,30 @@ export default function PharmacyQueuePage() {
       setRows(res.data);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not load the dispensing queue');
+    }
+
+    /*
+     * Incoming referrals are counted here, on the screen a pharmacist actually
+     * watches.
+     *
+     * They are deliberately not *in* this queue: this list is built from local
+     * `Prescription` rows and a referral is a transmitted copy owned by this
+     * tenant with no prescription behind it. Merging them would mean two
+     * different things in one table with half the actions disabled on each.
+     *
+     * But a separate page nobody looks at is the same as no page. A
+     * prescription sent from another hospital sat in Incoming while the
+     * pharmacist watched this screen and concluded the feature did not work —
+     * which is the third time this month that a working thing was invisible
+     * because nothing pointed at it.
+     */
+    try {
+      const r = await api<{ data: unknown[] }>('/pharmacy/referrals');
+      setIncoming(r.data.length);
+    } catch {
+      // A pharmacy with no partners gets a 403 or an empty list depending on
+      // configuration; either way this is a signpost, not a function.
+      setIncoming(0);
     }
   }, []);
 
@@ -50,6 +77,26 @@ export default function PharmacyQueuePage() {
     <>
       <div className="flex shrink-0 items-center gap-5 border-b border-border bg-surface px-4 py-2">
         <Stat label="Waiting" value={rows?.length ?? '—'} tone="warning" />
+        {/* A count that is also the way there. A number a pharmacist cannot
+            click is a number they have to go looking for. */}
+        {incoming !== null && incoming > 0 && (
+          /*
+            `Link`, never a bare <a>, for anything inside the app.
+            ----------------------------------------------------
+            The access token lives in memory only — deliberately, so that a
+            stolen localStorage cannot resume a clinical session. A raw <a>
+            is a full document load: React unmounts, the token goes with it,
+            and the next request 401s. The user is bounced to the login screen
+            and reads it as "the session timed out", which is exactly what
+            happened here.
+          */
+          <Link
+            href="/pharmacy/referrals"
+            className="rounded-md border border-primary bg-primary-soft px-2.5 py-1 text-sm text-primary hover:underline"
+          >
+            <span className="font-semibold">{incoming}</span> from other hospitals →
+          </Link>
+        )}
         <Stat
           label="Partially dispensed"
           value={rows?.filter((r) => r.status === 'PARTIALLY_DISPENSED').length ?? '—'}

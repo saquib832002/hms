@@ -77,11 +77,49 @@ DECLARE
     'medicines', 'stock_batches', 'invoices', 'appointments', 'prescriptions',
     'admissions', 'medical_records', 'allergies',
     'prescription_items', 'vitals', 'medication_administrations',
-    'dispense_events', 'dispense_lines', 'payments', 'invoice_items',
+    'dispense_events', 'dispense_lines', 'payments', 'refunds', 'invoice_items',
     -- Who may act as what. Scoped like everything else: one hospital's role
     -- grants are none of another's business, and an unscoped row here would be
     -- a grant visible across tenants.
-    'user_role_assignments'
+    'user_role_assignments',
+    -- Cross-tenant prescribing. Both sides are ordinarily scoped, and that is
+    -- the point of the design: a prescription sent to another hospital's
+    -- pharmacy is *copied* into their tenant rather than made visible across
+    -- the boundary, so these rows need no exception. `pharmacy_partners`
+    -- belongs to the sender, `prescription_referrals` to the receiver.
+    'pharmacy_partners', 'prescription_referrals', 'prescription_referral_items',
+    'tax_rates', 'tax_rate_components',
+    -- What a ward asked for and what a prescriber answered. Both hang off an
+    -- admission and name a patient, so they are as clinical as the chart they
+    -- belong to — and a medication request carries a nurse's reasoning in free
+    -- text, which is a note about a patient by any reading.
+    'supply_requests', 'medication_requests',
+    -- How closely a patient is watched, and who was told when they
+    -- deteriorated. Both hang off an admission and name a patient.
+    'observation_orders', 'observation_escalations',
+    -- Diagnostics. A test menu and its prices are commercial information about
+    -- the hospital that set them, and everything below `lab_orders` names a
+    -- patient and carries their results.
+    'lab_tests', 'lab_analytes', 'lab_orders', 'lab_order_items',
+    'lab_result_values',
+    -- Cross-tenant diagnostics, and the first feature where data crosses in
+    -- BOTH directions. It still needs no exception: `lab_partners` belongs to
+    -- the sender, `lab_referrals` to the receiving lab, and the result is
+    -- written back onto rows the ordering hospital already owns. The generic
+    -- policy remains the whole truth on every one of them.
+    'lab_partners', 'lab_referrals', 'lab_referral_items',
+    -- What a hospital owes a partner laboratory. Written by the *performing*
+    -- lab into the *referring* hospital's scope, so this is the second row in
+    -- the system created across the boundary rather than merely read across
+    -- it. It is exactly as scoped as anything else of theirs: the policy is
+    -- what stops one hospital reading another's payables, and a `where` clause
+    -- alone would be the thing this design exists to refuse.
+    'partner_lab_charges',
+    -- Files attached to a result. `lab_attachment_data` is the most sensitive
+    -- table in the diagnostics module: it holds the bytes of a patient's
+    -- laboratory report, so a missing policy here is one hospital's reports
+    -- readable by another.
+    'lab_attachments', 'lab_attachment_data'
   ];
 BEGIN
   FOREACH t IN ARRAY scoped LOOP
@@ -121,14 +159,63 @@ CREATE POLICY tenant_isolation ON audit_logs
 -- transaction is opened.
 --
 -- These two functions are the only sanctioned way across that boundary. They
--- are SECURITY DEFINER, so they run as the owner and see past RLS, and they
--- return *nothing but identifiers* — no name, no password hash, no PHI. The
--- caller then opens a normal tenant transaction and reads the row through the
--- policies like anything else.
+-- are SECURITY DEFINER, so they run as their *owner*, and they return nothing
+-- but identifiers — no name, no password hash, no PHI. The caller then opens a
+-- normal tenant transaction and reads the row through the policies like
+-- anything else.
+--
+-- WHO OWNS THEM, AND WHY IT IS NOT THE TABLE OWNER
+-- -----------------------------------------------
+-- This comment used to say "they run as the owner and see past RLS". That was
+-- true only while the owner happened to be a superuser, and it stopped being
+-- true the moment ownership moved to a normal role — because `users` is FORCE
+-- ROW LEVEL SECURITY, which subjects its owner to the policy too.
+--
+-- The consequence was total: with no tenant set, `app_current_tenant()` is
+-- NULL, both functions returned zero rows, and *nobody could sign in* — the
+-- exact chicken-and-egg this section exists to prevent, reintroduced by a
+-- change that looked like a tightening. It also broke every authenticated
+-- request, since JwtStrategy calls `app_user_tenant` before the tenant
+-- transaction is opened.
+--
+-- So they are owned by `hms_definer`: a NOLOGIN role that owns nothing else and
+-- is named in exactly one policy, below. Deliberately NOT a BYPASSRLS role —
+-- that would exempt it from every table in the database to solve a problem
+-- about one. The narrow policy is auditable in a way a role attribute is not.
 --
 -- search_path is pinned: a SECURITY DEFINER function without it can be
 -- hijacked by a caller-controlled search_path resolving `users` to another
 -- table.
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'hms_definer') THEN
+    CREATE ROLE hms_definer NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+  END IF;
+
+  /*
+   * Membership, because `ALTER FUNCTION ... OWNER TO` requires the connecting
+   * role to be a member of the role it is giving the function to.
+   *
+   * Creating a role with CREATEROLE does not imply membership on every
+   * PostgreSQL version — 16 grants the creator ADMIN OPTION automatically,
+   * earlier ones do not — and the failure is a flat "must be able to SET ROLE",
+   * which reads as a permissions problem with the connection rather than a
+   * missing grant. Asserted here so the script works the same on both.
+   */
+  IF NOT pg_has_role(current_user, 'hms_definer', 'MEMBER') THEN
+    EXECUTE format('GRANT hms_definer TO %I', current_user);
+  END IF;
+END $$;
+
+GRANT USAGE ON SCHEMA public TO hms_definer;
+GRANT SELECT ON users, tenants TO hms_definer;
+
+-- The one policy that lets login happen. FOR SELECT only, and only for the
+-- role that owns those two functions — so its entire reach is what they return,
+-- which is two integers.
+DROP POLICY IF EXISTS login_lookup ON users;
+CREATE POLICY login_lookup ON users FOR SELECT TO hms_definer USING (true);
 
 CREATE OR REPLACE FUNCTION app_login_lookup(p_email text)
   RETURNS TABLE (user_id int, tenant_id int)
@@ -183,6 +270,26 @@ REVOKE ALL ON FUNCTION app_user_tenant(bigint) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app_login_lookup(text) TO hms_app;
 GRANT EXECUTE ON FUNCTION app_user_tenant(bigint) TO hms_app;
 
+-- Ownership last: the REVOKE and GRANTs above are issued by the connecting
+-- role, which must still own the functions when it issues them.
+--
+-- CREATE is granted and then taken away again, and that is not superstition:
+-- Postgres requires the *incoming* owner to hold CREATE on the schema holding
+-- the object, because owning something in a schema is a form of occupying it.
+-- USAGE is not enough, and the refusal reads as "permission denied for schema
+-- public" — which sounds like a problem with the connecting role rather than
+-- with the role being given the function.
+--
+-- Revoking it afterwards leaves `hms_definer` with exactly USAGE on the schema
+-- and SELECT on two tables, which is the whole of what it should be able to do.
+-- Ownership already transferred; nothing here depends on the grant persisting.
+GRANT CREATE ON SCHEMA public TO hms_definer;
+
+ALTER FUNCTION app_login_lookup(text) OWNER TO hms_definer;
+ALTER FUNCTION app_user_tenant(bigint) OWNER TO hms_definer;
+
+REVOKE CREATE ON SCHEMA public FROM hms_definer;
+
 -- ── 3c. the vendor's own tables ────────────────────────────────────────────
 --
 -- platform_users and break_glass_grants belong to the vendor, not to any
@@ -210,7 +317,9 @@ GRANT EXECUTE ON FUNCTION app_user_tenant(bigint) TO hms_app;
 DO $$
 DECLARE
   t text;
-  platform_tables text[] := ARRAY['platform_users', 'break_glass_grants'];
+  -- tenant_applications joins them: an applicant's contact details are the
+  -- vendor's record, and one hospital must never learn that another applied.
+  platform_tables text[] := ARRAY['platform_users', 'break_glass_grants', 'tenant_applications'];
 BEGIN
   FOREACH t IN ARRAY platform_tables LOOP
     IF to_regclass(format('public.%I', t)) IS NULL THEN
@@ -277,6 +386,69 @@ BEGIN
   IF seen_no_tenant <> 1 THEN
     RAISE EXCEPTION
       'platform_users is not readable outside a tenant scope. The platform API could never sign in.';
+  END IF;
+END $$;
+
+-- Prove that somebody can still sign in.
+--
+-- WHY THIS EXISTS
+-- ---------------
+-- Every other check in this file proves that isolation *holds*. None of them
+-- proved that the one sanctioned hole through it is still open — and when
+-- ownership of the two login functions moved to a normal role, they silently
+-- began returning zero rows. Isolation was perfect and the product was dead:
+-- no user at any hospital could sign in, and every authenticated request failed
+-- at `app_user_tenant`.
+--
+-- That is the same shape as the failure this section already warned about in
+-- prose, which is exactly why prose was not enough. So it is asserted, against
+-- a hospital and a user this block creates and then removes.
+DO $$
+DECLARE
+  probe_tenant int;
+  probe_user   int;
+  found_login  int;
+  found_tenant int;
+BEGIN
+  PERFORM set_config('app.tenant_id', '', true);
+
+  INSERT INTO tenants (slug, name, "updatedAt")
+  VALUES ('__rls_login_probe__', 'RLS login probe', now())
+  RETURNING id INTO probe_tenant;
+
+  -- The user has to be written from inside the new tenant's scope, because
+  -- `users` is policy-checked on INSERT like anything else. This is the same
+  -- step platform provisioning has to take, and forgetting it there is what
+  -- broke tenant creation on its first live run.
+  PERFORM set_config('app.tenant_id', probe_tenant::text, true);
+
+  INSERT INTO users ("tenantId", email, "passwordHash", "fullName", role, "updatedAt")
+  VALUES (probe_tenant, '__rls_login_probe__@invalid', 'x', 'RLS probe', 'ADMIN', now())
+  RETURNING id INTO probe_user;
+
+  -- Back to no tenant: this is the state a login request is actually in.
+  PERFORM set_config('app.tenant_id', '', true);
+
+  SELECT count(*) INTO found_login
+    FROM app_login_lookup('__rls_login_probe__@invalid');
+
+  SELECT count(*) INTO found_tenant
+    FROM (SELECT app_user_tenant(probe_user::bigint) AS t) x
+    WHERE x.t IS NOT NULL;
+
+  PERFORM set_config('app.tenant_id', probe_tenant::text, true);
+  DELETE FROM users WHERE id = probe_user;
+  PERFORM set_config('app.tenant_id', '', true);
+  DELETE FROM tenants WHERE id = probe_tenant;
+
+  IF found_login <> 1 THEN
+    RAISE EXCEPTION
+      'app_login_lookup returns nothing with no tenant in scope. Nobody can sign in. Check that it is owned by hms_definer and that the login_lookup policy on users exists.';
+  END IF;
+
+  IF found_tenant <> 1 THEN
+    RAISE EXCEPTION
+      'app_user_tenant returns nothing with no tenant in scope. Every authenticated request will fail in JwtStrategy. Same cause as above.';
   END IF;
 END $$;
 

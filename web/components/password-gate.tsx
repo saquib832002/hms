@@ -56,8 +56,13 @@ export function PasswordGate({ children }: { children: React.ReactNode }) {
     <div className="flex min-h-screen items-center justify-center bg-bg px-4">
       <div className="w-full max-w-[400px]">
         <div className="mb-5 text-center">
+          {/*
+            The hospital, not the product. This screen is *after* sign-in — the
+            tenant is known — and it is the first thing a new member of staff
+            sees, so it is the worst place to show them somebody else's name.
+          */}
           <div className="text-xl font-bold tracking-tight">
-            Meridian<span className="text-primary">HMS</span>
+            {user.hospital?.name ?? 'Your hospital'}
           </div>
           <p className="mt-1 text-sm text-text-muted">Set your own password to continue</p>
         </div>

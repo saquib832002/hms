@@ -26,7 +26,7 @@ interface AuthState {
   loading: boolean;
   /** True when the session is alive but the screen is hidden behind a lock. */
   locked: boolean;
-  signIn: (email: string, password: string) => Promise<void>;
+  signIn: (email: string, password: string, hospital?: string) => Promise<void>;
   signOut: () => Promise<void>;
   unlock: () => Promise<boolean>;
   /**
@@ -100,8 +100,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => sub.remove();
   }, [user]);
 
-  const signIn = useCallback(async (email: string, password: string) => {
-    const u = await apiLogin(email, password);
+  const signIn = useCallback(async (email: string, password: string, hospital?: string) => {
+    const u = await apiLogin(email, password, hospital);
     setUser(u);
     setLocked(false);
     // Registered only after a successful sign-in, so an unauthenticated device

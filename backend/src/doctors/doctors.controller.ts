@@ -1,8 +1,9 @@
 import { Body, Controller, Get, Param, ParseIntPipe, Patch, Query } from '@nestjs/common';
 import { IsInt, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
-import { UserRole } from '@prisma/client';
+import { UserRole, TenantModule } from '@prisma/client';
 import { DoctorsService } from './doctors.service';
 import { Roles } from '../common/decorators/roles.decorator';
+import { RequiresModule } from '../common/decorators/requires-module.decorator';
 import { AuditAction } from '../common/decorators/audit.decorator';
 
 class UpdateDoctorDto {
@@ -10,6 +11,15 @@ class UpdateDoctorDto {
   @IsOptional() @IsString() @MaxLength(120) specialization?: string;
   @IsOptional() @IsInt() departmentId?: number | null;
   @IsOptional() @IsString() @MaxLength(60) registrationNo?: string | null;
+
+  /**
+   * "MBBS, MD (Medicine)" — printed under the name on a prescription.
+   *
+   * Editable here rather than only at account creation, because a doctor
+   * finishing a qualification is ordinary and re-creating their account to
+   * record it is not.
+   */
+  @IsOptional() @IsString() @MaxLength(120) qualifications?: string | null;
   @IsOptional() @IsString() @MaxLength(40) phone?: string | null;
 
   /**
@@ -39,6 +49,7 @@ const ALL_STAFF = [
 ] as const;
 
 @Controller('doctors')
+@RequiresModule(TenantModule.CLINIC)
 export class DoctorsController {
   constructor(private readonly doctors: DoctorsService) {}
 

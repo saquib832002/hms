@@ -125,9 +125,25 @@ So there are two connection strings and they are not interchangeable:
 
 ```bash
 sudo -u postgres psql <<'SQL'
-CREATE ROLE hms_owner LOGIN PASSWORD 'CHANGE_ME_OWNER';
+-- CREATEROLE, and deliberately not SUPERUSER.
+--
+-- `npm run db:rls` creates the hms_app role and later syncs its password, so
+-- the owner needs to be able to manage roles. Superuser would also work and
+-- would bypass RLS entirely — so if that connection string ever found its way
+-- into DATABASE_URL, isolation would be off with nothing to show for it.
+--
+-- On Postgres 16 a CREATEROLE role may only alter roles it created itself, so
+-- hms_owner can manage hms_app and nothing else on the server.
+CREATE ROLE hms_owner LOGIN CREATEROLE PASSWORD 'CHANGE_ME_OWNER';
 CREATE DATABASE hms_db OWNER hms_owner;
 SQL
+```
+
+If you already created `hms_owner` without it, `db:rls` fails with
+`permission denied to create role`. Fix it in place:
+
+```bash
+sudo -u postgres psql -c "ALTER ROLE hms_owner CREATEROLE;"
 ```
 
 You do **not** create `hms_app` by hand. `npm run db:rls` creates it and syncs
@@ -148,14 +164,39 @@ If it shows `0.0.0.0`, set `listen_addresses = 'localhost'` in
 
 ## 4. Get the code and configure it
 
+**Which account runs what**, because this trips people at exactly this point:
+
+| Runs as | What |
+|---|---|
+| **your admin user** | everything starting with `sudo` — systemd, nginx, certbot, firewall, `psql` as postgres |
+| **hms** | everything under `/opt/hms/app` — `npm ci`, builds, migrations, `db:rls` |
+
+`hms` was created with `useradd -r` and has no password and no sudo. That is the
+point of it: it runs the app and administers nothing. So `sudo` from inside an
+`hms` shell asks for a password that does not exist — `exit` back to your own
+account first.
+
 ```bash
 sudo -u hms -i
 git clone <your-repo-url> /opt/hms/app
 cd /opt/hms/app
 ```
 
-**`backend/.env`** — then `chmod 600 backend/.env`. It holds two database
-passwords and two signing secrets.
+**Create `backend/.env`.** It does not exist in the repo and never will — it is
+gitignored, because it holds two database passwords and two signing secrets.
+Only `.env.example` is committed.
+
+```bash
+cd /opt/hms/app/backend
+cp .env.example .env
+chmod 600 .env
+nano .env
+```
+
+Two of these are production-only and are **not** in `.env.example`, so add them:
+`DATABASE_URL_ADMIN` (without it `npm run db:rls` refuses to run) and
+`NODE_ENV=production` (without it the refresh cookie is issued without `Secure`,
+which is a working-but-wrong deployment).
 
 ```bash
 NODE_ENV=production
@@ -171,16 +212,23 @@ JWT_REFRESH_SECRET="..."
 JWT_ACCESS_TTL="15m"
 JWT_REFRESH_TTL_DAYS=7
 
-# A fallback only. Each hospital's real timezone lives on its tenant row and is
-# set from Admin → Clinic Settings.
-HOSPITAL_TIMEZONE="Asia/Kolkata"
+# No timezone setting. Every timestamp is stored UTC, and what "today" means
+# belongs to the hospital — Tenant.timezone, set from Admin → Clinic Settings.
+# Leave the server and Postgres on UTC.
 
 # Your public origin. Nothing else may call the API from a browser.
 CORS_ORIGINS="https://hms.example.com"
 ```
 
-**`web/.env.local`** — the only variable the web app needs, read at build time
-by `next.config.mjs` to wire up the proxy:
+**Create `web/.env.local`**, likewise gitignored, from its example:
+
+```bash
+cd /opt/hms/app/web
+cp .env.local.example .env.local
+nano .env.local
+```
+
+One variable, read at build time by `next.config.mjs` to wire up the proxy:
 
 ```bash
 API_ORIGIN=http://127.0.0.1:3000
@@ -237,8 +285,16 @@ Generate the password hash with the same Argon2 settings the app uses:
 
 ```bash
 cd /opt/hms/app/backend
-node -e "require('@node-rs/argon2').hash('TemporaryPassw0rd!').then(console.log)"
+read -rsp 'Temporary password: ' PW; echo
+PW="$PW" node -e "require('@node-rs/argon2').hash(process.env.PW).then(console.log)"
+unset PW
 ```
+
+Read into a variable rather than typed into the command for two reasons. It
+keeps the password out of `~/.bash_history`, which is where a plaintext
+credential should never end up on a machine holding health data. And a password
+containing `!` — as a good one often does — triggers bash history expansion
+inside double quotes and fails with `event not found`.
 
 Then connect **as the owner** — RLS would otherwise hide the rows you are
 creating:
@@ -347,29 +403,27 @@ and, in production, **not** print the dummy-data warning.
 
 ## 8. nginx and TLS
 
+**HTTP first, then let certbot add the TLS.** Writing the `ssl_certificate`
+lines up front fails `nginx -t`, because the files they name do not exist until
+a certificate has been issued — and a certificate cannot be issued until nginx
+is serving port 80. Start plain and let certbot rewrite the file.
+
+Check DNS resolves here and open the firewall first; certbot proves ownership
+over port 80 and fails silently-ish if either is wrong.
+
+```bash
+dig +short hms.example.com     # must return this VPS's public IP
+sudo ufw allow OpenSSH
+sudo ufw allow 'Nginx Full'
+sudo ufw enable
+```
+
 `/etc/nginx/sites-available/hms`:
 
 ```nginx
 server {
     listen 80;
     server_name hms.example.com;
-    return 301 https://$host$request_uri;
-}
-
-server {
-    listen 443 ssl;
-    http2 on;
-    server_name hms.example.com;
-
-    ssl_certificate     /etc/letsencrypt/live/hms.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/hms.example.com/privkey.pem;
-
-    # The refresh cookie is Secure in production, so it is never sent over
-    # plain HTTP. Without TLS, sign-in appears to work and every reload logs
-    # the user out — a confusing failure with an obvious cause.
-    add_header Strict-Transport-Security "max-age=31536000" always;
-    add_header X-Content-Type-Options nosniff always;
-    add_header X-Frame-Options DENY always;
 
     client_max_body_size 10m;
 
@@ -395,45 +449,106 @@ as one client.
 sudo ln -s /etc/nginx/sites-available/hms /etc/nginx/sites-enabled/hms
 sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t && sudo systemctl reload nginx
-
-sudo apt install -y certbot python3-certbot-nginx
-sudo certbot --nginx -d hms.example.com
 ```
 
-Certbot installs its own renewal timer; check it with
-`systemctl list-timers | grep certbot`.
-
-**Firewall:**
+`http://hms.example.com` should now serve the login page. Signing in will not
+work yet, and that is expected — see the cookie note below.
 
 ```bash
-sudo ufw allow OpenSSH
-sudo ufw allow 'Nginx Full'
-sudo ufw enable
-sudo ufw status
+sudo apt install -y certbot python3-certbot-nginx
+sudo certbot --nginx -d hms.example.com     # choose "redirect" when offered
 ```
 
-Postgres on 5432 stays closed — it is only reached over loopback.
+Certbot rewrites the file in place, adding a `listen 443 ssl` block and an
+80 → 443 redirect. Now add the hardening headers **inside that new 443 block**:
+
+```nginx
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options DENY always;
+```
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+**TLS is not optional for this app.** The refresh cookie is `Secure` in
+production, so a browser will never send it over plain HTTP — sign-in appears to
+succeed and then every reload bounces you back to the login screen. A confusing
+symptom with a simple cause.
+
+**Verify the whole chain:**
+
+```bash
+curl -sI http://hms.example.com | head -1        # 301
+curl -s https://hms.example.com/api/v1/health    # {"status":"ok","database":"up"}
+systemctl list-timers | grep certbot             # renewal armed
+```
+
+That health check is the one worth doing: it proves nginx → Next.js → the
+`/api/v1` rewrite → the API → Postgres all work end to end.
+
+Postgres on 5432 stays closed throughout — it is only ever reached over
+loopback.
 
 ---
 
 ## 9. The mobile app
 
 In development the app derives the API host from the Expo dev server, which is
-why it works on your LAN with no configuration. **A production build has no dev
-server**, so it falls back to `expo.extra.apiOrigin` in `app.json`. Set it
-before building:
+why it works on your LAN with no configuration. **A release build has no dev
+server**, so the origin has to be baked in — and `app.config.js` does that from
+an environment variable rather than a committed file.
 
-```json
-{
-  "expo": {
-    "extra": { "apiOrigin": "https://hms.example.com", "apiPort": 443 }
-  }
-}
+```bash
+APP_ENV=development   # default. LAN dev server, host auto-detected
+APP_ENV=staging       # a named staging origin
+APP_ENV=production    # the real hospital
 ```
 
-Then `eas build`, or `npx expo run:android --variant release` for a local APK.
-Android blocks plaintext HTTP by default, so §8's TLS is a prerequisite for
-mobile, not just good practice.
+The origin per environment lives in `mobile/app.config.js`. Change the
+`production` entry to your hostname once.
+
+**For an EAS build you do not set anything** — `eas.json` carries `APP_ENV` in
+each profile and EAS injects it:
+
+```
+eas build -p android --profile production
+eas build -p android --profile staging
+```
+
+**Local commands** need the variable in your own shell, and the syntax differs.
+PowerShell does not understand `VAR=value cmd`:
+
+```powershell
+# PowerShell (Windows)
+$env:APP_ENV="production"; npx expo run:android --variant release
+Remove-Item Env:APP_ENV      # it persists for the session otherwise
+```
+
+```bash
+# bash / zsh (macOS, Linux, WSL)
+APP_ENV=production npx expo run:android --variant release
+```
+
+Leaving `APP_ENV` set in a PowerShell session is worth clearing deliberately:
+the next plain `npx expo start` in that window would otherwise build a
+development app pointing at the live hospital.
+
+**Each environment gets its own package id** — `…meridianhms`,
+`…meridianhms.staging`, `…meridianhms.dev` — so a release candidate and the
+build a nurse is actually using can sit on one phone with different names. The
+Account screen states which build it is, because two similar icons is how
+somebody records vitals into the wrong database.
+
+**A non-development build refuses to configure a plain-HTTP origin.** Android
+blocks cleartext anyway, but it fails on the device as "network request failed"
+with nothing naming the cause — and the refresh token is a `Secure` cookie, so
+patient data would be crossing the wire in the clear. The config throws at build
+time instead. §8's TLS is a prerequisite for mobile, not a nicety.
+
+`eas.json` carries matching build profiles, so `--profile production` sets
+`APP_ENV` for you.
 
 ---
 

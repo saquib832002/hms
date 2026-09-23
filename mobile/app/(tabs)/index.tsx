@@ -20,6 +20,7 @@ import {
   StatusPill,
 } from '@/components/ui';
 import type { QueueItem } from '@/lib/types';
+import { RecordSheet } from '@/components/record-sheet';
 
 /**
  * Today's queue — the landing screen and the reason this app exists.
@@ -41,6 +42,18 @@ export default function QueueScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  /*
+   * Writing a record straight from the queue, which the web has had since
+   * Phase 1 and mobile had nowhere at all.
+   *
+   * Held here rather than on the row so only one sheet can ever be open: the
+   * rows are a list, and two overlays stacked over each other is a state with
+   * no way back.
+   */
+  const [writingFor, setWritingFor] = useState<QueueItem | null>(null);
+  // Hidden without the laboratory — a clinic that never bought it has nowhere
+  // to send the work, and a dead button is what the module system prevents.
+  const hasLab = user?.hospital?.modules?.includes('LABORATORY') ?? true;
   const router = useRouter();
 
   /*
@@ -154,8 +167,36 @@ export default function QueueScreen() {
             busy={busyId === item.id}
             onPress={() => router.push(`/patient/${item.patient.id}`)}
             onStatus={(status) => void advance(item, status)}
+            onWriteRecord={() => setWritingFor(item)}
+            onWriteRx={() =>
+              router.push(
+                `/patient/${item.patient.id}?prescribe=1`,
+              )
+            }
+            onOrderTests={() =>
+              router.push(
+                `/lab-order/${item.patient.id}?patientName=${encodeURIComponent(item.patient.fullName)}`,
+              )
+            }
+            hasLab={hasLab}
           />
         )}
+      />
+
+      {/*
+        One sheet for the whole list, opened by whichever row asked.
+
+        `refresh()` after a save so the queue reflects it — not strictly needed
+        for a record, which does not change appointment status, but the doctor
+        has just written something and a screen that looks untouched invites
+        writing it twice.
+      */}
+      <RecordSheet
+        visible={writingFor !== null}
+        patientId={writingFor?.patient.id ?? 0}
+        patientName={writingFor?.patient.fullName ?? ''}
+        onClose={() => setWritingFor(null)}
+        onSaved={() => void refresh()}
       />
     </Screen>
   );
@@ -185,14 +226,29 @@ function QueueRow({
   busy,
   onPress,
   onStatus,
+  onWriteRecord,
+  onWriteRx,
+  onOrderTests,
+  hasLab,
 }: {
   item: QueueItem;
   busy: boolean;
   onPress: () => void;
   onStatus: (status: 'IN_PROGRESS' | 'COMPLETED') => void;
+  onWriteRecord: () => void;
+  onWriteRx: () => void;
+  onOrderTests: () => void;
+  /** Whether this hospital was sold the laboratory at all. */
+  hasLab: boolean;
 }) {
   const colors = statusColors(item.status);
   const canStart = item.status === 'CHECKED_IN';
+  /*
+   * Mirrors `canWrite` on the web queue exactly. Not a UI preference — it is
+   * what `resolveTreatingScope` will accept, so the buttons appear precisely
+   * when the write would succeed.
+   */
+  const canWrite = item.status === 'IN_PROGRESS' || item.status === 'COMPLETED';
   const canComplete = item.status === 'IN_PROGRESS';
 
   return (
@@ -257,6 +313,59 @@ function QueueRow({
               />
             </>
           )}
+        </View>
+      )}
+
+      {/*
+        Record and prescription, from the queue.
+
+        The web has offered both here since Phase 1 and the phone offered
+        neither, so a doctor consulting with the phone in their hand could start
+        and finish a consultation and never write down what they found — the one
+        artefact the consultation exists to produce.
+
+        Gated on the same `canWrite` the web uses, and the reason is the server:
+        `resolveTreatingScope` accepts an attended appointment or an open
+        admission, and SCHEDULED is not attended. Offering the buttons before
+        the consultation starts would mean a doctor filling in a whole record
+        and being refused at save.
+      */}
+      {canWrite && (
+        <View style={s.rowActions}>
+          <Button
+            label="Add record"
+            variant="secondary"
+            onPress={onWriteRecord}
+            style={s.grow}
+          />
+          <Button
+            label="Prescription"
+            variant="secondary"
+            onPress={onWriteRx}
+            style={s.grow}
+          />
+        </View>
+      )}
+
+      {/*
+        Ordering a test, from where the doctor actually is.
+
+        The queue offered a record and a prescription and no way to order an
+        investigation — on either client — so a doctor mid-consultation had to
+        leave the queue, find the patient again and order from the record.
+        Ordering is as ordinary a consultation output as the other two.
+
+        Hidden without the laboratory rather than disabled: a clinic that never
+        bought it has nowhere to send the work.
+      */}
+      {canWrite && hasLab && (
+        <View style={s.rowActions}>
+          <Button
+            label="Request tests"
+            variant="secondary"
+            onPress={onOrderTests}
+            style={s.grow}
+          />
         </View>
       )}
     </Card>

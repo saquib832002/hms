@@ -48,13 +48,54 @@ export class NotificationsService {
     void this.send(doctorUserId, kind, ids);
   }
 
+  /**
+   * WHY EVERY READ AND WRITE BELOW IS `unscoped`.
+   *
+   * THE BUG THIS FIXES
+   * ------------------
+   *     Push notification could not be delivered (PATIENT_CHECKED_IN):
+   *     Transaction already closed: A query cannot be executed on a
+   *     committed transaction.
+   *
+   * `notifyDoctor` is deliberately fire-and-forget — a push service having a
+   * bad day must not fail a check-in — so `send` runs *after* the response has
+   * gone out and after `TenantInterceptor`'s transaction has committed. But
+   * `this.prisma.device` is proxied onto that transaction: `device` is a
+   * global model, and `GLOBAL_MODELS` are routed through the request's own
+   * transaction precisely so a request never asks the pool for a second
+   * connection. Correct for anything that runs *inside* the request, and
+   * exactly wrong for anything that outlives it.
+   *
+   * So this is the same class as the audit drain loop, which is already on the
+   * `connection-budget.spec.ts` allow-list for the same reason: work scheduled
+   * during a request and executed after it has to open its own connection,
+   * because the one it was proxied onto is gone.
+   *
+   * IT IS ALSO SAFE, WHICH IS THE OTHER HALF
+   * ----------------------------------------
+   * `devices` carries no `tenantId` and no RLS policy — a push token belongs to
+   * a *user*, and the lookup is already keyed on `userId`. So `unscoped`
+   * returns exactly the rows the scoped client would have; nothing here reads
+   * across a hospital boundary, and nothing here could.
+   *
+   * WHAT WAS REJECTED
+   * -----------------
+   * Awaiting the send inside the request would fix the error and destroy the
+   * property the whole method exists for: reception's check-in would then wait
+   * on Expo. Capturing the tenant and re-entering with `forTenant` would open a
+   * transaction to read a table that has no policy — cost with no benefit.
+   */
+  private get db() {
+    return this.prisma.unscoped;
+  }
+
   private async send(
     userId: number,
     kind: NotificationKind,
     ids: { appointmentId?: number; prescriptionId?: number },
   ): Promise<void> {
     try {
-      const devices = await this.prisma.device.findMany({
+      const devices = await this.db.device.findMany({
         where: { userId },
         select: { pushToken: true },
       });
@@ -96,7 +137,7 @@ export class NotificationsService {
       .filter((t): t is string => Boolean(t));
 
     if (dead.length === 0) return;
-    await this.prisma.device.deleteMany({ where: { pushToken: { in: dead } } });
+    await this.db.device.deleteMany({ where: { pushToken: { in: dead } } });
     this.logger.log(`Removed ${dead.length} unregistered device token(s)`);
   }
 }

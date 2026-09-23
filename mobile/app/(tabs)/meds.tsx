@@ -5,7 +5,7 @@ import { useLiveData } from '@/lib/use-live-data';
 import { useOutbox } from '@/lib/outbox-context';
 import { theme } from '@/lib/theme';
 import { time } from '@/lib/format';
-import { AppHeader, Button, Card, ErrorBanner, Screen, StatusPill } from '@/components/ui';
+import { AppHeader, Button, Card, EmptyState, ErrorBanner, Screen, StatusPill } from '@/components/ui';
 import type { Dose, DoseStatus, MedicationRound, Ward } from '@/lib/types';
 
 /**
@@ -18,6 +18,9 @@ import type { Dose, DoseStatus, MedicationRound, Ward } from '@/lib/types';
  */
 export default function MedsScreen() {
   const [wards, setWards] = useState<Ward[]>([]);
+  // See the ward screen: "not asked yet" and "there are none" are different
+  // facts, and collapsing them left this screen blank with no explanation.
+  const [wardsLoaded, setWardsLoaded] = useState(false);
   const [wardId, setWardId] = useState<number | null>(null);
   const [round, setRound] = useState<MedicationRound | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -31,7 +34,8 @@ export default function MedsScreen() {
         setWards(w);
         setWardId((prev) => prev ?? w[0]?.id ?? null);
       })
-      .catch((e) => setError(e instanceof Error ? e.message : 'Could not load wards'));
+      .catch((e) => setError(e instanceof Error ? e.message : 'Could not load wards'))
+      .finally(() => setWardsLoaded(true));
   }, []);
 
   const load = useCallback(async () => {
@@ -98,6 +102,14 @@ export default function MedsScreen() {
           onAct={() => {}}
           readOnly
         />
+
+        {wardsLoaded && wards.length === 0 && (
+          <EmptyState
+            glyph="℞"
+            title="No wards set up yet"
+            body="A drug chart belongs to an admitted patient, and there is nowhere to admit one until a ward exists. An administrator adds them on the web, under Settings → Wards & Beds."
+          />
+        )}
 
         {round &&
           round.overdue.length + round.dueNow.length + round.upcoming.length === 0 && (

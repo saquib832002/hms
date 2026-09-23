@@ -4,6 +4,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AuthProvider, useAuth } from '@/lib/auth-context';
 import { OutboxProvider } from '@/lib/outbox-context';
 import { AuthGate } from '@/components/auth-gate';
+import { PasswordGate } from '@/components/password-gate';
 import { accentFor, headerBgFor, theme } from '@/lib/theme';
 
 /**
@@ -31,22 +32,6 @@ function Navigator() {
       }}
     >
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-      <Stack.Screen name="patient/new" options={{ headerShown: true, title: 'Register patient' }} />
-      <Stack.Screen name="patient/[id]" options={{ headerShown: true, title: 'Patient' }} />
-      <Stack.Screen
-        name="appointment/new"
-        options={{ headerShown: true, title: 'Book appointment' }}
-      />
-      <Stack.Screen name="appointment/[id]" options={{ headerShown: true, title: 'Reschedule' }} />
-      <Stack.Screen
-        name="settings/clinic"
-        options={{ headerShown: true, title: 'Clinic settings' }}
-      />
-      <Stack.Screen name="settings/staff" options={{ headerShown: true, title: 'Staff roles' }} />
-      <Stack.Screen
-        name="reports/activity"
-        options={{ headerShown: true, title: 'Daily activity' }}
-      />
     </Stack>
   );
 }
@@ -58,9 +43,17 @@ export default function RootLayout() {
         {/* Dark glyphs: the header is a pale wash, not a saturated fill. */}
         <StatusBar style="dark" />
         <AuthGate>
-          <OutboxProvider>
-            <Navigator />
-          </OutboxProvider>
+          {/*
+            Above the navigator, like the idle lock, so no deep link or
+            notification tap can land past it. A temporary password set by an
+            administrator is a credential two people know, and this is where it
+            stops being shared.
+          */}
+          <PasswordGate>
+            <OutboxProvider>
+              <Navigator />
+            </OutboxProvider>
+          </PasswordGate>
         </AuthGate>
       </AuthProvider>
     </SafeAreaProvider>

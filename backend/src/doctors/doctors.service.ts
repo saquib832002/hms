@@ -43,6 +43,7 @@ export class DoctorsService {
       specialization?: string;
       departmentId?: number | null;
       registrationNo?: string | null;
+      qualifications?: string | null;
       phone?: string | null;
       consultationFee?: string;
     },
@@ -60,6 +61,7 @@ export class DoctorsService {
           specialization: dto.specialization?.trim(),
           ...(dto.departmentId !== undefined ? { departmentId: dto.departmentId } : {}),
           ...(dto.registrationNo !== undefined ? { registrationNo: dto.registrationNo } : {}),
+          ...(dto.qualifications !== undefined ? { qualifications: dto.qualifications } : {}),
           ...(dto.phone !== undefined ? { phone: dto.phone } : {}),
           /*
            * An empty string clears the fee; a value sets it.

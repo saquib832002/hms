@@ -77,6 +77,7 @@ describe('every role can use the mobile app', () => {
       ADMIN: /isAdmin/,
       RECEPTIONIST: /isReception/,
       BILLING_STAFF: /isBilling/,
+      LAB_TECHNICIAN: /isLabTech/,
     };
 
     const missing = roles.filter((r) => !gates[r] || !gates[r].test(TABS_LAYOUT));
@@ -283,6 +284,118 @@ describe('every role can use the mobile app', () => {
       const at = OVERVIEW.indexOf(route);
       expect(at).toBeGreaterThan(-1);
       expect(at).toBeGreaterThan(guardEnd);
+    }
+  });
+
+  it('keeps the tab bar on screen whatever the app is doing', () => {
+    /*
+     * Reported from use: writing a prescription left one button on an
+     * otherwise bare screen, with no tab bar and no way back to the queue.
+     *
+     * Two separate causes, and both had to go.
+     *
+     * The screens lived in the ROOT stack, beside the tab navigator rather than
+     * inside it, so opening a patient replaced the bar entirely. Moving them
+     * under `(tabs)` with `href: null` keeps them out of the bar and out of
+     * deep linking while leaving them part of the navigator — the same
+     * mechanism the role gating uses.
+     *
+     * And the prescription sheet was a `Modal`, which renders in its own native
+     * window above everything the navigator draws. Even inside the tabs it
+     * would have covered the bar.
+     */
+    const ROOT = readFileSync(resolve(__dirname, '../app/_layout.tsx'), 'utf8');
+    const TABS = readFileSync(resolve(__dirname, '../app/(tabs)/_layout.tsx'), 'utf8');
+    const SHEET = readFileSync(resolve(__dirname, '../components/prescription-sheet.tsx'), 'utf8');
+
+    // The root stack holds the tab group and nothing else. A screen added
+    // beside it is a screen with no tab bar.
+    const rootScreens = [...ROOT.matchAll(/<Stack\.Screen\s+name="([^"]+)"/g)].map((m) => m[1]);
+    expect(rootScreens).toEqual(['(tabs)']);
+
+    // Every pushed screen is registered in the tabs navigator instead.
+    for (const name of [
+      'patient/new',
+      'patient/[id]',
+      'appointment/new',
+      'appointment/[id]',
+      'settings/clinic',
+      'settings/staff',
+      'reports/activity',
+      // `stock` was here and is now a visible pharmacist tab instead — see the
+      // assertion below. Dispensing took its place as a pushed screen.
+      'dispense/[id]',
+    ]) {
+      expect(TABS).toContain(`'${name}'`);
+    }
+
+    // …and each carries a back control, because Tabs adds none and these would
+    // otherwise be screens you can only leave by gesture.
+    expect(TABS).toContain('headerLeft');
+    expect(TABS).toContain('router.back()');
+
+    // The prescription sheet draws inside the screen, not in a native window
+    // over it.
+    expect(SHEET).not.toMatch(/<Modal[\s>]/);
+    expect(SHEET).toContain('absoluteFillObject');
+  });
+
+  it('gives the pharmacist a queue and a stock tab, and a way to dispense', () => {
+    /*
+     * Reported from use: the pharmacy tab held the dispensing queue and the
+     * stock summary on one screen, and ended with a line saying dispensing
+     * happens on the web app.
+     *
+     * Two faults, and the second is the one worth a test. Mixing the two lists
+     * is a readability problem. A queue that lists work and then refuses it is
+     * a screen whose only function is to send you elsewhere — and it violates
+     * the rule that a feature is built on both clients or on neither.
+     *
+     * So: stock is its own tab rather than half of another, and the queue rows
+     * navigate somewhere. The navigation assertion is the load-bearing half —
+     * a route registered with no caller is exactly how the dispense screen
+     * could exist and still be unreachable.
+     */
+    const PHARMACY = readFileSync(resolve(__dirname, '../app/(tabs)/pharmacy.tsx'), 'utf8');
+    // Comments stripped before asserting on absence: the file explains why the
+    // old wording went, which means it quotes it. Third time this trap has been
+    // hit in this repo — a test that reads a file must read the code, not the
+    // prose about the code.
+    const CODE = PHARMACY.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+
+    /*
+     * Comments stripped from the layout too, and this one caught itself: the
+     * note beside the stock tab explains that `href: null` also closes deep
+     * linking, so the regex below matched the word "null" inside the prose and
+     * reported the tab as hidden. Same trap as the pharmacy screen above.
+     */
+    const TABS_CODE = TABS_LAYOUT.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+
+    // Stock is gated to the pharmacist like any other role tab, not hidden.
+    const stockTab = /name="stock"[\s\S]{0,300}?href:\s*(\w+)/.exec(TABS_CODE);
+    expect(stockTab).not.toBeNull();
+    expect(stockTab![1]).toBe('isPharmacist');
+
+    // The queue no longer carries the inventory, and no longer apologises for
+    // itself. Both strings are the shape the old screen had.
+    expect(CODE).not.toContain('/pharmacy/inventory');
+    expect(CODE).not.toMatch(/web app/i);
+
+    // And a row opens the dispense screen.
+    expect(CODE).toContain('/dispense/');
+
+    /*
+     * Selling and taking the money are tabs of their own.
+     *
+     * The pharmacy bills for what it hands over, and in SEPARATE mode it is a
+     * different business with its own till — so "sell" and "till" are not
+     * conveniences bolted onto the dispensing screen, they are the two halves
+     * of the pharmacy that were missing entirely.
+     */
+    for (const tab of ['sell', 'till']) {
+      const match = new RegExp(`name="${tab}"[\\s\\S]{0,300}?href:\\s*(\\w+)`).exec(TABS_CODE);
+      expect(match).not.toBeNull();
+      expect(match![1]).toBe('isPharmacist');
     }
   });
 

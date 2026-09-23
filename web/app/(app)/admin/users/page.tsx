@@ -14,10 +14,20 @@ import {
   TableSkeleton,
 } from '@/components/ui/primitives';
 import { Sheet } from '@/components/ui/sheet';
+import { assignableRoles } from '@/lib/nav';
+import { useAuth } from '@/lib/auth-context';
 import { RolesSheet } from '@/components/roles-sheet';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 
-const ROLES: UserRole[] = ['ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'PHARMACIST', 'BILLING_STAFF'];
+/*
+ * The role list is derived and then narrowed, never retyped.
+ *
+ * Derived, because the hand-written version silently omitted LAB_TECHNICIAN and
+ * no lab account could be created at all. Narrowed by the hospital's modules,
+ * because offering a role whose screens this tenant was never sold produces an
+ * account that can sign in and reach nothing — the same failure from the other
+ * end.
+ */
 
 /**
  * Staff accounts.
@@ -28,6 +38,8 @@ const ROLES: UserRole[] = ['ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'PHARMACI
  * otherwise "deactivate" would be a suggestion for up to seven days.
  */
 export default function UsersPage() {
+  const { user } = useAuth();
+  const ROLES = assignableRoles(user?.hospital.modules);
   const [editingRoles, setEditingRoles] = useState<StaffUser | null>(null);
   const me = useUser();
   const [users, setUsers] = useState<StaffUser[] | null>(null);
@@ -227,6 +239,7 @@ export default function UsersPage() {
       </div>
 
       <CreateUserSheet
+        roles={ROLES}
         open={creating}
         onClose={() => setCreating(false)}
         onCreated={(cred) => {
@@ -257,6 +270,7 @@ export default function UsersPage() {
       {/* Its own sibling, not nested in the credential branch — it opens from
           the Roles button and has nothing to do with a temporary password. */}
       <RolesSheet
+        offerable={ROLES}
         user={editingRoles}
         onClose={() => setEditingRoles(null)}
         onSaved={() => void load()}
@@ -314,17 +328,25 @@ function CredentialSheet({
 }
 
 function CreateUserSheet({
+  roles,
   open,
   onClose,
   onCreated,
 }: {
+  /** Narrowed to what this hospital was sold — see the note at the top. */
+  roles: UserRole[];
   open: boolean;
   onClose: () => void;
   onCreated: (credential: { email: string; password: string }) => void;
 }) {
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
-  const [role, setRole] = useState<UserRole>('NURSE');
+  /*
+   * Defaults to the first role this hospital can actually give somebody.
+   * Hard-coding NURSE meant a lab-only tenant opened the form on a role that is
+   * not in its own list, and the select rendered blank.
+   */
+  const [role, setRole] = useState<UserRole>(roles[0] ?? 'RECEPTIONIST');
   const [specialization, setSpecialization] = useState('');
   const [departmentId, setDepartmentId] = useState('');
   const [registrationNo, setRegistrationNo] = useState('');
@@ -403,7 +425,7 @@ function CreateUserSheet({
       </Field>
       <Field label="Role" required>
         <Select value={role} onChange={(e) => setRole(e.target.value as UserRole)}>
-          {ROLES.map((r) => (
+          {roles.map((r) => (
             <option key={r} value={r}>
               {titleCase(r)}
             </option>

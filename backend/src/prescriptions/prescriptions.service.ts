@@ -1,24 +1,32 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
+  InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { AppointmentStatus, DrugClass, PrescriptionStatus, UserRole } from '@prisma/client';
+import {
+  AppointmentStatus,
+  DrugClass,
+  PrescriptionDestination,
+  PrescriptionStatus,
+  UserRole,
+} from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthUser } from '../common/types/auth-user';
-import { hospitalDayRange } from '../common/utils/hospital-time';
+import { partnerLabels, routingTrail } from '../common/routing/routing-trail';
 import { CreatePrescriptionDto } from './dto/create-prescription.dto';
 import { checkAllergies } from '../pharmacy/allergy-check';
 import { currentTenantId } from '../common/tenancy/tenant-context';
 import { ClinicSettingsService } from '../common/tenancy/clinic-settings.service';
+import { generateReference, toReferralPayload } from './referral';
+import { NOT_TREATING, resolveTreatingScope } from '../common/clinical/treating-scope';
 
-const IN_CONSULTATION = [
-  AppointmentStatus.CHECKED_IN,
-  AppointmentStatus.IN_PROGRESS,
-  AppointmentStatus.COMPLETED,
-];
+// The attended-statuses list moved to `common/clinical/treating-scope.ts`,
+// shared with record-writing. Two copies of it is how the two rules drift.
 
 export interface AllergyWarning {
   substance: string;
@@ -45,6 +53,87 @@ export class PrescriptionsService {
     return (await this.clinic.current()).timezone;
   }
 
+  /**
+   * Write the copy into the receiving pharmacy's tenant.
+   *
+   * ENTERING SOMEBODY ELSE'S SCOPE, ON PURPOSE
+   * ------------------------------------------
+   * `forTenant` opens a transaction with `app.tenant_id` set to the
+   * destination, so the rows land under *their* policy and are theirs from the
+   * moment they exist. This is the only place in the system that writes into a
+   * tenant other than the caller's, and it is deliberate rather than
+   * incidental: the alternative was a policy exception letting one hospital
+   * read another's prescription, which would have cost the property that makes
+   * the whole isolation provable.
+   *
+   * `unscoped.forTenant` rather than the request's own transaction — nesting
+   * one tenant's transaction inside another's would leave `app.tenant_id`
+   * pointing at the wrong hospital for whatever ran next on that connection.
+   *
+   * THE REFERENCE COLLISION
+   * -----------------------
+   * `reference` is unique per receiving pharmacy, and six characters will
+   * eventually repeat. Retried rather than made longer, because the length is
+   * set by a person reading it aloud at a counter, not by the birthday problem.
+   */
+  private async transmitReferral(
+    prescriptionId: number,
+    partner: { partnerTenantId: number; label: string },
+    source: Parameters<typeof toReferralPayload>[0],
+  ): Promise<{ reference: string; pharmacy: string }> {
+    const payload = toReferralPayload(source);
+    const sourceTenantId = currentTenantId();
+
+    // Scoped client: `tenants` has no policy, and a second pool connection
+    // inside the request's transaction is what deadlocked the app.
+    const sender = await this.prisma.tenant.findUnique({
+      where: { id: sourceTenantId },
+      select: { name: true },
+    });
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const reference = generateReference();
+      try {
+        await this.prisma.forTenant(partner.partnerTenantId, () =>
+          this.prisma.prescriptionReferral.create({
+            data: {
+              tenantId: partner.partnerTenantId,
+              sourceTenantId,
+              sourceTenantName: sender?.name ?? 'Unknown hospital',
+              sourcePrescriptionId: prescriptionId,
+              reference,
+              patientName: payload.patientName,
+              patientDob: payload.patientDob,
+              prescriberName: payload.prescriberName,
+              prescriberRegistrationNo: payload.prescriberRegistrationNo,
+              issuedAt: payload.issuedAt,
+              items: {
+                create: payload.items.map((i) => ({
+                  tenantId: partner.partnerTenantId,
+                  medicineName: i.medicineName,
+                  dosage: i.dosage,
+                  frequency: i.frequency,
+                  duration: i.duration,
+                })),
+              },
+            },
+          }),
+        );
+        return { reference, pharmacy: partner.label };
+      } catch (err) {
+        // P2002 is the reference colliding at that pharmacy. Anything else is
+        // real and should surface rather than being retried into silence.
+        const collision =
+          err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
+        if (!collision) throw err;
+      }
+    }
+
+    throw new InternalServerErrorException(
+      'Could not generate a unique reference for that pharmacy. The prescription was saved — try routing it again.',
+    );
+  }
+
   async create(dto: CreatePrescriptionDto, user: AuthUser) {
     if (!user.doctorId) {
       throw new ForbiddenException('Only a doctor can issue a prescription');
@@ -56,21 +145,53 @@ export class PrescriptionsService {
     });
     if (!patient) throw new NotFoundException(`Patient ${dto.patientId} not found`);
 
-    const { start, end } = hospitalDayRange(new Date(), await this.tz());
-    const appointment = await this.prisma.appointment.findFirst({
-      where: {
-        doctorId: user.doctorId,
-        patientId: dto.patientId,
-        scheduledAt: { gte: start, lt: end },
-        status: { in: IN_CONSULTATION },
-      },
-      select: { id: true, prescription: { select: { id: true } } },
-    });
-    if (!appointment) {
-      throw new ForbiddenException(
-        'You can only prescribe for patients you are seeing today',
-      );
+    /*
+     * Resolve the destination before anything is written.
+     *
+     * A partner is named by *this hospital's* `PharmacyPartner` row, never by a
+     * raw tenant id from the client — otherwise a doctor could address any
+     * hospital on the platform, including ones that never agreed to receive
+     * anything. Checked again here rather than trusted from the DTO, because
+     * the partner may have been deactivated since the screen loaded.
+     */
+    const destination = dto.destination ?? PrescriptionDestination.IN_HOUSE;
+    let partner: { partnerTenantId: number; label: string } | null = null;
+
+    if (destination === PrescriptionDestination.PARTNER) {
+      if (!dto.partnerId) {
+        throw new BadRequestException('Choose which pharmacy this is going to');
+      }
+      const row = await this.prisma.pharmacyPartner.findUnique({
+        where: { id: dto.partnerId },
+        select: { partnerTenantId: true, label: true, isActive: true },
+      });
+      if (!row || !row.isActive) {
+        throw new BadRequestException('That pharmacy is no longer one of your partners');
+      }
+      partner = { partnerTenantId: row.partnerTenantId, label: row.label };
     }
+
+    /*
+     * Who this doctor may prescribe for. The rule and its reasoning live in
+     * `treating-scope.ts`, shared with record-writing so the two cannot drift
+     * into permitting different things.
+     */
+    const scope = await resolveTreatingScope(this.prisma, await this.tz(), user.doctorId, dto.patientId);
+    if (!scope) throw new ForbiddenException(NOT_TREATING);
+
+    /*
+     * Linked to the appointment only when it belongs to that visit — same day,
+     * and that visit has no prescription already (the FK is unique).
+     *
+     * A repeat written six weeks later is not part of the consultation it
+     * followed from, and attaching it there would put it on that visit's
+     * record and its invoice. `Invoice.appointmentId` is unique and billing
+     * reads this link, so a wrong one is not cosmetic.
+     */
+    const appointmentId =
+      scope.sameDay && scope.appointment && !scope.appointment.hasPrescription
+        ? scope.appointment.id
+        : null;
 
     // Phase 4: link each item to the catalogue by exact name where possible.
     // The prescribed text is still stored verbatim — the link is additional,
@@ -102,10 +223,14 @@ export class PrescriptionsService {
         tenantId: currentTenantId(),
         patientId: dto.patientId,
         doctorId: user.doctorId,
-        // One prescription per appointment (the FK is unique). A second one
-        // for the same visit is a separate, unlinked prescription.
-        appointmentId: appointment.prescription ? null : appointment.id,
+        // Resolved above: null for a repeat, for a ward prescription, and for
+        // a second prescription on a visit that already has one (the FK is
+        // unique). A prescription is a record in its own right — the link is
+        // "this came out of that visit", not "this belongs to somebody".
+        appointmentId,
         notes: dto.notes,
+        destination,
+        routedToTenantId: partner?.partnerTenantId ?? null,
         items: {
           // Nested relation creates sit outside top-level `data`, so the write
           // proxy does not stamp them. Named explicitly; the compiler agrees.
@@ -116,11 +241,40 @@ export class PrescriptionsService {
             dosage: i.dosage,
             frequency: i.frequency,
             duration: i.duration,
+            /*
+             * What the prescriber ordered. Null when they left it open — an
+             * as-needed or ongoing course — and the pharmacist settles that at
+             * the counter rather than the system inferring a total and then
+             * being unable to say the prescription was ever finished.
+             */
+            quantityPrescribed: i.quantityPrescribed ?? null,
           })),
         },
       },
       include: this.detailInclude(),
     });
+
+    /*
+     * The copy, written into the receiving pharmacy's own tenant.
+     *
+     * After the prescription exists, not inside its transaction. If the
+     * transmission fails the prescription still stands — the patient has a
+     * valid prescription they can take anywhere, which is strictly better than
+     * losing it because another hospital's row could not be written. The
+     * failure surfaces as an error the doctor sees, and re-routing is possible.
+     */
+    let referral: { reference: string; pharmacy: string } | null = null;
+    if (partner) {
+      referral = await this.transmitReferral(prescription.id, partner, {
+        patient: { fullName: patient.fullName, dob: patient.dob },
+        doctor: {
+          fullName: prescription.doctor?.fullName ?? 'Unknown',
+          registrationNo: prescription.doctor?.registrationNo ?? null,
+        },
+        issuedAt: prescription.issuedAt,
+        items: resolved,
+      });
+    }
 
     // Still returned rather than thrown, even now that the check is reliable.
     //
@@ -132,6 +286,8 @@ export class PrescriptionsService {
     // must be documented.
     return {
       ...prescription,
+      /** Present only when it was sent to a partner. The patient quotes it. */
+      referral,
       allergyWarnings: conflicts.map((c) => ({
         substance: c.substance,
         severity: c.severity,
@@ -159,13 +315,48 @@ export class PrescriptionsService {
   }
 
   async findForPatient(patientId: number) {
-    return {
-      data: await this.prisma.prescription.findMany({
-        where: { patientId },
-        orderBy: { issuedAt: 'desc' },
-        include: this.detailInclude(),
-      }),
-    };
+    const rows = await this.prisma.prescription.findMany({
+      where: { patientId },
+      orderBy: { issuedAt: 'desc' },
+      include: this.detailInclude(),
+    });
+
+    return { data: await this.withRouting(rows) };
+  }
+
+  /**
+   * Attach "where did this go" to a batch of prescriptions.
+   *
+   * `destination` and `routedToTenantId` have been on the row since routing
+   * shipped and reached no screen, so a doctor reading a history could not tell
+   * a prescription sent to a partner pharmacy from one filled at the counter
+   * downstairs. Resolved in one query for the whole list — see the note in
+   * `routing-trail.ts` about the connection budget.
+   */
+  private async withRouting<
+    T extends { destination: string; routedToTenantId: number | null; issuedAt: Date },
+  >(rows: T[]) {
+    const labels = await partnerLabels(
+      this.prisma,
+      'PRESCRIPTION',
+      rows.map((r) => r.routedToTenantId),
+    );
+
+    return rows.map((row) => ({
+      ...row,
+      routing: routingTrail(
+        'PRESCRIPTION',
+        {
+          destination: row.destination,
+          routedToTenantId: row.routedToTenantId,
+          // A referral is transmitted immediately after the prescription is
+          // written, so the issue time is the send time to within a second.
+          // A separate column would be a second thing to keep true.
+          sentAt: row.issuedAt,
+        },
+        labels,
+      ),
+    }));
   }
 
   /**
@@ -202,81 +393,16 @@ export class PrescriptionsService {
     });
   }
 
-  /**
-   * Rendered server-side so web and mobile print byte-identical documents.
-   * A prescription printed from a phone must not differ from one printed at
-   * the front desk.
+  /*
+   * `renderPrintable` used to live here: a template literal that built the
+   * whole prescription as HTML, with `<h1>Meridian Hospital</h1>` written into
+   * it — the demo seed's name, printed on every tenant's prescriptions.
+   *
+   * Replaced by `DocumentsService`, which draws the calling hospital's own
+   * letterhead and returns a real PDF. Deleted rather than left beside it,
+   * because two renderers of the same document drift and the one that drifts
+   * is the one nobody is looking at.
    */
-  async renderPrintable(id: number): Promise<string> {
-    const p = await this.prisma.prescription.findUnique({
-      where: { id },
-      include: this.detailInclude(),
-    });
-    if (!p) throw new NotFoundException(`Prescription ${id} not found`);
-
-    const esc = (s: unknown) =>
-      String(s ?? '').replace(/[&<>"']/g, (c) =>
-        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string,
-      );
-
-    const rows = (p.items ?? [])
-      .map(
-        (i) => `<tr>
-        <td>${esc(i.medicineName)}</td><td>${esc(i.dosage)}</td>
-        <td>${esc(i.frequency)}</td><td>${esc(i.duration)}</td></tr>`,
-      )
-      .join('');
-
-    const dob = p.patient?.dob ? new Date(p.patient.dob).toISOString().slice(0, 10) : '';
-    const issued = new Date(p.issuedAt as Date).toISOString().slice(0, 10);
-
-    return `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Prescription #${p.id}</title>
-<style>
-  @page { size: A4; margin: 18mm; }
-  body { font-family: Georgia, 'Times New Roman', serif; color:#111; font-size:12pt; }
-  header { border-bottom:2px solid #111; padding-bottom:8px; margin-bottom:16px; }
-  h1 { font-size:16pt; margin:0; } .sub { font-size:9pt; color:#555; }
-  .grid { display:grid; grid-template-columns:1fr 1fr; gap:4px 18px; font-size:10pt; margin-bottom:18px; }
-  .label { color:#555; }
-  table { width:100%; border-collapse:collapse; margin-bottom:24px; font-size:11pt; }
-  th { text-align:left; border-bottom:1px solid #111; padding:6px 4px; font-size:9pt;
-       text-transform:uppercase; letter-spacing:.5px; }
-  td { padding:7px 4px; border-bottom:1px solid #ddd; }
-  .rx { font-size:26pt; font-weight:bold; float:left; margin-right:10px; line-height:1; }
-  .sig { margin-top:44px; border-top:1px solid #111; width:230px; padding-top:5px; font-size:9pt; }
-  .foot { margin-top:26px; font-size:8pt; color:#666; border-top:1px solid #ddd; padding-top:6px; }
-</style></head>
-<body>
-<header>
-  <h1>Meridian Hospital</h1>
-  <div class="sub">Prescription · Reference #${p.id}</div>
-</header>
-
-<div class="grid">
-  <div><span class="label">Patient:</span> <strong>${esc(p.patient?.fullName)}</strong></div>
-  <div><span class="label">Date:</span> ${esc(issued)}</div>
-  <div><span class="label">Date of birth:</span> ${esc(dob)}</div>
-  <div><span class="label">Patient ID:</span> ${esc(p.patient?.id)}</div>
-  <div><span class="label">Prescriber:</span> ${esc(p.doctor?.fullName)}</div>
-  <div><span class="label">Reg. no:</span> ${esc(p.doctor?.registrationNo ?? '—')}</div>
-</div>
-
-<div class="rx">&#8478;</div>
-<table>
-  <thead><tr><th>Medicine</th><th>Dosage</th><th>Frequency</th><th>Duration</th></tr></thead>
-  <tbody>${rows}</tbody>
-</table>
-
-${p.notes ? `<p><strong>Instructions:</strong> ${esc(p.notes)}</p>` : ''}
-
-<div class="sig">Prescriber signature</div>
-<div class="foot">
-  Generated ${new Date().toISOString().slice(0, 10)} ·
-  DEVELOPMENT BUILD — DUMMY DATA, NOT A VALID PRESCRIPTION
-</div>
-</body></html>`;
-  }
 
   private detailInclude() {
     return {

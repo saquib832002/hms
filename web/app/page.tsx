@@ -15,7 +15,7 @@ export default function Home() {
 
   useEffect(() => {
     if (loading) return;
-    router.replace(user ? landingFor(user.role) : '/login');
+    router.replace(user ? landingFor(user.role, user.hospital.modules) : '/login');
   }, [user, loading, router]);
 
   return (

@@ -6,7 +6,15 @@ import { useLiveData } from '@/lib/use-live-data';
 import { useOutbox } from '@/lib/outbox-context';
 import { theme } from '@/lib/theme';
 import { relativeAge, time } from '@/lib/format';
-import { AppHeader, Card, ErrorBanner, Screen, StatusPill } from '@/components/ui';
+import {
+  AppHeader,
+  Button,
+  Card,
+  EmptyState,
+  ErrorBanner,
+  Screen,
+  StatusPill,
+} from '@/components/ui';
 import type { BedRow, Ward, WardBoard } from '@/lib/types';
 
 /**
@@ -18,6 +26,15 @@ import type { BedRow, Ward, WardBoard } from '@/lib/types';
  */
 export default function WardScreen() {
   const [wards, setWards] = useState<Ward[]>([]);
+  /*
+   * Tracked separately from `wards.length`, because "not asked yet" and "there
+   * are none" are different facts and this screen showed neither. With no
+   * wards, `wardId` stayed null, `load()` returned before requesting anything,
+   * and the board sat empty forever with nothing explaining why — the same
+   * failure the web ward board had, and the one that made a working backend
+   * look hung.
+   */
+  const [wardsLoaded, setWardsLoaded] = useState(false);
   const [wardId, setWardId] = useState<number | null>(null);
   const [board, setBoard] = useState<WardBoard | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -31,7 +48,8 @@ export default function WardScreen() {
         setWards(w);
         setWardId((prev) => prev ?? w[0]?.id ?? null);
       })
-      .catch((e) => setError(e instanceof Error ? e.message : 'Could not load wards'));
+      .catch((e) => setError(e instanceof Error ? e.message : 'Could not load wards'))
+      .finally(() => setWardsLoaded(true));
   }, []);
 
   const load = useCallback(async () => {
@@ -107,6 +125,17 @@ export default function WardScreen() {
             </View>
           ) : null
         }
+        ListEmptyComponent={
+          wardsLoaded && wards.length === 0 ? (
+            <EmptyState
+              glyph="▥"
+              title="No wards set up yet"
+              body="Beds live inside wards, so nobody can be admitted until one exists. An administrator adds them on the web, under Settings → Wards & Beds."
+            />
+          ) : board ? (
+            <EmptyState glyph="▥" title="This ward has no beds" body="An administrator can add beds to it on the web." />
+          ) : null
+        }
         renderItem={({ item }) => (
           <BedCard
             row={item}
@@ -117,8 +146,15 @@ export default function WardScreen() {
                 params: {
                   patientId: String(item.admission.patient.id),
                   patientName: item.admission.patient.fullName,
+                  // Carried so the bedside form can show the plan and the
+                  // escalation button without a second lookup by patient.
+                  admissionId: String(item.admission.id),
                 },
               })
+            }
+            onChart={() =>
+              item.admission &&
+              router.push(`/(tabs)/chart/${item.admission.id}` as never)
             }
           />
         )}
@@ -135,7 +171,15 @@ function byUrgency(a: BedRow, b: BedRow): number {
   return diff !== 0 ? diff : a.bed.label.localeCompare(b.bed.label);
 }
 
-function BedCard({ row, onRecord }: { row: BedRow; onRecord: () => void }) {
+function BedCard({
+  row,
+  onRecord,
+  onChart,
+}: {
+  row: BedRow;
+  onRecord: () => void;
+  onChart: () => void;
+}) {
   const { bed, admission } = row;
 
   if (!admission) {
@@ -198,6 +242,15 @@ function BedCard({ row, onRecord }: { row: BedRow; onRecord: () => void }) {
               Next dose {time(admission.nextDose.dueAt)} · {admission.nextDose.medicineName}
             </Text>
           )}
+
+          {/*
+            The card itself opens vitals, which is the bedside task. The chart
+            is the other question a nurse arrives with — what is this person on,
+            and what have they had — and it had no route on either client.
+          */}
+          <View style={{ marginTop: theme.space(3) }}>
+            <Button label="Drug chart" variant="secondary" onPress={onChart} />
+          </View>
         </Card>
       )}
     </Pressable>

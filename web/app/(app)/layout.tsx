@@ -3,7 +3,14 @@
 import { useEffect } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/auth-context';
-import { canReach, landingFor } from '@/lib/nav';
+import {
+  actableRoles,
+  canReach,
+  hasAnyScreen,
+  landingFor,
+  roleRequiresModule,
+  ROLE_LABEL,
+} from '@/lib/nav';
 import { Shell } from '@/components/shell';
 import { PasswordGate } from '@/components/password-gate';
 
@@ -25,16 +32,74 @@ import { PasswordGate } from '@/components/password-gate';
  * quietly redirected as if it were forbidden.
  */
 export default function AppLayout({ children }: { children: React.ReactNode }) {
-  const { user, loading } = useAuth();
+  const { user, loading, switchRole } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
-  const allowed = !user || !pathname || canReach(user.role, pathname);
+  // Narrowed by the hospital's modules as well as the role — a bookmarked
+  // screen for a module they were never sold is as unreachable as one
+  // belonging to another role.
+  const allowed =
+    !user || !pathname || canReach(user.role, pathname, user.hospital.modules);
+
+  /*
+   * A role can be left with no screen at all — see `hasAnyScreen`. Redirecting
+   * in that state is what produced an endless spinner, so the redirect is
+   * skipped and the message below is rendered instead.
+   */
+  const stranded = Boolean(user) && !hasAnyScreen(user!.role, user!.hospital.modules);
 
   useEffect(() => {
     if (loading) return;
     if (!user) router.replace('/login');
-    else if (!allowed) router.replace(landingFor(user.role));
-  }, [user, loading, allowed, router]);
+    else if (!allowed && !stranded) {
+      router.replace(landingFor(user.role, user.hospital.modules));
+    }
+  }, [user, loading, allowed, stranded, router]);
+
+  if (user && stranded) {
+    const missing = roleRequiresModule(user.role);
+    // Other roles this person holds that this hospital can actually use.
+    const escapes = actableRoles(user.availableRoles, user.hospital.modules).filter(
+      (role) => role !== user.role,
+    );
+    return (
+      <div className="flex h-screen flex-col items-center justify-center gap-2 px-6 text-center">
+        <h1 className="text-lg font-semibold text-text">Nothing here for you yet</h1>
+        <p className="max-w-md text-sm text-text-muted">
+          {missing
+            ? `${ROLE_LABEL[user.role]} works on the ${missing.toLowerCase()} module, which is not part of ${user.hospital.name}’s plan. Nothing has been deleted — it all comes back if your provider adds it.`
+            : `No screens are available for your role at ${user.hospital.name}.`}
+        </p>
+        {/*
+          The way out, and without it this screen is a dead end.
+
+          The switcher lives in the shell, which is not rendered here — so an
+          owner-doctor whose default role is the unsold one could read this
+          message and have no way to reach the ADMIN role they also hold. The
+          same failure shape as every other refusal in this project that
+          named a precondition nobody could satisfy.
+        */}
+        {escapes.length > 0 ? (
+          <div className="mt-1 flex flex-wrap justify-center gap-1.5">
+            {escapes.map((role) => (
+              <button
+                key={role}
+                type="button"
+                onClick={() => void switchRole(role)}
+                className="rounded-sm border border-border-strong bg-surface px-2.5 py-1 text-xs hover:border-primary"
+              >
+                Continue as {ROLE_LABEL[role]}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-text-subtle">
+            Ask an administrator here to give you a role your hospital does use.
+          </p>
+        )}
+      </div>
+    );
+  }
 
   if (loading || !user || !allowed) {
     return (

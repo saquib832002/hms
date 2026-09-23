@@ -1,19 +1,12 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { AppointmentStatus, UserRole } from '@prisma/client';
+import { UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthUser } from '../common/types/auth-user';
-import { hospitalDayRange } from '../common/utils/hospital-time';
+import { NOT_TREATING, resolveTreatingScope } from '../common/clinical/treating-scope';
 import { CreateMedicalRecordDto } from './dto/create-medical-record.dto';
 import { currentTenantId } from '../common/tenancy/tenant-context';
 import { ClinicSettingsService } from '../common/tenancy/clinic-settings.service';
-
-/** Statuses that mean the doctor is actually seeing this patient today. */
-const IN_CONSULTATION = [
-  AppointmentStatus.CHECKED_IN,
-  AppointmentStatus.IN_PROGRESS,
-  AppointmentStatus.COMPLETED,
-];
 
 @Injectable()
 export class MedicalRecordsService {
@@ -39,27 +32,35 @@ export class MedicalRecordsService {
    *
    * Without this check any doctor could write a diagnosis against any patient
    * in the hospital — the route guard says "doctors may write records", which
-   * is true and insufficient. Tying the write to today's appointment is what
+   * is true and insufficient. Tying the write to a real encounter is what
    * makes the permission specific to *this* patient.
+   *
+   * Returns the appointment this record belongs to, or null when it belongs to
+   * no single visit.
    */
-  private async assertTreatingToday(doctorId: number, patientId: number) {
-    const { start, end } = hospitalDayRange(new Date(), await this.tz());
-    const appointment = await this.prisma.appointment.findFirst({
-      where: {
-        doctorId,
-        patientId,
-        scheduledAt: { gte: start, lt: end },
-        status: { in: IN_CONSULTATION },
-      },
-      select: { id: true },
-    });
+  private async assertTreating(doctorId: number, patientId: number) {
+    /*
+     * Shared with prescribing, deliberately.
+     *
+     * It used to be "today", and moving only the prescribing rule would have
+     * produced the worst of both: a doctor able to issue a medication and
+     * unable to record the reasoning behind it. See `treating-scope.ts` for
+     * what now counts as being this patient's doctor — a recent appointment,
+     * or an open admission, which was missing entirely and meant no note could
+     * be written about anybody in a bed.
+     */
+    const scope = await resolveTreatingScope(this.prisma, await this.tz(), doctorId, patientId);
+    if (!scope) throw new ForbiddenException(NOT_TREATING);
 
-    if (!appointment) {
-      throw new ForbiddenException(
-        'You can only write records for patients you are seeing today',
-      );
-    }
-    return appointment.id;
+    /*
+     * Only a same-day visit claims the record.
+     *
+     * A note written weeks later is about that patient, not part of that
+     * consultation, and filing it under the old appointment would backdate it
+     * on the record — a clinical document appearing to have been written at a
+     * time it was not. `createdAt` still says when it was actually written.
+     */
+    return scope.sameDay && scope.appointment ? scope.appointment.id : null;
   }
 
   async create(patientId: number, dto: CreateMedicalRecordDto, user: AuthUser) {
@@ -67,7 +68,7 @@ export class MedicalRecordsService {
       throw new ForbiddenException('Only a doctor can write a medical record');
     }
     await this.assertPatientExists(patientId);
-    await this.assertTreatingToday(user.doctorId, patientId);
+    await this.assertTreating(user.doctorId, patientId);
 
     return this.prisma.medicalRecord.create({
       data: {

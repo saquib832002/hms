@@ -43,6 +43,9 @@ const sqlPath = resolve(__dirname, 'rls/tenant-isolation.sql');
 const sql = readFileSync(sqlPath, 'utf8');
 
 const parsed = new URL(url);
+/** The SQL currently in flight, so a failure can be located in it. */
+let lastSql = null;
+
 const client = new Client({
   host: parsed.hostname,
   port: Number(parsed.port || 5432),
@@ -89,6 +92,36 @@ const client = new Client({
   }
 
   /*
+   * Every table the policy loop is about to touch must already exist.
+   *
+   * Without this the first missing one fails as a bare `relation
+   * "pharmacy_partners" does not exist`, which names the symptom and not the
+   * cause — a migration that has not been applied. Same reasoning as the two
+   * checks above, and the same fix: say which command to run.
+   *
+   * Derived from the SQL rather than hard-coded, so a table added to the loop
+   * is covered here without anybody remembering to.
+   */
+  const scopedBlock = sql.slice(sql.indexOf('scoped text[]'), sql.indexOf('];', sql.indexOf('scoped text[]')));
+  const expected = [...scopedBlock.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+
+  const { rows: present } = await client.query(
+    `select table_name from information_schema.tables where table_schema='public'`,
+  );
+  const have = new Set(present.map((r) => r.table_name));
+  const missing = expected.filter((t) => !have.has(t));
+
+  if (missing.length > 0) {
+    throw new Error(
+      `These tables do not exist yet: ${missing.join(', ')}.\n\n` +
+        '  A migration has not been applied. Run it first, then come back:\n' +
+        '    node prisma/admin-cli.js migrate deploy\n' +
+        '    npx prisma generate\n' +
+        '    npm run db:rls',
+    );
+  }
+
+  /*
    * Create the role in a statement of its own, BEFORE the main script.
    *
    * `client.query()` sends a multi-statement string over the simple query
@@ -113,6 +146,7 @@ const client = new Client({
   `);
 
   // The rest of the file. Idempotent, so re-running after a failure is safe.
+  lastSql = sql;
   await client.query(sql);
 
   const q = async (text) => (await client.query(text)).rows[0];
@@ -171,7 +205,59 @@ const client = new Client({
   console.log('\n  Done. Start the API with:  npm run dev\n');
   await client.end();
 })().catch(async (err) => {
-  console.error(`\nFailed to apply RLS:\n  ${err.message}\n`);
+  /*
+   * Say WHERE it failed, not just what.
+   *
+   * The whole file is sent as one multi-statement query, so Postgres reports a
+   * single message with a character offset into the batch and node-postgres
+   * surfaces only the message. That produced a run of one-line failures —
+   * "must be owner of function app_current_tenant", "permission denied for
+   * schema public" — each of which is true, unlocatable, and consistent with
+   * three different causes.
+   *
+   * `err.position` is a 1-based offset into the SQL that was sent. Turning it
+   * back into a line and the statement around it costs nothing and is the
+   * difference between a fix and a guess.
+   */
+  console.error(`\nFailed to apply RLS:\n  ${err.message}`);
+
+  if (err.position && lastSql) {
+    const offset = Number(err.position) - 1;
+    const before = lastSql.slice(0, offset);
+    const line = before.split('\n').length;
+
+    // The statement it landed in: back to the previous semicolon, forward to
+    // the next. Crude, and right often enough to point at the answer.
+    const from = before.lastIndexOf(';') + 1;
+    const to = lastSql.indexOf(';', offset);
+    const statement = lastSql.slice(from, to === -1 ? undefined : to + 1).trim();
+
+    console.error(`\n  at line ${line} of the SQL that was sent:\n`);
+    console.error(
+      statement
+        .split('\n')
+        .slice(0, 12)
+        .map((l) => `    ${l}`)
+        .join('\n'),
+    );
+  }
+
+  /*
+   * A failure inside a DO block or a function carries no `position` — the
+   * statement Postgres was parsing is not the one that failed. It reports a
+   * PL/pgSQL context traceback in `where` instead, which names the block and
+   * the line within it. Printing only `position` meant the errors raised from
+   * the self-check blocks arrived with no location at all.
+   */
+  if (err.where) console.error(`\n  context:\n${err.where.split('\n').map((l) => `    ${l}`).join('\n')}`);
+  if (err.internalQuery) console.error(`\n  in query:\n    ${err.internalQuery.trim()}`);
+  if (err.detail) console.error(`\n  detail: ${err.detail}`);
+  if (err.hint) console.error(`  hint: ${err.hint}`);
+  if (err.schema || err.table) {
+    console.error(`  object: ${[err.schema, err.table, err.column].filter(Boolean).join('.')}`);
+  }
+
+  console.error('');
   await client.end().catch(() => {});
   process.exit(1);
 });

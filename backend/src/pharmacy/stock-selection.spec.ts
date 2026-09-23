@@ -133,26 +133,42 @@ describe('parseDurationDays', () => {
 });
 
 describe('suggestQuantity', () => {
-  it('multiplies doses per day by days', () => {
-    expect(suggestQuantity('Twice daily', '30 days')).toBe(60);
-    expect(suggestQuantity('Once daily', '7 days')).toBe(7);
-    expect(suggestQuantity('Four times daily', '1 week')).toBe(28);
+  it('multiplies units per dose by doses per day by days', () => {
+    expect(suggestQuantity('1 tablet', 'Twice daily', '30 days')).toBe(60);
+    expect(suggestQuantity('1 tablet', 'Once daily', '7 days')).toBe(7);
+    expect(suggestQuantity('1 tablet', 'Four times daily', '1 week')).toBe(28);
+  });
+
+  it('counts the dose size, which for six phases it did not', () => {
+    /*
+     * The bug this signature changed for. `timesPerDay × days` gives 15 here
+     * and the patient needs 30 — half a course, silently, in the same
+     * direction every time. Harmless while it was a hint somebody clicked;
+     * dangerous the moment the prescribing screen started filling it in.
+     */
+    expect(suggestQuantity('2 tablets', 'Three times daily', '5 days')).toBe(30);
   });
 
   it('refuses when the frequency is not confidently readable', () => {
     // Same discipline as the drug chart: a wrong number here sends a patient
     // home with the wrong amount of medicine.
-    expect(suggestQuantity('as directed', '30 days')).toBeNull();
-    expect(suggestQuantity('PRN', '30 days')).toBeNull();
+    expect(suggestQuantity('1 tablet', 'as directed', '30 days')).toBeNull();
+    expect(suggestQuantity('1 tablet', 'PRN', '30 days')).toBeNull();
   });
 
   it('refuses when the duration is not confidently readable', () => {
-    expect(suggestQuantity('Twice daily', 'ongoing')).toBeNull();
-    expect(suggestQuantity('Twice daily', 'until review')).toBeNull();
+    expect(suggestQuantity('1 tablet', 'Twice daily', 'ongoing')).toBeNull();
+    expect(suggestQuantity('1 tablet', 'Twice daily', 'until review')).toBeNull();
+  });
+
+  it('refuses when the dosage is a strength rather than a count', () => {
+    // How many capsules make 500mg is a property of the product on the shelf,
+    // which this system does not model. The pharmacist types the number.
+    expect(suggestQuantity('500mg', 'Twice daily', '7 days')).toBeNull();
   });
 
   it('refuses when neither is readable', () => {
-    expect(suggestQuantity('as needed', 'as directed')).toBeNull();
+    expect(suggestQuantity('1 tablet', 'as needed', 'as directed')).toBeNull();
   });
 });
 

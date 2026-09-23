@@ -1,4 +1,4 @@
-import { UserRole } from '@prisma/client';
+import { SubscriptionStatus, TenantModule, UserRole } from '@prisma/client';
 
 /**
  * The authenticated caller, resolved fresh from the database on every request
@@ -34,6 +34,32 @@ export interface AuthUser {
     timezone: string;
     /** ISO 4217. Display only — no conversion happens anywhere. */
     currency: string;
+
+    /**
+     * The hospital's standing with the vendor.
+     *
+     * Here so `SubscriptionGuard` can answer "may this request write?" without
+     * a second query, and so a client can warn before anything stops working.
+     * A lapsed subscription blocks writes and never blocks a read or a login —
+     * see `common/subscription/subscription.ts` for why that line is where it
+     * is.
+     */
+    subscriptionStatus: SubscriptionStatus;
+    subscriptionEndsAt: Date | null;
+
+    /**
+     * What this hospital has been sold. See `TenantModule`.
+     *
+     * Here for the same reason the subscription is: `ModuleGuard` needs it on
+     * every write, and re-reading the tenant per request would be a second
+     * query for a row this one already has. Sent to the clients too, because
+     * the menus are built from it — a lab-only tenant should not be looking at
+     * a ward board it can never use.
+     *
+     * A usability boundary on the client, a real one here. The guard assumes
+     * any client can call any endpoint, exactly as `RolesGuard` does.
+     */
+    modules: TenantModule[];
   };
   fullName: string;
 

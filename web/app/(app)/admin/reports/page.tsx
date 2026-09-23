@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
+import { useAuth } from '@/lib/auth-context';
 import { api } from '@/lib/api';
 import type { AgingBucket, DoctorReport, FinanceReport } from '@/lib/types';
 import { Card, ErrorState, Skeleton } from '@/components/ui/primitives';
@@ -29,6 +30,18 @@ import { useMoney } from '@/lib/use-money';
  */
 export default function AdminReportsPage() {
   const fmt = useMoney();
+  const { user } = useAuth();
+  /*
+   * The report itself is always-on — `/admin/reports/*` carries no module,
+   * because a hospital's own takings and headcount are the product rather than
+   * a part of it. What varies is a card and two links.
+   *
+   * The doctors card would render "0 doctors" at a pharmacy-only tenant and
+   * offer a link to a screen `canReach` then bounces them off. An empty card
+   * and a dead link both read as something broken.
+   */
+  const hasClinic = user?.hospital.modules.includes('CLINIC') ?? true;
+  const hasBilling = user?.hospital.modules.includes('BILLING') ?? true;
   const [finance, setFinance] = useState<FinanceReport | null>(null);
   const [doctors, setDoctors] = useState<DoctorReport | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -72,26 +85,42 @@ export default function AdminReportsPage() {
         />
       </div>
 
-      {!finance ? <Skeleton className="h-64 w-full" /> : <Finance report={finance} fmt={fmt} />}
+      {!finance ? (
+        <Skeleton className="h-64 w-full" />
+      ) : (
+        <Finance report={finance} fmt={fmt} showInvoiceLink={hasBilling} />
+      )}
 
-      <Card className="mt-3">
-        <div className="mb-2 flex items-baseline justify-between">
-          <h2 className="text-md font-semibold">
-            Doctors{doctors ? ` · ${doctors.total}` : ''}
-          </h2>
-          <Link href="/doctors" className="text-xs text-primary hover:underline">
-            Set consultation fees →
-          </Link>
-        </div>
-        {!doctors ? <Skeleton className="h-40" /> : <Doctors report={doctors} fmt={fmt} />}
-      </Card>
+      {hasClinic && (
+        <Card className="mt-3">
+          <div className="mb-2 flex items-baseline justify-between">
+            <h2 className="text-md font-semibold">
+              Doctors{doctors ? ` · ${doctors.total}` : ''}
+            </h2>
+            <Link href="/doctors" className="text-xs text-primary hover:underline">
+              Set consultation fees →
+            </Link>
+          </div>
+          {!doctors ? <Skeleton className="h-40" /> : <Doctors report={doctors} fmt={fmt} />}
+        </Card>
+      )}
     </div>
   );
 }
 
 /* ─────────────────────────────── finance ─────────────────────────────── */
 
-function Finance({ report, fmt }: { report: FinanceReport; fmt: (v: string) => string }) {
+function Finance({
+  report,
+  fmt,
+  showInvoiceLink,
+}: {
+  report: FinanceReport;
+  fmt: (v: string) => string;
+  /** Hidden without BILLING — the aging figures still stand, the screen behind
+   * the link does not exist for this hospital. */
+  showInvoiceLink: boolean;
+}) {
   /*
    * The bar scale is the largest month in the window, so the chart is about
    * shape rather than absolute size. Computed from the string amounts by
@@ -159,9 +188,11 @@ function Finance({ report, fmt }: { report: FinanceReport; fmt: (v: string) => s
         <Card>
           <div className="mb-2 flex items-baseline justify-between">
             <h2 className="text-md font-semibold">Outstanding by age</h2>
-            <Link href="/billing/invoices" className="text-xs text-primary hover:underline">
-              Invoices →
-            </Link>
+            {showInvoiceLink && (
+              <Link href="/billing/invoices" className="text-xs text-primary hover:underline">
+                Invoices →
+              </Link>
+            )}
           </div>
           <Table head={['Age', 'Invoices', 'Amount']}>
             {(Object.keys(report.aging.buckets) as AgingBucket[]).map((key) => {

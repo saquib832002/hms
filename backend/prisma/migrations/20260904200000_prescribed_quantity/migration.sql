@@ -1,0 +1,25 @@
+-- The quantity the prescriber actually ordered.
+--
+-- HAND-WRITTEN, like the eight before it. Check with `prisma migrate diff`
+-- before applying to anything holding data. `npm run db:rls` is NOT needed —
+-- this is a column on a table that already carries the tenant policy.
+--
+-- WHY THIS EXISTS
+-- There was no ordered quantity anywhere in the system. Whether a prescription
+-- counted as fully dispensed was decided by *inferring* one from the free-text
+-- `frequency` and `duration` fields:
+--
+--   const needed = suggestQuantity(i.frequency, i.duration);
+--   return needed !== null && i.quantityDispensed >= needed;
+--
+-- When either field could not be parsed — "as directed", "1/52", "till the
+-- course finishes", anything the small recogniser did not know — `needed` was
+-- null, `complete` could never be true, and the prescription stayed
+-- PARTIALLY_DISPENSED permanently. The pharmacist had handed over exactly what
+-- was asked for and there was nothing anywhere in the application that could
+-- say so.
+--
+-- NULL is allowed and means "no fixed total": a PRN or open-ended course, where
+-- the pharmacist decides when it is finished. It must never again mean "the
+-- parser could not read the duration".
+ALTER TABLE "prescription_items" ADD COLUMN "quantityPrescribed" INTEGER;

@@ -9,9 +9,10 @@ import { AdmissionStatus, DoseStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthUser } from '../common/types/auth-user';
 import { hospitalDate, hospitalDayRange, zonedTimeToUtc } from '../common/utils/hospital-time';
-import { doseTimesFor, parseFrequency, whyNotScheduled } from './dose-frequency';
+import { doseTimesFor, isAsNeeded, parseFrequency, whyNotScheduled } from './dose-frequency';
 import { ScheduleDosesDto } from './dto/schedule-doses.dto';
 import { RecordDoseDto } from './dto/record-dose.dto';
+import { ManualScheduleDto, OneOffDoseDto } from './dto/manual-schedule.dto';
 import { currentTenantId } from '../common/tenancy/tenant-context';
 import { ClinicSettingsService } from '../common/tenancy/clinic-settings.service';
 
@@ -74,7 +75,7 @@ export class MedicationsService {
       zonedTimeToUtc(p, tz);
     const dayOf = (d: Date) => hospitalDate(d, tz);
 
-    const created: unknown[] = [];
+    const times: Prisma.MedicationAdministrationCreateManyInput[] = [];
     const unscheduled: { itemId: number; medicineName: string; reason: string }[] = [];
 
     for (const item of prescription.items ?? []) {
@@ -88,29 +89,316 @@ export class MedicationsService {
         continue;
       }
 
-      for (const dueAt of doseTimesFor(parsed, now, days, toUtc, dayOf)) {
-        try {
-          created.push(
-            await this.prisma.medicationAdministration.create({
-              data: {
-                tenantId: currentTenantId(),
-                prescriptionItemId: item.id,
-                admissionId,
-                patientId: admission.patientId,
-                dueAt,
-              },
-            }),
-          );
-        } catch (err) {
-          // @@unique([prescriptionItemId, dueAt]) — re-running the scheduler
-          // must not duplicate a chart that already exists.
-          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') continue;
-          throw err;
-        }
+      times.push(
+        ...doseTimesFor(parsed, now, days, toUtc, dayOf).map((dueAt) => ({
+          tenantId: currentTenantId(),
+          prescriptionItemId: item.id,
+          admissionId,
+          patientId: admission.patientId,
+          dueAt,
+        })),
+      );
+    }
+
+    /*
+     * One insert, not one per dose.
+     *
+     * This was a `create` inside a nested loop: a three-day chart for six
+     * medicines given four times a day is 72 round trips, inside the request's
+     * own transaction, holding a pool connection the whole time. `skipDuplicates`
+     * does what the per-row P2002 catch did — `@@unique([prescriptionItemId,
+     * dueAt])` means re-running the scheduler must not duplicate a chart that
+     * already exists.
+     */
+    const { count } = await this.prisma.medicationAdministration.createMany({
+      data: times,
+      skipDuplicates: true,
+    });
+
+    return { scheduled: count, unscheduled };
+  }
+
+  /**
+   * Dose times a nurse set by hand, for an item the parser would not guess at.
+   *
+   * The other half of `schedule()`. That method deliberately refuses anything
+   * it cannot read confidently and hands the item back as `unscheduled` with a
+   * reason — which was correct and went nowhere, because nothing in either
+   * client could act on it. A medicine that is prescribed, not charted, and
+   * explained only by a sentence in a dialog is a medicine that does not get
+   * given.
+   */
+  async scheduleManually(admissionId: number, dto: ManualScheduleDto) {
+    const admission = await this.requireOpenAdmission(admissionId);
+
+    const item = await this.prisma.prescriptionItem.findUnique({
+      where: { id: dto.prescriptionItemId },
+      include: { prescription: { select: { patientId: true, status: true } } },
+    });
+    if (!item) throw new NotFoundException(`Prescription item ${dto.prescriptionItemId} not found`);
+    if (item.prescription?.patientId !== admission.patientId) {
+      throw new BadRequestException('That medicine belongs to a different patient');
+    }
+    /*
+     * A cancelled prescription must not become a drug chart — the same rule
+     * the automatic scheduler follows, restated because this path does not go
+     * through it. `schedule-medication-sheet` already refuses to chart a
+     * cancelled prescription client-side, and the client is not the boundary.
+     */
+    if (item.prescription?.status === 'CANCELLED') {
+      throw new ConflictException('That prescription has been cancelled');
+    }
+
+    const days = dto.days ?? 3;
+    const tz = await this.tz();
+    const now = new Date();
+    const first = hospitalDate(now, tz);
+
+    const rows: Prisma.MedicationAdministrationCreateManyInput[] = [];
+    for (let offset = 0; offset < days; offset++) {
+      const base = new Date(Date.UTC(first.year, first.month - 1, first.day + offset));
+      for (const hhmm of dto.times) {
+        const [hour, minute] = hhmm.split(':').map(Number);
+        const dueAt = zonedTimeToUtc(
+          {
+            year: base.getUTCFullYear(),
+            month: base.getUTCMonth() + 1,
+            day: base.getUTCDate(),
+            hour,
+            minute,
+          },
+          tz,
+        );
+        // Times already past today are skipped, exactly as the automatic
+        // scheduler does — a chart built at 14:00 should not open showing a
+        // missed 08:00 dose nobody was ever asked to give.
+        if (dueAt.getTime() < now.getTime()) continue;
+        rows.push({
+          tenantId: currentTenantId(),
+          prescriptionItemId: item.id,
+          admissionId,
+          patientId: admission.patientId,
+          dueAt,
+        });
       }
     }
 
-    return { scheduled: created.length, unscheduled };
+    if (rows.length === 0) {
+      throw new BadRequestException(
+        'Every one of those times has already passed today. Add a later time, or schedule more than one day.',
+      );
+    }
+
+    const { count } = await this.prisma.medicationAdministration.createMany({
+      data: rows,
+      skipDuplicates: true,
+    });
+
+    return { scheduled: count, requested: rows.length };
+  }
+
+  /**
+   * A single dose: STAT, or an "as needed" one being recorded as given.
+   *
+   * With no `status` this creates a dose that is due — the ward-round STAT
+   * case. With a status it creates the dose already signed for, which is what
+   * PRN needs: nothing was ever *due*, so there is no row to find and action
+   * later. `whyNotScheduled` has been telling nurses to "record each dose as it
+   * is given" since Phase 3 with nowhere to do it.
+   */
+  async addOneOffDose(admissionId: number, dto: OneOffDoseDto, user: AuthUser) {
+    const admission = await this.requireOpenAdmission(admissionId);
+
+    const item = await this.prisma.prescriptionItem.findUnique({
+      where: { id: dto.prescriptionItemId },
+      include: { prescription: { select: { patientId: true, status: true } } },
+    });
+    if (!item) throw new NotFoundException(`Prescription item ${dto.prescriptionItemId} not found`);
+    if (item.prescription?.patientId !== admission.patientId) {
+      throw new BadRequestException('That medicine belongs to a different patient');
+    }
+    if (item.prescription?.status === 'CANCELLED') {
+      throw new ConflictException('That prescription has been cancelled');
+    }
+
+    if (dto.status === DoseStatus.DUE) {
+      throw new BadRequestException('Leave the status out to add a dose that is simply due');
+    }
+    // Same rule as `record()`, restated because this path does not go through
+    // it: at a handover, "not given" without a why is close to useless.
+    if (dto.status && dto.status !== DoseStatus.GIVEN && !dto.notes?.trim()) {
+      throw new BadRequestException(
+        `Add a note explaining why the dose was ${dto.status.toLowerCase()}`,
+      );
+    }
+
+    const dueAt = dto.dueAt ? new Date(dto.dueAt) : new Date();
+
+    const created = await this.prisma.medicationAdministration.create({
+      data: {
+        tenantId: currentTenantId(),
+        prescriptionItemId: item.id,
+        admissionId,
+        patientId: admission.patientId,
+        dueAt,
+        ...(dto.status
+          ? {
+              status: dto.status,
+              givenAt:
+                dto.status === DoseStatus.GIVEN ? (dto.givenAt ? new Date(dto.givenAt) : dueAt) : null,
+              givenById: user.userId,
+              notes: dto.notes,
+            }
+          : {}),
+      },
+    });
+
+    return this.shapeDose(created.id);
+  }
+
+  /**
+   * The drug chart for one stay — the MAR.
+   *
+   * WHY A CHART AND NOT JUST THE ROUND
+   * ----------------------------------
+   * The round answers "what is due on this ward today", which is the right
+   * question while giving out medicines and the wrong one everywhere else. A
+   * nurse taking over a patient, or a doctor on a ward round, asks "what is
+   * this person on, and what have they actually had" — and that view did not
+   * exist anywhere in the system.
+   *
+   * **Prescribed-but-not-charted items are the point.** Querying the chart from
+   * the doses would show only medicines that were successfully scheduled, so
+   * the ones the parser refused — precisely the ones needing attention — would
+   * be invisible. They are read from the prescription instead and returned
+   * beside the charted ones, each carrying why it was not scheduled and what to
+   * do about it.
+   */
+  async chart(admissionId: number) {
+    const admission = await this.prisma.admission.findUnique({
+      where: { id: admissionId },
+      select: {
+        id: true,
+        admittedAt: true,
+        status: true,
+        patientId: true,
+        bed: { select: { label: true, ward: { select: { id: true, name: true } } } },
+        patient: {
+          select: {
+            id: true,
+            fullName: true,
+            dob: true,
+            allergies: { select: { id: true, substance: true } },
+          },
+        },
+      },
+    });
+    if (!admission) throw new NotFoundException(`Admission ${admissionId} not found`);
+
+    const doses = await this.prisma.medicationAdministration.findMany({
+      where: { admissionId },
+      orderBy: { dueAt: 'asc' },
+      include: { givenBy: { select: { fullName: true } } },
+    });
+
+    /*
+     * Every non-cancelled prescription for this patient, not only those written
+     * during the stay. A patient admitted on their regular medicines has those
+     * on a prescription written before they arrived, and leaving them off the
+     * chart is how a long-term drug gets quietly stopped by an admission.
+     */
+    const prescriptions = await this.prisma.prescription.findMany({
+      where: { patientId: admission.patientId, status: { not: 'CANCELLED' } },
+      orderBy: { issuedAt: 'desc' },
+      include: {
+        items: true,
+        doctor: { select: { user: { select: { fullName: true } } } },
+      },
+    });
+
+    const dosesByItem = new Map<number, typeof doses>();
+    for (const d of doses) {
+      const list = dosesByItem.get(d.prescriptionItemId) ?? [];
+      list.push(d);
+      dosesByItem.set(d.prescriptionItemId, list);
+    }
+
+    const medicines = prescriptions.flatMap((p) =>
+      p.items.map((item) => {
+        const itemDoses = dosesByItem.get(item.id) ?? [];
+        const parsed = parseFrequency(item.frequency);
+
+        return {
+          prescriptionItemId: item.id,
+          prescriptionId: p.id,
+          issuedAt: p.issuedAt,
+          prescriber: p.doctor?.user?.fullName ?? null,
+          medicineName: item.medicineName,
+          dosage: item.dosage,
+          frequency: item.frequency,
+          duration: item.duration,
+          /** What the parser made of the frequency, or null if it refused. */
+          scheduleLabel: parsed?.label ?? null,
+          /** Why there are no times, in words the nurse can act on. */
+          notScheduledReason: itemDoses.length === 0 ? whyNotScheduled(item.frequency) : null,
+          /*
+           * PRN is not "unrecognised", and the difference decides what the
+           * screen should offer. An unreadable frequency wants times set; an
+           * as-needed medicine must never get them, and wants a dose recorded
+           * when it is actually given.
+           */
+          asNeeded: isAsNeeded(item.frequency),
+          doses: itemDoses.map((d) => ({
+            id: d.id,
+            dueAt: d.dueAt,
+            status: d.status,
+            givenAt: d.givenAt,
+            givenBy: d.givenBy?.fullName ?? null,
+            notes: d.notes,
+          })),
+        };
+      }),
+    );
+
+    return {
+      admission: {
+        id: admission.id,
+        admittedAt: admission.admittedAt,
+        status: admission.status,
+        bed: admission.bed?.label ?? null,
+        ward: admission.bed?.ward?.name ?? null,
+      },
+      patient: {
+        id: admission.patient!.id,
+        fullName: admission.patient!.fullName,
+        age: ageFrom(admission.patient!.dob as Date),
+        /*
+         * The substances, not a flag.
+         *
+         * The ward board shows a dot because it is a list of many patients and
+         * the detail belongs on a screen somebody deliberately opened. This is
+         * that screen, and it is the one where a nurse is about to give a drug
+         * — "has allergies" without saying to what is the least useful possible
+         * form of that warning at the moment it matters.
+         */
+        allergies: admission.patient!.allergies.map((a) => a.substance),
+      },
+      timezone: await this.tz(),
+      medicines,
+    };
+  }
+
+  /** Shared by both manual paths: the stay has to be open to chart against. */
+  private async requireOpenAdmission(admissionId: number) {
+    const admission = await this.prisma.admission.findUnique({
+      where: { id: admissionId },
+      select: { id: true, patientId: true, status: true },
+    });
+    if (!admission) throw new NotFoundException(`Admission ${admissionId} not found`);
+    if (admission.status !== AdmissionStatus.ADMITTED) {
+      throw new ConflictException('That patient has been discharged');
+    }
+    return admission;
   }
 
   /**
@@ -244,4 +532,13 @@ export class MedicationsService {
       },
     });
   }
+}
+
+/** Age today, not at admission — a chart is read now, not filed. */
+function ageFrom(dob: Date): number {
+  const now = new Date();
+  let age = now.getUTCFullYear() - dob.getUTCFullYear();
+  const m = now.getUTCMonth() - dob.getUTCMonth();
+  if (m < 0 || (m === 0 && now.getUTCDate() < dob.getUTCDate())) age--;
+  return age;
 }

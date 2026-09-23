@@ -94,7 +94,9 @@ function allZones(): string[] {
   } catch {
     // Older browser — fall through.
   }
-  return FALLBACK;
+  // A copy: the caller sorts and appends to this list, and mutating the shared
+  // constant would corrupt it for every later render.
+  return [...FALLBACK];
 }
 
 /** Current offset, so the right "Chicago" is obvious at a glance. */
@@ -133,10 +135,52 @@ export function TimezoneSelect({
   const matches = useMemo(() => {
     const q = filter.trim().toLowerCase();
     if (!q) return zones;
-    return zones.filter((z) => {
+
+    const hits = zones.filter((z) => {
       const haystack = `${z} ${HINTS[z] ?? ''}`.toLowerCase().replace(/_/g, ' ');
       return haystack.includes(q);
     });
+
+    /*
+     * The currently selected zone always stays in the list, even when the
+     * filter excludes it.
+     *
+     * THE BUG THIS FIXES
+     * ------------------
+     * This is a controlled `<select>`: React sets `value`, and the browser
+     * matches it against the rendered options. Filter it out and there is
+     * nothing to match, so the browser falls back to showing the *first*
+     * option as selected while React still holds the old value.
+     *
+     * Clicking that first option then changes nothing as far as the browser is
+     * concerned — it was already selected — so **no change event fires**. The
+     * user picks Asia/Calcutta, the highlight does not move, and Save stays
+     * greyed out because `form.timezone` never changed. Reported exactly that
+     * way, and it looks like a dead dropdown rather than a state mismatch.
+     *
+     * Keeping the selection present means the select genuinely reflects what is
+     * chosen, so clicking anything else is a real change.
+     */
+    if (value && !hits.includes(value)) hits.push(value);
+    return hits.sort();
+  }, [zones, filter, value]);
+
+  /*
+   * Real matches, ignoring the pinned selection.
+   *
+   * Needed because pinning the current zone means `matches` is never empty, so
+   * the "nothing matches" hint below would have stopped appearing — replacing a
+   * dropdown that silently did nothing with a search that silently found
+   * nothing. That hint is the one that tells somebody India is filed under
+   * Asia/Calcutta, which is the whole reason this component has a search box.
+   */
+  const hitCount = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    if (!q) return zones.length;
+    return zones.filter((z) => {
+      const haystack = `${z} ${HINTS[z] ?? ''}`.toLowerCase().replace(/_/g, ' ');
+      return haystack.includes(q);
+    }).length;
   }, [zones, filter]);
 
   const grouped = useMemo(() => {
@@ -175,7 +219,7 @@ export function TimezoneSelect({
           </optgroup>
         ))}
       </select>
-      {filter && matches.length === 0 ? (
+      {filter && hitCount === 0 ? (
         <p className="text-xs text-text-subtle">
           Nothing matches “{filter}”. Zones are named after cities — India is listed as
           Asia/Calcutta on most systems.

@@ -51,6 +51,26 @@ function normalise(block: string): string {
 
 const SHARED = [
   'UserRole',
+  'TenantModule',
+  // Diagnostics. Every one of these is a response shape both clients render,
+  // and the flag enum in particular must not diverge — a client that treated
+  // UNKNOWN as NORMAL would print false reassurance.
+  'LabCategory',
+  'LabSpecimenType',
+  'LabPriority',
+  'LabOrderDestination',
+  'LabOrderStatus',
+  'LabResultFlag',
+  'LabAnalyte',
+  'LabTest',
+  'LabResultValue',
+  'LabOrderItem',
+  'LabOrder',
+  'LabWorklistRow',
+  'LabPartner',
+  'LabReferral',
+  'LabAttachmentKind',
+  'LabAttachment',
   'AppointmentStatus',
   'AllergySeverity',
   'AuthUser',
@@ -61,6 +81,8 @@ const SHARED = [
   'MedicalRecord',
   'PrescriptionItem',
   'Prescription',
+  'PrescribingShortcut',
+  'PrescribingHistory',
   'DoseStatus',
   'VitalFlag',
   'Vital',
@@ -73,6 +95,9 @@ const SHARED = [
   'Medicine',
   'StockBatchView',
   'DispenseQueueItem',
+  'AllergyConflict',
+  'DispenseItem',
+  'DispensePreparation',
   'InventoryRow',
   'Inventory',
   'AdminDashboard',
@@ -87,7 +112,14 @@ const SHARED = [
   'PaymentMethod',
   'InvoiceLine',
   'PaymentRecord',
+  'PaymentListItem',
+  'RefundRecord',
   'Invoice',
+  // Pharmacy billing. `SaleCharge` is what a dispense or a counter sale reports
+  // back, and `unpriced` is the half that matters — a medicine handed over and
+  // not charged for, named while the customer is still at the counter.
+  'SaleCharge',
+  'CounterSaleLine',
   // Admin reporting, added when the overview gained takings and per-doctor
   // figures. `AgingReport` comes along because `FinanceReport` names it — a
   // shape is only pinned if everything it references is pinned too.
@@ -109,6 +141,12 @@ const SHARED = [
   'FinanceReport',
   'DoctorReportRow',
   'DoctorReport',
+  // Cross-tenant prescribing. `PrescriptionReferral` is the transmitted copy
+  // the receiving pharmacy owns — see the note on the model for why it is a
+  // copy rather than shared access.
+  'PrescriptionDestination',
+  'PharmacyPartner',
+  'PrescriptionReferral',
 ];
 
 describe('web ↔ mobile type drift', () => {

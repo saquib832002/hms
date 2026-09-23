@@ -26,6 +26,7 @@ const patient = {
   insurerName: 'Demo Health Cover',
   insurancePolicyNumber: 'POL-123456',
   createdAt: new Date('2026-01-01T00:00:00Z'),
+  isReferralOrigin: false,
   updatedAt: new Date('2026-01-01T00:00:00Z'),
   allergies: [
     {

@@ -135,8 +135,31 @@ describe('every id-bearing route resolves a target', () => {
     return out;
   }
 
+  /**
+   * Routes whose parameter is not a record id, with the reason.
+   *
+   * Kept as an explicit list rather than a pattern, so adding one is a decision
+   * somebody writes down — the rule this repo settled on after three exemption
+   * lists grew false reasons nobody rechecked.
+   */
+  const NOT_A_RECORD_ID: Record<string, string> = {
+    '/lab-orders/by-accession/:code':
+      'The parameter is a specimen number, not a row id, and the interceptor ' +
+      'runs before the service has resolved it — so there is no id to record ' +
+      'at that point. The accession itself is in the request path, which the ' +
+      'audit row already stores.',
+  };
+
   const all = controllers(SRC).flatMap(routes);
-  const withParams = all.filter((p) => p.includes(':'));
+  const withParams = all.filter((p) => p.includes(':') && !(p in NOT_A_RECORD_ID));
+
+  it('states a reason for every route it skips', () => {
+    // A list that can hold a bare entry is one that eventually does.
+    for (const [route, reason] of Object.entries(NOT_A_RECORD_ID)) {
+      expect(all).toContain(route);
+      expect(reason.length).toBeGreaterThan(40);
+    }
+  });
 
   it('found routes to check', () => {
     // Guards against the suite passing because the parser silently matched none.

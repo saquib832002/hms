@@ -3,7 +3,7 @@
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { useAuth } from '@/lib/auth-context';
-import { landingFor, ROLE_LABEL } from '@/lib/nav';
+import { actableRoles, landingFor, ROLE_LABEL } from '@/lib/nav';
 import type { UserRole } from '@/lib/types';
 
 /**
@@ -26,7 +26,13 @@ export function RoleSwitcher() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const roles = user?.availableRoles ?? [];
+  /*
+   * Narrowed to what this hospital can actually use, not everything the account
+   * was ever granted. A role whose module has gone stays assigned — nothing is
+   * taken off anybody — but wearing it here would mean an empty menu and a 403
+   * behind every screen.
+   */
+  const roles = actableRoles(user?.availableRoles ?? [], user?.hospital.modules);
   if (!user || roles.length < 2) return null;
 
   async function choose(role: UserRole) {
@@ -38,7 +44,10 @@ export function RoleSwitcher() {
       // The current screen may not exist for the new role — an admin has no
       // clinical queue — so land on that role's own starting point rather than
       // leaving them on a page that will 403.
-      router.push(landingFor(role));
+      // Modules narrow the destination too: switching to a role whose first
+      // screen belongs to a module this hospital was never sold would land on
+      // a page the guard refuses.
+      router.push(landingFor(role, user?.hospital.modules));
     } catch {
       setError('Could not switch role');
     } finally {

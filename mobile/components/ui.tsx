@@ -63,6 +63,28 @@ export function AppHeader({
       <SafeAreaView edges={['top']}>
         <View style={s.headerInner}>
           <View style={s.headerText}>
+            {/*
+              Which hospital this session belongs to, on every screen.
+
+              WHY THIS IS A SAFETY CONTROL AND NOT DECORATION
+              ----------------------------------------------
+              One email address can exist at more than one hospital — that is
+              why the login form has a hospital field at all — and one person
+              can hold roles at more than one. So being signed into the wrong
+              tenant is a reachable state, and the cost is not confusion: it is
+              a prescription, a payment or a record written into another
+              hospital's books, where the audit trail will say it happened.
+
+              Above the title rather than in the `subtitle`, because every
+              screen already passes its own subtitle ("Drug round", "Updated
+              2m ago") and stealing it would trade one fact for another. The
+              hospital is the constant; the subtitle is the screen.
+            */}
+            {user?.hospital?.name ? (
+              <Text style={s.headerTenant} numberOfLines={1}>
+                {user.hospital.name}
+              </Text>
+            ) : null}
             <Text style={s.headerTitle} numberOfLines={1}>
               {title}
             </Text>
@@ -469,6 +491,7 @@ export function Field({
   keyboardType,
   autoCapitalize = 'sentences',
   multiline,
+  secure,
   style,
 }: {
   label?: string;
@@ -478,6 +501,8 @@ export function Field({
   keyboardType?: React.ComponentProps<typeof TextInput>['keyboardType'];
   autoCapitalize?: React.ComponentProps<typeof TextInput>['autoCapitalize'];
   multiline?: boolean;
+  /** Masks input and opts out of the keyboard's learning, for passwords. */
+  secure?: boolean;
   style?: TextStyle;
 }) {
   return (
@@ -493,6 +518,10 @@ export function Field({
         autoCapitalize={autoCapitalize}
         autoCorrect={false}
         multiline={multiline}
+        secureTextEntry={secure}
+        // Keeps a password out of the keyboard's dictionary and off the
+        // predictive bar, where the next person to use the device would see it.
+        textContentType={secure ? 'password' : undefined}
       />
     </View>
   );
@@ -532,6 +561,12 @@ const s = StyleSheet.create({
     paddingBottom: theme.space(4),
   },
   headerText: { flex: 1 },
+  headerTenant: {
+    ...theme.font.overline,
+    color: theme.color.textMuted,
+    textTransform: 'uppercase',
+    marginBottom: 1,
+  },
   headerTitle: { ...theme.font.display, color: theme.color.text },
   headerSubtitle: { ...theme.font.small, color: theme.color.textMuted, marginTop: 1 },
 

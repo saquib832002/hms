@@ -1,11 +1,15 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { api, ApiError } from '@/lib/api';
-import type { DispensePreparation } from '@/lib/types';
+import type { DispensePreparation, SaleCharge } from '@/lib/types';
 import { date, titleCase } from '@/lib/format';
 import { Button, Field, Input, Textarea, SectionLabel, Skeleton } from '@/components/ui/primitives';
 import { Sheet } from '@/components/ui/sheet';
+import { PriceInline } from '@/components/price-inline';
+import { useMoney } from '@/lib/use-money';
+import { basketWithTax, lineTotalMinor, minorToAmount, taxRowsFor } from '@/lib/money-lines';
 
 /**
  * Dispensing.
@@ -24,13 +28,66 @@ export function DispenseSheet({
   onClose: () => void;
   onDispensed: () => void;
 }) {
+  const router = useRouter();
   const [prep, setPrep] = useState<DispensePreparation | null>(null);
+  const money = useMoney();
   const [quantities, setQuantities] = useState<Record<number, string>>({});
   const [override, setOverride] = useState('');
   const [notes, setNotes] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
+  /** What the dispense was charged at, returned by the server. */
+  const [charge, setCharge] = useState<SaleCharge | null>(null);
+  /** Settling an open-ended course by hand. */
+  const [settling, setSettling] = useState(false);
+  const [settled, setSettled] = useState(false);
+
+  /*
+   * Whether the pharmacist may close this prescription themselves.
+   *
+   * Mirrors `canBeSettledByHand` on the server, which is the authority: at
+   * least one line has no fixed total, and none is known to still owe
+   * anything. Computed here only so the button does not appear where the
+   * server would refuse it — a control that exists to fail is worse than none.
+   */
+  const canSettle =
+    !settled &&
+    (prep?.items ?? []).some((i) => i.completion === 'unknown') &&
+    !(prep?.items ?? []).some((i) => i.completion === 'outstanding');
+
+  async function markComplete() {
+    if (!prescriptionId) return;
+    setSettling(true);
+    try {
+      await api(`/pharmacy/prescriptions/${prescriptionId}/complete`, { method: 'POST', body: {} });
+      setSettled(true);
+      onDispensed();
+    } catch (e) {
+      // The server names what is still outstanding, which is more useful than
+      // anything guessable here.
+      setError(e instanceof ApiError ? e.message : 'Could not mark that fully dispensed');
+    } finally {
+      setSettling(false);
+    }
+  }
+
+  /*
+   * Re-read the prescription without resetting what the pharmacist has typed.
+   *
+   * Used after pricing a medicine inline: the quantities already entered are
+   * the whole point of the screen, and clearing them to pick up one price
+   * would be a worse trade than the missing price was.
+   */
+  const reload = useCallback(async () => {
+    if (!prescriptionId) return;
+    try {
+      setPrep(await api<DispensePreparation>(`/pharmacy/prescriptions/${prescriptionId}`));
+    } catch {
+      /* The sheet still holds a usable copy; a failed refresh is not worth
+         throwing the pharmacist out of a dispense over. */
+    }
+  }, [prescriptionId]);
 
   useEffect(() => {
     setPrep(null);
@@ -66,19 +123,80 @@ export function DispenseSheet({
 
   const overrideOk = blocking.length === 0 || override.trim().length >= 10;
 
+  /*
+   * The running total, shown before the pharmacist commits.
+   *
+   * Computed in integer minor units rather than by adding floats: a receipt
+   * that disagrees with the invoice by a penny is a conversation nobody wants
+   * to have at a counter. Unpriced items contribute nothing and are named
+   * separately, because a total that quietly skips them looks correct.
+   */
+  const priced = (prep?.items ?? [])
+    .map((item) => ({ item, qty: Number(quantities[item.id] ?? 0) }))
+    .filter(({ qty }) => Number.isFinite(qty) && qty > 0);
+
+  /*
+   * Net, tax and gross, previewed before the pharmacist commits.
+   *
+   * A running total that excluded tax was a number the patient would not
+   * recognise on the invoice ten seconds later. The server recomputes
+   * authoritatively on dispense; this must agree with it to the penny, which
+   * is why both sides derive the tax the same way — see `money-lines.ts`.
+   */
+  const taxable = priced.map(({ item, qty }) => ({
+    unitPrice: item.unitPrice,
+    quantity: qty,
+    taxRateBasisPoints: item.taxRateBasisPoints ?? 0,
+    taxRateName: item.taxRateName ?? null,
+    taxComponents: item.taxComponents ?? [],
+  }));
+  const basket = basketWithTax(taxable, prep?.pricesIncludeTax ?? false);
+  /** The rows the invoice will print, previewed here so they cannot differ. */
+  const taxRows = taxRowsFor(taxable, prep?.pricesIncludeTax ?? false);
+  const totalMinor = basket.grossMinor;
+  const unpricedItems = priced.filter(({ item }) => item.unitPrice === null);
+
   async function submit() {
     setSubmitting(true);
     setError(null);
     try {
-      await api(`/pharmacy/prescriptions/${prescriptionId}/dispense`, {
-        method: 'POST',
-        body: {
-          lines,
-          overrideReason: blocking.length > 0 ? override.trim() : undefined,
-          notes: notes.trim() || undefined,
+      const res = await api<{ charge: SaleCharge }>(
+        `/pharmacy/prescriptions/${prescriptionId}/dispense`,
+        {
+          method: 'POST',
+          body: {
+            lines,
+            overrideReason: blocking.length > 0 ? override.trim() : undefined,
+            notes: notes.trim() || undefined,
+          },
         },
-      });
+      );
+      setCharge(res.charge);
       setDone(true);
+
+      /*
+       * Straight to taking the money.
+       *
+       * The medicine is already in the patient's hand at this point — the
+       * dispense committed and stock came off the shelf. Walking to Pharmacy
+       * invoices, finding the right row and opening it is three navigations
+       * for something the pharmacist is going to do in the next ten seconds,
+       * with the patient still at the counter.
+       *
+       * NOT when something was left unpriced. That warning is the one thing on
+       * this screen the pharmacist can still act on while the patient is here,
+       * and whisking them to a payment form buries it — which is exactly how a
+       * month of unbilled stock happens. They get the notice and a button
+       * instead, so the jump is a decision rather than a surprise.
+       *
+       * NOT a gate, either. Nothing here checks whether the invoice is
+       * settled; the medicine has gone regardless. This is a shortcut to the
+       * next task, not a condition on the last one.
+       */
+      if (res.charge.invoiceId && res.charge.unpriced.length === 0) {
+        onDispensed();
+        router.push(`/pharmacy/invoices?invoice=${res.charge.invoiceId}`);
+      }
     } catch (err) {
       // 409 covers both "stock ran out" and "override required" — the server
       // says which, and it says it better than a guess would.
@@ -96,9 +214,32 @@ export function DispenseSheet({
       title={done ? 'Dispensed' : `Dispense prescription #${prescriptionId}`}
       footer={
         done ? (
-          <Button variant="primary" onClick={onDispensed}>
-            Done
-          </Button>
+          <>
+            {/*
+              The half that was missing.
+
+              An open-ended course has no computable total, so the server will
+              not call the prescription finished on its own — correctly, because
+              guessing is how a patient goes home with the wrong count. Until
+              now that refusal led nowhere: the prescription sat at "partially
+              dispensed" permanently with nothing able to move it.
+
+              Offered only when nothing is *known* to be outstanding. With a
+              line still owing twenty tablets this would close a genuinely
+              half-filled course, which is the worse error.
+            */}
+            {canSettle && (
+              <Button
+                disabled={settling}
+                onClick={() => void markComplete()}
+              >
+                {settling ? 'Marking…' : 'Mark fully dispensed'}
+              </Button>
+            )}
+            <Button variant="primary" onClick={onDispensed}>
+              Done
+            </Button>
+          </>
         ) : (
           <>
             <Button
@@ -183,10 +324,40 @@ export function DispenseSheet({
           )}
 
           {done ? (
-            <p className="mt-4 text-sm">
-              Recorded against prescription <span className="font-mono">#{prescriptionId}</span>.
-              Stock has been decremented from the shortest-dated in-date batches.
-            </p>
+            <>
+              <p className="mt-4 text-sm">
+                Recorded against prescription <span className="font-mono">#{prescriptionId}</span>.
+                Stock has been decremented from the shortest-dated in-date batches.
+              </p>
+
+              {/* Reached only when the jump to payment was held back — see
+                  `submit`. Either something was not priced, or nothing on the
+                  dispense was chargeable at all. */}
+              {charge && charge.unpriced.length > 0 && (
+                <p className="mt-2 rounded-sm border border-[#ecdca6] bg-warning-soft px-2.5 py-2 text-xs text-[#6b5314]">
+                  <strong>Not charged for:</strong> {charge.unpriced.join(', ')}. These left the
+                  shelf without a price. Set one on the Inventory screen so the next sale is
+                  charged correctly — this one cannot be re-priced.
+                </p>
+              )}
+
+              {charge?.invoiceId ? (
+                <Button
+                  variant="primary"
+                  className="mt-3"
+                  onClick={() => {
+                    onDispensed();
+                    router.push(`/pharmacy/invoices?invoice=${charge.invoiceId}`);
+                  }}
+                >
+                  Take payment — {money(charge.total)}
+                </Button>
+              ) : (
+                <p className="mt-2 text-xs text-warning">
+                  No invoice was raised: nothing on this dispense had a price.
+                </p>
+              )}
+            </>
           ) : (
             <>
               <SectionLabel>Medicines</SectionLabel>
@@ -222,10 +393,28 @@ export function DispenseSheet({
                         >
                           {item.inDateStock} in date
                         </div>
-                        {item.quantityDispensed > 0 && (
+                        {/*
+                          Ordered against given, stated plainly.
+
+                          Before `quantityPrescribed` existed there was nothing
+                          to compare against: the server inferred a total from
+                          the free-text course and, when it could not, treated
+                          that as "not finished" — so a prescription handed over
+                          in full stayed "partially dispensed" permanently and
+                          the counter offered no explanation.
+                        */}
+                        {item.quantityPrescribed !== null && (
+                          <div className="text-xxs text-text-subtle">
+                            {item.quantityDispensed} of {item.quantityPrescribed} given
+                          </div>
+                        )}
+                        {item.quantityPrescribed === null && item.quantityDispensed > 0 && (
                           <div className="text-xxs text-text-subtle">
                             {item.quantityDispensed} already given
                           </div>
+                        )}
+                        {item.completion === 'unknown' && (
+                          <div className="text-xxs text-warning">no fixed total</div>
                         )}
                       </div>
                     </div>
@@ -234,8 +423,8 @@ export function DispenseSheet({
                       <Field
                         label="Quantity"
                         hint={
-                          item.suggestedQuantity === null
-                            ? 'Course length could not be read — enter the quantity.'
+                          item.completion === 'unknown'
+                            ? 'Open-ended course — enter what you are handing over.'
                             : undefined
                         }
                       >
@@ -250,6 +439,45 @@ export function DispenseSheet({
                           disabled={!item.medicine}
                         />
                       </Field>
+
+                      <div className="pb-2 text-right text-xs">
+                        {/*
+                          Always the editor. See `price-inline.tsx`: a control
+                          that is only sometimes present is one nobody trusts
+                          is there, and a wrong price is discovered at the
+                          counter exactly like a missing one.
+
+                          An unmapped item is the one case with no control —
+                          there is no catalogue row to hold a price, and
+                          mapping is the fix the panel above already names.
+                        */}
+                        {item.medicine ? (
+                          <>
+                            <PriceInline
+                              medicineId={item.medicine.id}
+                              medicineName={item.medicine.name}
+                              currentPrice={
+                                item.unitPrice === null ? null : money(item.unitPrice)
+                              }
+                              onPriced={() => void reload()}
+                            />
+                            {item.unitPrice !== null && (
+                              <div className="font-mono text-text">
+                                {money(
+                                  minorToAmount(
+                                    lineTotalMinor(
+                                      item.unitPrice,
+                                      Number(quantities[item.id]) || 0,
+                                    ),
+                                  ),
+                                )}
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <span className="text-warning">Not priced</span>
+                        )}
+                      </div>
                     </div>
 
                     {!item.medicine && (
@@ -265,6 +493,60 @@ export function DispenseSheet({
                   </div>
                 );
               })}
+
+              {/*
+                What this is going to cost, before it is committed.
+                A pharmacist who only finds out the total after signing has no
+                chance to correct a quantity, and the customer is standing there.
+              */}
+              {priced.length > 0 && (
+                <div className="rounded-md border border-border bg-bg px-3 py-2">
+                  {/*
+                    Net and tax above the total, and only when there is tax.
+
+                    Omitted at zero rather than shown as 0.00: most hospitals
+                    charge none, and a permanent zero row trains people to skip
+                    the block that matters.
+                  */}
+                  {basket.taxMinor > 0 && (
+                    <>
+                      <div className="flex items-baseline justify-between text-xs text-text-muted">
+                        <span>Net</span>
+                        <span className="font-mono">{money(minorToAmount(basket.netMinor))}</span>
+                      </div>
+                      {taxRows.map((t) => (
+                        <div
+                          key={`${t.name}-${t.rateBasisPoints}`}
+                          className="flex items-baseline justify-between text-xs text-text-muted"
+                        >
+                          <span>
+                            {t.name}
+                            <span className="ml-1 text-text-subtle">
+                              {(t.rateBasisPoints / 100).toString()}%
+                            </span>
+                          </span>
+                          <span className="font-mono">{money(minorToAmount(t.minor))}</span>
+                        </div>
+                      ))}
+                    </>
+                  )}
+
+                  <div className="flex items-baseline justify-between">
+                    <span className="text-sm text-text-muted">Total to charge</span>
+                    <span className="font-mono text-base font-semibold text-text">
+                      {money(minorToAmount(totalMinor))}
+                    </span>
+                  </div>
+                  {unpricedItems.length > 0 && (
+                    <p className="mt-1 text-xs text-warning">
+                      {unpricedItems.map(({ item }) => item.medicineName).join(', ')} —{' '}
+                      {unpricedItems.length === 1 ? 'has' : 'have'} no price, so nothing is charged
+                      for {unpricedItems.length === 1 ? 'it' : 'them'}. Set a price on the
+                      inventory screen.
+                    </p>
+                  )}
+                </div>
+              )}
 
               {blocking.length > 0 && (
                 <Field label="Override reason" required hint="At least a sentence. This is recorded.">

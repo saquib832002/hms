@@ -4,29 +4,47 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CreateMedicineDto } from './dto/create-medicine.dto';
 import { UpdateMedicineDto } from './dto/update-medicine.dto';
 import { currentTenantId } from '../common/tenancy/tenant-context';
+import { toPriceString } from '../pharmacy/pricing';
+
+/**
+ * A medicine on the wire.
+ *
+ * `sellingPrice` is a Prisma `Decimal`, and handing that to `JSON.stringify`
+ * produces whatever its `toJSON` decides — which is how `"0.35"` and `"0.3500"`
+ * end up meaning the same thing in two different responses, and how a client
+ * doing `parseFloat` on the way back in loses the fourth decimal. Same reason
+ * `toMoneyString` exists one directory over; this is its four-decimal sibling.
+ *
+ * `null` survives as `null` rather than becoming `"0.0000"`. That distinction
+ * is the whole point of the field being nullable.
+ */
+function shapeMedicine<T extends { sellingPrice: unknown }>(m: T) {
+  return { ...m, sellingPrice: toPriceString(m.sellingPrice) };
+}
 
 @Injectable()
 export class MedicinesService {
   constructor(private prisma: PrismaService) {}
 
   async findAll(query?: string, includeInactive = false) {
-    return {
-      data: await this.prisma.medicine.findMany({
-        where: {
-          ...(includeInactive ? {} : { isActive: true }),
-          ...(query ? { name: { contains: query, mode: 'insensitive' } } : {}),
-        },
-        orderBy: { name: 'asc' },
-        take: 200,
-      }),
-    };
+    const data = await this.prisma.medicine.findMany({
+      where: {
+        ...(includeInactive ? {} : { isActive: true }),
+        ...(query ? { name: { contains: query, mode: 'insensitive' } } : {}),
+      },
+      orderBy: { name: 'asc' },
+      take: 200,
+    });
+    return { data: data.map(shapeMedicine) };
   }
 
   async create(dto: CreateMedicineDto) {
     try {
-      return await this.prisma.medicine.create({
-        data: { ...dto, tenantId: currentTenantId() },
-      });
+      return shapeMedicine(
+        await this.prisma.medicine.create({
+          data: { ...dto, tenantId: currentTenantId() },
+        }),
+      );
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
         throw new ConflictException('A medicine with that name already exists');
@@ -38,7 +56,7 @@ export class MedicinesService {
   async update(id: number, dto: UpdateMedicineDto) {
     await this.require(id);
     try {
-      return await this.prisma.medicine.update({ where: { id }, data: dto });
+      return shapeMedicine(await this.prisma.medicine.update({ where: { id }, data: dto }));
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
         throw new ConflictException('A medicine with that name already exists');

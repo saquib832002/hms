@@ -63,6 +63,11 @@ export const ROLE_THEME: Record<UserRole, RoleTheme> = {
   PHARMACIST: { fill: '#B98BFF', ink: '#1C0B38', text: '#6B35C9', header: '#EDE4FF' },
   BILLING_STAFF: { fill: '#FFC540', ink: '#2B1D00', text: '#8F6200', header: '#FFF2D6' },
   ADMIN: { fill: '#FF7FB0', ink: '#33061A', text: '#C21D5E', header: '#FFE2EC' },
+  // Deliberately not the pharmacist's violet. The two roles sit beside each
+  // other in a small clinic and are held by different people; a colour a
+  // technician has to squint at to tell from dispensing is a role indicator
+  // that does not indicate.
+  LAB_TECHNICIAN: { fill: '#7FE0A8', ink: '#04281A', text: '#0B7A4B', header: '#DDF7E9' },
 };
 
 const DEFAULT_ROLE: RoleTheme = ROLE_THEME.DOCTOR;

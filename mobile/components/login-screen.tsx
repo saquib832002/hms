@@ -11,13 +11,32 @@ export default function LoginScreen() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  /**
+   * The hospital's own code, shown only after something has already failed.
+   *
+   * An email address is unique *per hospital*, so one person can hold accounts
+   * at two — and login refuses to guess between them, because asking "which
+   * hospital did you mean" confirms the address is registered and at more than
+   * one place. Saying which is the way out, and the API has accepted `hospital`
+   * since login was written while **neither client could send it**: anybody in
+   * that position got *Invalid email or password* against a correct password.
+   *
+   * Revealed after **any** failure, a wrong password included — never only
+   * after the ambiguous one. Showing it exactly when the address really is at
+   * two hospitals would leak by the shape of the form what the single refusal
+   * message exists to hide.
+   */
+  const [hospital, setHospital] = useState('');
+  const [failed, setFailed] = useState(false);
+
   async function submit() {
     setBusy(true);
     setError(null);
     try {
-      await signIn(email.trim(), password);
+      await signIn(email.trim(), password, hospital.trim() || undefined);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not sign in');
+      setFailed(true);
     } finally {
       setBusy(false);
     }
@@ -59,6 +78,26 @@ export default function LoginScreen() {
             textContentType="password"
             onSubmitEditing={() => void submit()}
           />
+
+          {/* After any failure, never only after the ambiguous one. */}
+          {failed && (
+            <>
+              <TextInput
+                style={s.input}
+                value={hospital}
+                onChangeText={setHospital}
+                placeholder="Hospital code (only if you have two accounts)"
+                placeholderTextColor={theme.color.textSubtle}
+                autoCapitalize="none"
+                autoCorrect={false}
+                textContentType="organizationName"
+                onSubmitEditing={() => void submit()}
+              />
+              <Text style={s.hint}>
+                An administrator can read it off the clinic settings screen.
+              </Text>
+            </>
+          )}
 
         {error && <ErrorBanner message={error} />}
 
@@ -117,6 +156,12 @@ const s = StyleSheet.create({
     paddingHorizontal: theme.space(4),
     ...theme.font.input,
     color: theme.color.text,
+  },
+  hint: {
+    ...theme.font.caption,
+    color: theme.color.textSubtle,
+    marginTop: -theme.space(1),
+    marginBottom: theme.space(2),
   },
   devHint: {
     ...theme.font.caption,

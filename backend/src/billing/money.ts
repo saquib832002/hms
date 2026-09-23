@@ -118,11 +118,10 @@ export interface PaymentOutcome {
 /**
  * Applies a payment to an invoice.
  *
- * Overpayment is rejected rather than absorbed. A credit balance is a real
- * feature — it needs refunds, credit notes, and a way to apply the credit to a
- * future invoice — and a half-built version that just swallows the excess loses
- * the patient's money with no record of where it went. Better to refuse and
- * say so.
+ * Overpayment is still rejected rather than absorbed. Refunds now exist, but a
+ * *credit balance* — money held against a future invoice — does not, and
+ * silently swallowing an excess would lose the patient's money with no record
+ * of where it went. Refuse and say so; the desk can take the right amount.
  */
 export function applyPayment(
   totalMinor: number,
@@ -146,5 +145,60 @@ export function applyPayment(
     paidMinor,
     outstandingMinor: totalMinor - paidMinor,
     fullySettled: paidMinor === totalMinor,
+  };
+}
+
+export interface RefundOutcome {
+  /** Net held after this refund, in minor units. */
+  paidMinor: number;
+  outstandingMinor: number;
+  /** True when the invoice now holds nothing at all. */
+  fullyRefunded: boolean;
+}
+
+/**
+ * Takes money back off an invoice.
+ *
+ * WHAT THIS CAN AND CANNOT DO
+ * ---------------------------
+ * A refund may not exceed what the invoice currently *holds*. Not what was
+ * originally charged, and not the sum of payments ever made — the net after
+ * earlier refunds. Refunding twice against one payment is the obvious way to
+ * pay somebody the same money twice, and the arithmetic is the only thing that
+ * stops it.
+ *
+ * Refunding down to zero is allowed and is the ordinary case: the whole visit
+ * was charged in error. What that does *not* do is void the invoice — the
+ * charge still happened and the reversal still happened, and collapsing both
+ * into a deleted row is how a trail stops being one. Voiding afterwards is a
+ * separate, deliberate act, and it becomes possible precisely because nothing
+ * is held any more.
+ *
+ * Pure, so the boundaries can be pinned without a database. Off-by-one at the
+ * "refund exactly what is held" edge is the classic bug here and is invisible
+ * in a UI.
+ */
+export function applyRefund(
+  totalMinor: number,
+  alreadyPaidMinor: number,
+  refundMinor: number,
+): RefundOutcome {
+  if (refundMinor <= 0) throw new MoneyError('A refund must be greater than zero');
+
+  if (alreadyPaidMinor <= 0) {
+    throw new MoneyError('There is nothing to refund — no payment is held against this invoice');
+  }
+
+  if (refundMinor > alreadyPaidMinor) {
+    throw new MoneyError(
+      `Refund of ${fromMinor(refundMinor)} exceeds the ${fromMinor(alreadyPaidMinor)} held against this invoice`,
+    );
+  }
+
+  const paidMinor = alreadyPaidMinor - refundMinor;
+  return {
+    paidMinor,
+    outstandingMinor: totalMinor - paidMinor,
+    fullyRefunded: paidMinor === 0,
   };
 }

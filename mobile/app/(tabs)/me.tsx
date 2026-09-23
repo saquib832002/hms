@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useAuth } from '@/lib/auth-context';
-import { apiOrigin, switchableRoles } from '@/lib/api';
+import { apiOrigin, appEnv, switchableRoles } from '@/lib/api';
 import { clearQueueCache } from '@/lib/use-queue';
 import { useOutbox } from '@/lib/outbox-context';
 import { theme } from '@/lib/theme';
@@ -48,6 +48,13 @@ const CAN_DO: Record<UserRole, string[]> = {
     'Vitals and doses save offline and send themselves when signal returns',
   ],
   PHARMACIST: ['Dispensing queue', 'Stock and low-stock alerts'],
+  LAB_TECHNICIAN: [
+    'The worklist — what is waiting, on the bench and to authorise',
+    'Mark a sample taken, or ask for another one',
+    'Enter a result and authorise the report',
+    'Work sent here by partner hospitals',
+    'The laboratory till',
+  ],
   RECEPTIONIST: [
     'The schedule for any day — not just today',
     'Check a patient in',
@@ -239,12 +246,22 @@ export default function MeScreen() {
           ))}
         </Card>
 
-        {__DEV__ && (
-          <Card>
-            <Text style={s.sectionTitle}>Development</Text>
-            <Text style={s.meta}>API: {apiOrigin()}</Text>
-          </Card>
-        )}
+        {/*
+          Shown in every build, not only in __DEV__.
+          -----------------------------------------
+          A staging build and the production one can be installed side by side,
+          and the only reliable way to know which you are holding is to ask it.
+          "Which database did that go into" is a bad question to have to answer
+          after the fact.
+        */}
+        <Card>
+          <Text style={s.sectionTitle}>Build</Text>
+          <Text style={s.meta}>
+            {appEnv()}
+            {__DEV__ ? ' · debug' : ''}
+          </Text>
+          {__DEV__ && <Text style={s.meta}>API: {apiOrigin()}</Text>}
+        </Card>
 
         <Button label="Sign out" variant="danger" onPress={() => void onSignOut()} />
       </View>

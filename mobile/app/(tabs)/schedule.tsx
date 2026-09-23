@@ -43,7 +43,20 @@ import type { Appointment, AppointmentStatus } from '@/lib/types';
  * The buttons follow what the day *means*, not only what the API permits.
  */
 export default function ScheduleScreen() {
+  /*
+   * The appointment book, for the roles the web gives it to.
+   *
+   * This screen was reception's and the *list* is exactly what a clinician
+   * needs — the web gives DOCTOR and NURSE an Appointments item showing the
+   * same `GET /appointments?date=`. What is reception's is the *acting*:
+   * booking, checking in, marking a no-show and raising the invoice.
+   *
+   * So the day view opens to all three and the buttons do not. Building a
+   * second, read-only appointment screen would have been two lists to keep
+   * agreeing about the same rows.
+   */
   const { user } = useAuth();
+  const manages = user?.role === 'RECEPTIONIST';
   const money = useMoney();
   const timezone = user?.hospital?.timezone;
 
@@ -202,10 +215,12 @@ export default function ScheduleScreen() {
               />
               <Button label="›" variant="secondary" onPress={() => setDate(step(activeDate, 1))} />
             </View>
-            <Button
-              label="+  Book appointment"
-              onPress={() => router.push('/appointment/new')}
-            />
+            {manages && (
+              <Button
+                label="+  Book appointment"
+                onPress={() => router.push('/appointment/new')}
+              />
+            )}
           </View>
         }
         refreshControl={
@@ -265,7 +280,8 @@ export default function ScheduleScreen() {
                   Whether a patient has paid is the thing reception is asked at
                   the desk, so both states are visible on the row rather than
                   behind a tap. */}
-              {arrived &&
+              {manages &&
+                arrived &&
                 (item.invoice ? (
                   <Text style={s.invoiced}>✓ Invoiced</Text>
                 ) : (
@@ -283,7 +299,7 @@ export default function ScheduleScreen() {
                   </View>
                 ))}
 
-              {open && (
+              {open && manages && (
                 <>
                   {/* Check-in and no-show are today's business only. */}
                   {isToday && item.status === 'SCHEDULED' && (

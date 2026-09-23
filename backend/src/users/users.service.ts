@@ -13,6 +13,11 @@ import { PrismaService } from '../prisma/prisma.service';
 import { TokenService } from '../auth/token.service';
 import { AuthUser } from '../common/types/auth-user';
 import {
+  assignableRoles,
+  MODULE_LABEL,
+  roleBlockedBy,
+} from '../common/modules/tenant-modules';
+import {
   checkAccountChange,
   checkPasswordStrength,
   generateTemporaryPassword,
@@ -20,6 +25,7 @@ import {
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
+import { CreateDoctorProfileDto } from './dto/create-doctor-profile.dto';
 import { currentTenantId } from '../common/tenancy/tenant-context';
 import {
   assignedRoles,
@@ -92,8 +98,43 @@ export class UsersService {
    * doctor account that silently cannot be booked is a confusing failure to
    * diagnose later.
    */
-  async create(dto: CreateUserDto) {
+  /**
+   * A role this hospital was not sold cannot be granted.
+   *
+   * WHY THE SERVER AND NOT JUST THE PICKER
+   * --------------------------------------
+   * Both role screens already narrow their lists, and that is usability rather
+   * than a boundary — the API assumes any client can call any endpoint, and
+   * `POST /users` with `role: "DOCTOR"` is one curl away. Without this the
+   * narrowing was a suggestion, and the account it created would sign in
+   * successfully and meet a menu of nothing.
+   *
+   * ADMIN is never refused: somebody has to be able to administer the hospital
+   * whatever it holds.
+   */
+  private refuseUnsoldRoles(roles: UserRole[], actor: AuthUser) {
+    const allowed = assignableRoles(actor.hospital.modules);
+    const blocked = roles.filter((role) => !allowed.includes(role));
+    if (blocked.length === 0) return;
+
+    /*
+     * Names the module rather than the role, because that is the part an
+     * administrator can do something about — the answer is a telephone call to
+     * their provider, and "Doctor is not available" does not say so.
+     */
+    const [role] = blocked;
+    const module = roleBlockedBy(role);
+    throw new ForbiddenException(
+      module
+        ? `${MODULE_LABEL[module]} is not part of your hospital’s plan, so nobody can be given that role. Your provider can add it.`
+        : `That role cannot be granted at this hospital.`,
+    );
+  }
+
+  async create(dto: CreateUserDto, actor: AuthUser) {
     const email = dto.email.trim().toLowerCase();
+
+    this.refuseUnsoldRoles([dto.role], actor);
 
     if (dto.role === UserRole.DOCTOR && !dto.specialization?.trim()) {
       throw new BadRequestException('A doctor needs a specialization');
@@ -209,7 +250,9 @@ export class UsersService {
       const existing = await this.prisma.doctor.findUnique({ where: { userId: id } });
       if (!existing) {
         throw new BadRequestException(
-          'Create the doctor profile first — a doctor without one cannot be booked.',
+          'This person has no doctor profile yet, so they cannot be booked. ' +
+            'Add one from the roles screen — it attaches to this same account, ' +
+            'and does not need a second login.',
         );
       }
     }
@@ -229,6 +272,92 @@ export class UsersService {
 
     const { data } = await this.findAll();
     return data.find((u) => u.id === id);
+  }
+
+
+  /**
+   * Attach a clinical profile to an account that already exists.
+   *
+   * WHY THIS EXISTS
+   * ---------------
+   * `Doctor` rows could previously only be created inside `create()`, as a side
+   * effect of making a *new* user. So an administrator who is also the treating
+   * doctor — the ordinary shape of a small clinic, and the case
+   * `UserRoleAssignment` was built for — was told to create a second account
+   * with a second email and a second password for the same human.
+   *
+   * That is precisely the split multi-role exists to prevent. Two logins for
+   * one person breaks the audit trail: "what did Dr Smith do today" has no
+   * answer when half their work is under another login. It was reported by an
+   * owner who had just been provisioned and could not make himself a doctor.
+   *
+   * WHAT IS STILL ENFORCED
+   * ----------------------
+   * A doctor with no profile still cannot be booked, and `checkRoleAssignment`
+   * still refuses the DOCTOR role without one. This does not remove that rule —
+   * it gives an administrator a way to satisfy it without inventing a person.
+   */
+  async createDoctorProfile(userId: number, dto: CreateDoctorProfileDto) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { doctorProfile: { select: { id: true } } },
+    });
+    if (!user) throw new NotFoundException(`User ${userId} not found`);
+
+    /*
+     * One profile per person, and the database agrees: `Doctor.userId` is
+     * `@unique`. Checked here for a message an administrator can act on, but
+     * the constraint is what actually guarantees it — including against two
+     * admins clicking at once.
+     */
+    if (user.doctorProfile) {
+      throw new ConflictException(`${user.fullName} already has a doctor profile`);
+    }
+
+    if (!user.isActive) {
+      // A deactivated account that is bookable would put someone on the
+      // appointment grid who cannot sign in to hold the clinic.
+      throw new BadRequestException('That account is deactivated');
+    }
+
+    if (dto.departmentId !== undefined) {
+      const department = await this.prisma.department.findUnique({
+        where: { id: dto.departmentId },
+      });
+      if (!department) throw new BadRequestException(`Department ${dto.departmentId} not found`);
+    }
+
+    const doctor = await this.prisma.doctor.create({
+      data: {
+        tenantId: currentTenantId(),
+        userId,
+        /*
+         * The name comes from the account, not from the form.
+         *
+         * Two spellings of one person is how a booking list ends up with "Dr
+         * A. Smith" and "Dr Alan Smith" and nobody able to say whether they are
+         * the same clinic. Renaming is a rename of the user.
+         */
+        fullName: user.fullName,
+        specialization: dto.specialization.trim(),
+        departmentId: dto.departmentId ?? null,
+        registrationNo: dto.registrationNo?.trim() || null,
+        phone: dto.phone?.trim() || null,
+      },
+    });
+
+    return {
+      id: doctor.id,
+      userId,
+      fullName: doctor.fullName,
+      specialization: doctor.specialization,
+      /*
+       * Stated back, because it is the next thing that will block them:
+       * reception's checkout refuses for a doctor with no fee, and the
+       * receptionist finds out standing in front of a patient.
+       */
+      consultationFee: null,
+    };
   }
 
   /**
@@ -251,6 +380,17 @@ export class UsersService {
 
     const current = assignedRoles(target.roleAssignments, target.role);
     const next = [...new Set(roles)];
+
+    /*
+     * Only what is newly granted. Somebody who already holds a role whose
+     * module has since gone keeps it — taking it away here would mean a
+     * commercial change at the vendor silently stripping a member of staff
+     * mid-shift, which is a bigger act than refusing to hand out a new one.
+     */
+    this.refuseUnsoldRoles(
+      next.filter((role) => !current.includes(role)),
+      actor,
+    );
 
     const otherAdminHolders = await this.prisma.user.count({
       where: {

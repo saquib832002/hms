@@ -15,6 +15,8 @@ import {
   DrugClass,
   Gender,
   InvoiceStatus,
+  LabCategory,
+  LabSpecimenType,
   PaymentMethod,
   PrismaClient,
   UserRole,
@@ -193,11 +195,23 @@ async function main() {
       tenant.slug,
       tenant.id,
       {
+        // The seed leaves tax off: a demo hospital should look like a fresh
+        // one, and switching it on is a deliberate act.
+        taxEnabled: false,
+        pricesIncludeTax: false,
+        consultationTaxRateId: null,
         timezone: tenant.timezone,
         slotMinutes: tenant.slotMinutes,
         clinicStartHour: tenant.clinicStartHour,
         clinicEndHour: tenant.clinicEndHour,
         currency: tenant.currency,
+        pharmacyBilling: tenant.pharmacyBilling,
+        hasPharmacy: tenant.hasPharmacy,
+        acceptsExternalPrescriptions: tenant.acceptsExternalPrescriptions,
+        labBilling: tenant.labBilling,
+        hasLab: tenant.hasLab,
+        acceptsExternalLabOrders: tenant.acceptsExternalLabOrders,
+        acceptedReferralBilling: tenant.acceptedReferralBilling,
       },
     );
     console.log(
@@ -386,6 +400,123 @@ async function seedHospital(
     medicines.push(await prisma.medicine.create({ data: { ...m, tenantId, reorderLevel: 30 } }));
   }
   console.log(`  ${medicines.length} medicines`);
+
+  /*
+   * A small test catalogue, with real reference ranges.
+   *
+   * Here so the demo has something to order, and NOT the only way to create
+   * one — `POST /lab-tests` exists and `self-provisionable.spec.ts` asserts
+   * both halves of that. The medicine catalogue, doctor profiles and wards
+   * were each seed-only for six phases, and every one of them was found on a
+   * real deployment by a user rather than by a test, because an empty table and
+   * an unbuilt feature render identically.
+   *
+   * The ranges are adult, unbanded and approximate. They are demo data: a real
+   * laboratory sets its own, because an interval belongs to the analyser that
+   * produced the number rather than to the analyte.
+   */
+  const labTestSpecs: {
+    code: string;
+    name: string;
+    category: LabCategory;
+    specimenType: LabSpecimenType;
+    sellingPrice: string | null;
+    turnaroundHours: number;
+    preparation?: string;
+    analytes: {
+      name: string;
+      unit?: string;
+      refLow?: string;
+      refHigh?: string;
+      refText?: string;
+      criticalLow?: string;
+      criticalHigh?: string;
+    }[];
+  }[] = [
+    {
+      code: 'FBC',
+      name: 'Full blood count',
+      category: LabCategory.HAEMATOLOGY,
+      specimenType: LabSpecimenType.BLOOD,
+      sellingPrice: '12.0000',
+      turnaroundHours: 4,
+      preparation: 'Purple-top EDTA tube.',
+      analytes: [
+        { name: 'Haemoglobin', unit: 'g/L', refLow: '130', refHigh: '170', criticalLow: '70', criticalHigh: '200' },
+        { name: 'White cell count', unit: '10^9/L', refLow: '4', refHigh: '11', criticalLow: '1', criticalHigh: '30' },
+        { name: 'Platelets', unit: '10^9/L', refLow: '150', refHigh: '400', criticalLow: '20' },
+      ],
+    },
+    {
+      code: 'UE',
+      name: 'Urea and electrolytes',
+      category: LabCategory.BIOCHEMISTRY,
+      specimenType: LabSpecimenType.BLOOD,
+      sellingPrice: '14.0000',
+      turnaroundHours: 4,
+      analytes: [
+        // The classic critical value, and the reason the telephone-call record
+        // exists at all.
+        { name: 'Potassium', unit: 'mmol/L', refLow: '3.5', refHigh: '5.3', criticalLow: '2.5', criticalHigh: '6.5' },
+        { name: 'Sodium', unit: 'mmol/L', refLow: '133', refHigh: '146', criticalLow: '120', criticalHigh: '160' },
+        { name: 'Creatinine', unit: 'umol/L', refLow: '60', refHigh: '110' },
+      ],
+    },
+    {
+      code: 'GLU',
+      name: 'Fasting glucose',
+      category: LabCategory.BIOCHEMISTRY,
+      specimenType: LabSpecimenType.BLOOD,
+      sellingPrice: '8.0000',
+      turnaroundHours: 4,
+      preparation: 'Fasting, 8 hours. Water only.',
+      analytes: [
+        { name: 'Glucose', unit: 'mmol/L', refLow: '3.9', refHigh: '5.5', criticalLow: '2.2', criticalHigh: '25' },
+      ],
+    },
+    {
+      code: 'MSU',
+      name: 'Urine culture',
+      category: LabCategory.MICROBIOLOGY,
+      specimenType: LabSpecimenType.URINE,
+      sellingPrice: '18.0000',
+      turnaroundHours: 48,
+      preparation: 'Midstream specimen, sterile pot.',
+      // A worded range rather than a numeric one — which is why `refText`
+      // exists and why `flagFor` compares text as well as numbers.
+      analytes: [{ name: 'Culture', refText: 'No growth' }],
+    },
+    {
+      code: 'CXR',
+      name: 'Chest X-ray',
+      category: LabCategory.IMAGING,
+      // No specimen: the workflow skips collection rather than waiting for a
+      // sample that does not exist.
+      specimenType: LabSpecimenType.NONE,
+      // Deliberately unpriced, so the demo shows what an unpriced test looks
+      // like — performed, not charged for, and named back rather than
+      // silently free.
+      sellingPrice: null,
+      turnaroundHours: 24,
+      // No analytes: reports as findings and an impression, which is how
+      // imaging and histopathology work.
+      analytes: [],
+    },
+  ];
+
+  for (const spec of labTestSpecs) {
+    const { analytes, ...test } = spec;
+    await prisma.labTest.create({
+      data: {
+        ...test,
+        tenantId,
+        analytes: {
+          create: analytes.map((a, position) => ({ ...a, tenantId, position })),
+        },
+      },
+    });
+  }
+  console.log(`  ${labTestSpecs.length} lab tests`);
 
   // ── stock: a mix of healthy, low, expiring and expired ──
   let batchCount = 0;

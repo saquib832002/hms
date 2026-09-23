@@ -20,6 +20,10 @@ import { WardsModule } from './wards/wards.module';
 import { AdmissionsModule } from './admissions/admissions.module';
 import { VitalsModule } from './vitals/vitals.module';
 import { MedicationsModule } from './medications/medications.module';
+import { WardRequestsModule } from './ward-requests/ward-requests.module';
+import { ObservationsModule } from './observations/observations.module';
+import { LabModule } from './lab/lab.module';
+import { DocumentsModule } from './documents/documents.module';
 import { MedicinesModule } from './medicines/medicines.module';
 import { PharmacyModule } from './pharmacy/pharmacy.module';
 import { BillingModule } from './billing/billing.module';
@@ -28,11 +32,14 @@ import { DepartmentsModule } from './departments/departments.module';
 import { AdminModule } from './admin/admin.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PlatformModule } from './platform/platform.module';
+import { SignupModule } from './signup/signup.module';
 import { HealthModule } from './health/health.module';
 
 import { AppThrottlerGuard } from './common/guards/app-throttler.guard';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
+import { SubscriptionGuard } from './common/guards/subscription.guard';
+import { ModuleGuard } from './common/guards/module.guard';
 import { AuditInterceptor } from './common/interceptors/audit.interceptor';
 import { TenantInterceptor } from './common/interceptors/tenant.interceptor';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
@@ -56,6 +63,10 @@ import { RequestContextMiddleware } from './common/middleware/request-context.mi
     AdmissionsModule,
     VitalsModule,
     MedicationsModule,
+    WardRequestsModule,
+    ObservationsModule,
+    LabModule,
+    DocumentsModule,
     MedicinesModule,
     PharmacyModule,
     BillingModule,
@@ -64,6 +75,7 @@ import { RequestContextMiddleware } from './common/middleware/request-context.mi
     AdminModule,
     NotificationsModule,
     PlatformModule,
+    SignupModule,
     HealthModule,
   ],
   providers: [
@@ -78,6 +90,20 @@ import { RequestContextMiddleware } from './common/middleware/request-context.mi
     { provide: APP_GUARD, useClass: AppThrottlerGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
+    /*
+     * Last of the guards, and that ordering is deliberate: a request that is
+     * about to be refused for the wrong role should say so, rather than being
+     * told the subscription lapsed. Refusals are more useful when they name the
+     * first thing that was wrong.
+     */
+    { provide: APP_GUARD, useClass: SubscriptionGuard },
+    /*
+     * After the subscription guard, and the order does not matter — both refuse
+     * writes and neither refuses a read, so whichever runs first produces the
+     * more useful message. A hospital that has both lapsed and never bought the
+     * lab is told about the subscription, which is the one they can fix.
+     */
+    { provide: APP_GUARD, useClass: ModuleGuard },
 
     // Opens the tenant transaction. Must be listed BEFORE AuditInterceptor:
     // global interceptors run in registration order, and the audit write has to

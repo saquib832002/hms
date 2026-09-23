@@ -23,9 +23,34 @@ import { VitalsController, PatientVitalsController } from '../../vitals/vitals.c
 import {
   MedicationsController,
   MedicationScheduleController,
+  MedicationChartController,
 } from '../../medications/medications.controller';
 import { MedicinesController } from '../../medicines/medicines.controller';
+import { TaxRatesController } from '../../billing/tax-rates.controller';
+import { PharmacyTillController } from '../../pharmacy/pharmacy-till.controller';
+import { PharmacyPartnersController } from '../../pharmacy/partners.controller';
+import { SignupController } from '../../signup/signup.controller';
+import { DocumentsController } from '../../documents/documents.controller';
+import { LetterheadController } from '../../documents/letterhead.controller';
+import {
+  ObservationsController,
+  EscalationsController,
+} from '../../observations/observations.controller';
+import {
+  SupplyRequestsController,
+  MedicationRequestsController,
+  WardRequestsController,
+} from '../../ward-requests/ward-requests.controller';
 import { PharmacyController } from '../../pharmacy/pharmacy.controller';
+import {
+  LabOrdersController,
+  LabPartnersController,
+  LabTestsController,
+  LabWorklistController,
+} from '../../lab/lab.controller';
+import { LabTillController } from '../../lab/lab-till.controller';
+import { LabAttachmentsController } from '../../lab/lab-attachments.controller';
+import { PatientLabOrdersController } from '../../lab/patient-lab-orders.controller';
 import { BillingController } from '../../billing/billing.controller';
 import { UsersController, MePasswordController } from '../../users/users.controller';
 import { DepartmentsController } from '../../departments/departments.controller';
@@ -66,8 +91,27 @@ const CONTROLLERS = [
   PatientVitalsController,
   MedicationsController,
   MedicationScheduleController,
+  MedicationChartController,
+  SupplyRequestsController,
+  MedicationRequestsController,
+  WardRequestsController,
+  ObservationsController,
+  EscalationsController,
+  DocumentsController,
+  LetterheadController,
+  TaxRatesController,
+  PharmacyTillController,
+  PharmacyPartnersController,
+  SignupController,
   MedicinesController,
   PharmacyController,
+  LabTestsController,
+  LabOrdersController,
+  LabWorklistController,
+  LabTillController,
+  LabPartnersController,
+  LabAttachmentsController,
+  PatientLabOrdersController,
   BillingController,
   UsersController,
   MePasswordController,
@@ -125,6 +169,56 @@ const CLINICAL = (r: Route) =>
   r.controller === 'PatientVitalsController' ||
   r.controller === 'MedicationsController' ||
   r.controller === 'MedicationScheduleController' ||
+  // The drug chart names the patient, what they are on, and what they have
+  // had. Clinical by any reading — the same line the ward board draws, and
+  // admin is excluded from it for the same reason.
+  r.controller === 'MedicationChartController' ||
+  // Both request queues name a patient, a bed and a medicine, and a medication
+  // request carries a nurse's clinical reasoning in free text. Clinical by the
+  // same reading that keeps admin off the ward board.
+  r.controller === 'SupplyRequestsController' ||
+  r.controller === 'MedicationRequestsController' ||
+  r.controller === 'WardRequestsController' ||
+  // The observation plan and the escalation trail. Both name a patient, and an
+  // escalation carries a written clinical concern about their condition.
+  r.controller === 'ObservationsController' ||
+  r.controller === 'EscalationsController' ||
+  /*
+   * Diagnostics.
+   *
+   * A lab order names a patient, carries the clinical question the doctor
+   * typed, and holds their results. Clinical by the same reading that keeps
+   * admin off the ward board and the drug round — and note which lab
+   * controllers are NOT here: the catalogue is a price list, the partner
+   * directory is a list of companies, and the till is money. An administrator
+   * may read all three and no patient is reachable through any of them.
+   */
+  r.controller === 'LabOrdersController' ||
+  r.controller === 'PatientLabOrdersController' ||
+  r.controller === 'LabWorklistController' ||
+  /*
+   * An attachment is a result in a different container. The file a technician
+   * uploads is an analyser printout, an imaging report or a working note — the
+   * same content the values carry, and sometimes more of it, since nothing
+   * shapes a PDF by role on the way out. Classifying it as anything but
+   * clinical would let an administrator read a report they cannot read as data.
+   */
+  r.controller === 'LabAttachmentsController' ||
+  /*
+   * Printing.
+   *
+   * `record` is clinical: a consultation note carries a diagnosis. `prescription`
+   * deliberately is not, and that is the same carve-out the old
+   * `PrescriptionsController.print` had — reception hands the paper to the
+   * patient at the front desk and must never read the prescription as data.
+   * The two halves of that rule are asserted directly below, because a
+   * classifier exception is exactly the sort of thing that quietly widens.
+   *
+   * `invoice` is money, not clinical, and is role-shaped inside the renderer:
+   * a billing clerk's copy collapses the medicine lines exactly as their API
+   * response does.
+   */
+  (r.controller === 'DocumentsController' && r.handler === 'record') ||
   r.controller === 'AdmissionsController' ||
   r.controller === 'PatientAdmissionsController' ||
   // The ward board shows patients in beds; the bare ward list does not.
@@ -132,7 +226,14 @@ const CLINICAL = (r: Route) =>
   // The dispensing queue, prescription detail and history all name patients and
   // their medicines. Stock and deliveries carry no patient at all, and the
   // medicine catalogue is not PHI — so neither is clinical.
-  (r.controller === 'PharmacyController' && !['inventory', 'receive'].includes(r.handler)) ||
+  /*
+   * The dispensing queue, prescription detail and history all name patients and
+   * their medicines. Stock, deliveries and the pharmacy's own daily figures
+   * carry no patient at all — the dashboard is counts and money, which is why
+   * an owner reconciling the shop may read it.
+   */
+  (r.controller === 'PharmacyController' &&
+    !['inventory', 'receive', 'dashboard'].includes(r.handler)) ||
   (r.controller === 'PrescriptionsController' && r.handler !== 'print');
 
 describe('access matrix', () => {
@@ -405,13 +506,27 @@ describe('access matrix', () => {
     });
   });
 
-  it('exposes only login, refresh, logout and health publicly', () => {
+  it('exposes only login, refresh, logout, health and public signup', () => {
+    /*
+     * The exact set, not a count — the value of this assertion is that adding a
+     * fifth `@Public()` route has to be argued for here, in a diff somebody
+     * reads.
+     *
+     * `SignupController.apply` is that fifth, and CLAUDE.md has described it as
+     * such since it was written: the first public route that *writes*. It was
+     * missing from this list because `SignupController` was never in
+     * `CONTROLLERS` — the suite could not run at all until the native argon2
+     * binding was rebuilt, so nothing ever reported the omission. Three other
+     * controllers were unchecked the same way; a test nobody can run asserts
+     * nothing.
+     */
     const publicRoutes = ROUTES.filter((r) => r.isPublic).map((r) => `${r.controller}.${r.handler}`);
     expect(publicRoutes.sort()).toEqual([
       'AuthController.login',
       'AuthController.logout',
       'AuthController.refresh',
       'HealthController.check',
+      'SignupController.signup',
     ]);
   });
 
@@ -431,7 +546,11 @@ describe('access matrix', () => {
     });
 
     it('may print a prescription without being able to read it as data', () => {
-      const print = ROUTES.find((r) => r.controller === 'PrescriptionsController' && r.handler === 'print');
+      // Moved to DocumentsController when printing became a real PDF drawn on
+      // the hospital's own letterhead. The rule is unchanged.
+      const print = ROUTES.find(
+        (r) => r.controller === 'DocumentsController' && r.handler === 'prescription',
+      );
       const read = ROUTES.find((r) => r.controller === 'PrescriptionsController' && r.handler === 'findOne');
       expect(print?.roles).toContain(UserRole.RECEPTIONIST);
       expect(read?.roles).not.toContain(UserRole.RECEPTIONIST);
@@ -545,7 +664,9 @@ describe('access matrix', () => {
       const inpatient = ROUTES.filter(
         (r) =>
           ['AdmissionsController', 'PatientAdmissionsController', 'VitalsController',
-           'PatientVitalsController', 'MedicationsController', 'MedicationScheduleController'].includes(
+           'PatientVitalsController', 'MedicationsController', 'MedicationScheduleController',
+           'MedicationChartController', 'WardRequestsController',
+           'ObservationsController', 'EscalationsController'].includes(
             r.controller,
           ),
       );

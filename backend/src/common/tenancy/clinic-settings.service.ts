@@ -13,8 +13,14 @@ import { currentScope } from './tenant-context';
  * query.
  *
  * `tenants` carries no RLS policy — it is the directory the policies key on —
- * so this reads through `unscoped`. The tenant id still comes from the
- * authenticated user's row, never from the client.
+ * but this reads it through the request's own transaction rather than
+ * `unscoped`. Same rows either way; the difference is that `unscoped` asked the
+ * pool for a second connection while the request still held its first, which
+ * deadlocked the pool. See `forTenant` below and the proxy in
+ * `prisma.service.ts`.
+ *
+ * The tenant id still comes from the authenticated user's row, never from the
+ * client.
  */
 @Injectable()
 export class ClinicSettingsService {
@@ -34,14 +40,32 @@ export class ClinicSettingsService {
   }
 
   async forTenant(tenantId: number): Promise<ClinicSettings> {
-    const t = await this.prisma.unscoped.tenant.findUnique({
+    /*
+     * NOT `unscoped`.
+     *
+     * `tenants` carries no RLS policy, so reading it inside the request's
+     * transaction returns exactly the same row — and does not take a second
+     * pool connection while the first is still held. That second connection
+     * was the deadlock: see the proxy in `prisma.service.ts`.
+     */
+    const t = await this.prisma.tenant.findUnique({
       where: { id: tenantId },
       select: {
         timezone: true,
         slotMinutes: true,
         clinicStartHour: true,
         clinicEndHour: true,
+        pharmacyBilling: true,
+        hasPharmacy: true,
+        acceptsExternalPrescriptions: true,
+        labBilling: true,
+        hasLab: true,
+        acceptsExternalLabOrders: true,
+        acceptedReferralBilling: true,
         currency: true,
+        taxEnabled: true,
+        pricesIncludeTax: true,
+        consultationTaxRateId: true,
       },
     });
 
@@ -53,7 +77,36 @@ export class ClinicSettingsService {
       slotMinutes: t.slotMinutes ?? DEFAULT_CLINIC.slotMinutes,
       clinicStartHour: t.clinicStartHour ?? DEFAULT_CLINIC.clinicStartHour,
       clinicEndHour: t.clinicEndHour ?? DEFAULT_CLINIC.clinicEndHour,
+      pharmacyBilling: t.pharmacyBilling ?? DEFAULT_CLINIC.pharmacyBilling,
+      hasPharmacy: t.hasPharmacy ?? DEFAULT_CLINIC.hasPharmacy,
+      acceptsExternalPrescriptions:
+        t.acceptsExternalPrescriptions ?? DEFAULT_CLINIC.acceptsExternalPrescriptions,
+      labBilling: t.labBilling ?? DEFAULT_CLINIC.labBilling,
+      hasLab: t.hasLab ?? DEFAULT_CLINIC.hasLab,
+      acceptsExternalLabOrders:
+        t.acceptsExternalLabOrders ?? DEFAULT_CLINIC.acceptsExternalLabOrders,
+      /*
+       * An empty array is a real answer and must survive. `??` and not `||`,
+       * because `[] || fallback` yields the fallback — silently re-granting an
+       * arrangement a lab deliberately turned off, which is the one direction
+       * this must never fail.
+       */
+      acceptedReferralBilling:
+        t.acceptedReferralBilling ?? DEFAULT_CLINIC.acceptedReferralBilling,
       currency: t.currency ?? DEFAULT_CLINIC.currency,
+      /*
+       * Tax, off by default.
+       *
+       * An explicit switch rather than "are any rates defined": a hospital
+       * sets its table up, checks it, and turns it on when ready. The
+       * consultation rate is separate from the medicine default on purpose —
+       * Indian healthcare services are exempt while the medicines dispensed at
+       * the same visit are not, and one rate covering both would be wrong for
+       * whichever was configured second.
+       */
+      taxEnabled: t.taxEnabled ?? false,
+      pricesIncludeTax: t.pricesIncludeTax ?? false,
+      consultationTaxRateId: t.consultationTaxRateId ?? null,
     };
   }
 }

@@ -8,6 +8,8 @@ import { Button, Card, EmptyState, ErrorState, Skeleton } from '@/components/ui/
 import { StatusChip } from '@/components/ui/status-chip';
 import { AllergyBanner } from '@/components/allergy-banner';
 import { RecordSheet } from '@/components/record-sheet';
+import { LabOrderSheet } from '@/components/lab-order-sheet';
+import { useAuth } from '@/lib/auth-context';
 import { PrescriptionSheet } from '@/components/prescription-sheet';
 import { Freshness } from '@/components/freshness';
 import { useAutoRefresh } from '@/lib/use-auto-refresh';
@@ -28,6 +30,13 @@ export default function QueuePage() {
   const [cursor, setCursor] = useState(0);
   const [writingRecord, setWritingRecord] = useState(false);
   const [writingRx, setWritingRx] = useState(false);
+  const [requestingTests, setRequestingTests] = useState(false);
+  const { user } = useAuth();
+  /*
+   * Hidden without the laboratory, rather than shown and refused. A clinic that
+   * never bought it has nowhere to send the work.
+   */
+  const hasLab = user?.hospital.modules.includes('LABORATORY') ?? true;
 
   const load = useCallback(async () => {
     setError(null);
@@ -48,7 +57,7 @@ export default function QueuePage() {
    * prescription is worse than showing data fifteen seconds old.
    */
   const { lastUpdated, refreshing, refreshNow } = useAutoRefresh(load, {
-    enabled: !writingRecord && !writingRx,
+    enabled: !writingRecord && !writingRx && !requestingTests,
   });
 
   useEffect(() => {
@@ -148,6 +157,8 @@ export default function QueuePage() {
               onComplete={() => void setStatus(selected.id, 'COMPLETED')}
               onWriteRecord={() => setWritingRecord(true)}
               onWriteRx={() => setWritingRx(true)}
+              onOrderTests={() => setRequestingTests(true)}
+              hasLab={hasLab}
               error={error}
             />
           ) : (
@@ -180,6 +191,13 @@ export default function QueuePage() {
             patientName={selected.patient.fullName}
             onSaved={() => setWritingRx(false)}
           />
+          <LabOrderSheet
+            open={requestingTests}
+            onClose={() => setRequestingTests(false)}
+            patientId={selected.patient.id}
+            patientName={selected.patient.fullName}
+            onSaved={() => setRequestingTests(false)}
+          />
         </>
       )}
     </>
@@ -192,6 +210,8 @@ function PatientPanel({
   onComplete,
   onWriteRecord,
   onWriteRx,
+  onOrderTests,
+  hasLab,
   error,
 }: {
   item: QueueItem;
@@ -199,6 +219,9 @@ function PatientPanel({
   onComplete: () => void;
   onWriteRecord: () => void;
   onWriteRx: () => void;
+  onOrderTests: () => void;
+  /** Whether this hospital was sold the laboratory at all. */
+  hasLab: boolean;
   error: string | null;
 }) {
   const [patient, setPatient] = useState<Patient | null>(null);
@@ -271,6 +294,24 @@ function PatientPanel({
           <Button disabled={!canWrite} onClick={onWriteRx}>
             Write prescription
           </Button>
+          {/*
+            Ordering a test, from where the doctor actually is.
+            ---------------------------------------------------
+            The queue offered a record and a prescription and no way to order
+            an investigation — on either client — so a doctor mid-consultation
+            had to leave the queue, find the patient again and order from the
+            record. Ordering is as ordinary a consultation output as the other
+            two, and the API has accepted it from here all along.
+
+            Hidden without the laboratory module rather than disabled: a clinic
+            that never bought it has nowhere to send the work, and a dead
+            button is the thing the module system exists to prevent.
+          */}
+          {hasLab && (
+            <Button disabled={!canWrite} onClick={onOrderTests}>
+              Request tests
+            </Button>
+          )}
         </div>
 
         {!canWrite && (

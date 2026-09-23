@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { UserRole } from '@prisma/client';
+import { SubscriptionStatus, UserRole } from '@prisma/client';
 import { SESSION_USER_INCLUDE, SessionUserRow, toSessionUser } from './session-user';
 
 /**
@@ -30,17 +30,35 @@ const row: SessionUserRow = {
     slug: 'st-marys',
     timezone: 'America/Chicago',
     currency: 'USD',
+    subscriptionStatus: SubscriptionStatus.ACTIVE,
+    subscriptionEndsAt: null,
+    // Everything, which is what an existing hospital gets — modules narrow only
+    // when a vendor decides they should.
+    modules: ['CLINIC', 'WARDS', 'PHARMACY', 'LABORATORY', 'BILLING'],
   },
 };
 
 describe('toSessionUser', () => {
   it('carries the hospital, which is what the clients format money and times with', () => {
     const user = toSessionUser(row);
+    /*
+     * The exact key set, not a subset. This test exists because `hospital` was
+     * once built in two places and drifted — one gained a field and the other
+     * did not, so the currency was right on reload and missing immediately
+     * after signing in. A `toMatchObject` here would pass through exactly that.
+     */
     expect(user.hospital).toEqual({
       name: "St Mary's",
       slug: 'st-marys',
       timezone: 'America/Chicago',
       currency: 'USD',
+      // Carried so `SubscriptionGuard` can answer "may this write?" without a
+      // second query, and so both clients can warn before anything stops.
+      subscriptionStatus: SubscriptionStatus.ACTIVE,
+      subscriptionEndsAt: null,
+    // Everything, which is what an existing hospital gets — modules narrow only
+    // when a vendor decides they should.
+    modules: ['CLINIC', 'WARDS', 'PHARMACY', 'LABORATORY', 'BILLING'],
     });
   });
 

@@ -123,7 +123,9 @@ export default function InvoicesPage() {
             onChange={(e) => setStatus(e.target.value)}
             className="w-auto text-sm"
           >
-            <option value="">All statuses</option>
+            {/* Same ambiguity as the column header — this filter sits next to
+                a patient list and needs to say which status it filters. */}
+            <option value="">All payment statuses</option>
             <option value="PENDING">Pending</option>
             <option value="PARTIALLY_PAID">Partially paid</option>
             <option value="PAID">Paid</option>
@@ -154,7 +156,19 @@ export default function InvoicesPage() {
           <table className="w-full border-collapse">
             <thead>
               <tr>
-                {['Invoice', 'Patient', 'Issued', 'Due', 'Total', 'Outstanding', 'Status'].map((h) => (
+                {/* "Payment status", not "Status". On a screen that also lists
+                    patients, a bare "Status" reads as the patient's — and the
+                    values here (Pending, Paid, Overdue) are ambiguous enough to
+                    let that misreading stand. */}
+                {[
+                  'Invoice',
+                  'Patient',
+                  'Issued',
+                  'Due',
+                  'Total',
+                  'Outstanding',
+                  'Payment status',
+                ].map((h) => (
                   <th
                     key={h}
                     className="sticky top-0 border-b border-border bg-surface px-3 py-2 text-left text-xxs font-semibold uppercase tracking-wider text-text-subtle"

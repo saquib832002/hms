@@ -94,8 +94,99 @@ export const TENANT_SCOPED_MODELS = new Set([
   'dispenseEvent',
   'dispenseLine',
   'payment',
+  // Money going back out. Scoped exactly like `payment` — it is the same
+  // ledger read from the other direction, and one hospital's reversals are
+  // none of another's business.
+  'refund',
   'invoiceItem',
   'userRoleAssignment',
+  /*
+   * Cross-tenant prescribing, and both rows are ordinarily scoped.
+   *
+   * `pharmacyPartner` belongs to the hospital doing the sending — who they may
+   * send to is their business and nobody else's. `prescriptionReferral` and its
+   * items belong to the RECEIVING pharmacy: the whole design is that a copy is
+   * transmitted into their tenant rather than access being granted to another
+   * hospital's row, so there is nothing special about these once written.
+   *
+   * The one moment that is unusual is the write itself, which happens inside
+   * the destination tenant's scope — see `transmitReferral`.
+   */
+  /*
+   * Tax rates belong to the hospital that set them.
+   *
+   * Scoped like any other tenant table — and it matters more than it looks:
+   * the rates a hospital charges, and which of its medicines are exempt, is
+   * commercial information about that business. A missing policy here would
+   * make it readable by every other tenant on the platform.
+   */
+  'taxRate',
+  'taxRateComponent',
+  'pharmacyPartner',
+  'prescriptionReferral',
+  'prescriptionReferralItem',
+  /*
+   * What a ward asked for, and what a prescriber answered.
+   *
+   * Both carry a patient and an admission, so they are as clinical as the
+   * chart they hang off. A medication request also carries a nurse's clinical
+   * reasoning in free text — "vomiting since 04:00, has not kept the morning
+   * dose down" — which is a note about a patient by any reading.
+   */
+  'supplyRequest',
+  'medicationRequest',
+  /*
+   * How closely a patient is watched, and who was told when they deteriorated.
+   *
+   * Both hang off an admission and name a patient. An escalation carries a
+   * nurse's written concern about somebody's condition, which is as clinical as
+   * anything in the system.
+   */
+  'observationOrder',
+  'observationEscalation',
+  /*
+   * Diagnostics. All eight are ordinarily scoped, including both halves of the
+   * cross-tenant path.
+   *
+   * `labPartner` belongs to the hospital doing the sending. `labReferral` and
+   * its items belong to the RECEIVING lab — a copy transmitted into their
+   * tenant, exactly as a prescription referral is.
+   *
+   * The lab is the first feature where data crosses in BOTH directions, and it
+   * still needs no exception: the result is written back into the *ordering*
+   * hospital's scope, onto rows they already own. Two unusual moments, both
+   * inside `forTenant` and nowhere else — see `transmitLabReferral` and
+   * `returnResult` in `lab/lab-referral.service.ts`.
+   *
+   * `labTest` and `labAnalyte` are the catalogue and carry no patient, but a
+   * hospital's test menu and its prices are its own commercial information —
+   * the same argument that scopes `taxRate`.
+   */
+  'labTest',
+  'labAnalyte',
+  'labOrder',
+  'labOrderItem',
+  'labResultValue',
+  'labPartner',
+  /*
+   * Written by the *receiving* laboratory into the sending hospital's scope,
+   * and read only by them — the second thing in this system that crosses the
+   * boundary in that direction, after the lab result write-back. Scoped like
+   * any other row of theirs; no policy exception anywhere.
+   */
+  'partnerLabCharge',
+  'labReferral',
+  'labReferralItem',
+  /*
+   * Attached files, and the bytes behind them.
+   *
+   * `labAttachmentData` holds a patient's laboratory report. It is scoped like
+   * everything else and carries the ordinary policy — there is nothing special
+   * about a blob once it has a `tenantId`, and treating it as special is how a
+   * table ends up outside the mechanism that protects the rest.
+   */
+  'labAttachment',
+  'labAttachmentData',
 ]);
 
 /** Models deliberately outside tenancy — both hang off User. */
@@ -120,7 +211,14 @@ export const GLOBAL_MODELS = new Set(['refreshToken', 'device', 'tenant']);
  * `tenantId` and no policy at all — and the checks below exist precisely to
  * catch that second thing.
  */
-export const PLATFORM_MODELS = new Set(['platformUser', 'breakGlassGrant']);
+export const PLATFORM_MODELS = new Set([
+  'platformUser',
+  'breakGlassGrant',
+  // An applicant's name, email and phone belong to the vendor's sales record,
+  // not to any hospital — and one hospital must never see that another applied.
+  // Same inverted policy as the two above.
+  'tenantApplication',
+]);
 
 /** Write operations that must carry `tenantId` in their payload. */
 const WRITE_OPS = new Set(['create', 'createMany', 'createManyAndReturn', 'upsert']);

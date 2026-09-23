@@ -1,5 +1,6 @@
 import {
   applyPayment,
+  applyRefund,
   fromMinor,
   MoneyError,
   sumAmounts,
@@ -160,5 +161,63 @@ describe('applyPayment', () => {
     it.each([0, -1, -500])('rejects a payment of %i', (amount) => {
       expect(() => applyPayment(total, 0, amount)).toThrow(/greater than zero/);
     });
+  });
+});
+
+describe('applyRefund', () => {
+  const total = 120_00;
+
+  it('reduces what the invoice holds and reopens the balance', () => {
+    /*
+     * The honest reading of a refund: the charge still stands and the money is
+     * no longer here, so outstanding goes back up. An implementation that left
+     * `amountPaid` alone would show a settled invoice the clinic cannot
+     * actually account for.
+     */
+    expect(applyRefund(total, 120_00, 50_00)).toEqual({
+      paidMinor: 70_00,
+      outstandingMinor: 50_00,
+      fullyRefunded: false,
+    });
+  });
+
+  it('allows refunding exactly what is held', () => {
+    // The boundary. Off-by-one here either blocks a legitimate full refund or
+    // allows paying somebody a penny more than they gave you.
+    expect(applyRefund(total, 120_00, 120_00)).toEqual({
+      paidMinor: 0,
+      outstandingMinor: 120_00,
+      fullyRefunded: true,
+    });
+  });
+
+  it('refuses a refund larger than what is held', () => {
+    expect(() => applyRefund(total, 50_00, 50_01)).toThrow(/exceeds the 50\.00 held/);
+  });
+
+  it('caps repeated refunds at what remains, not at what was charged', () => {
+    /*
+     * The way to pay somebody the same money twice. After refunding 100 of a
+     * 120 payment, only 20 is left — the original charge is irrelevant.
+     */
+    const first = applyRefund(total, 120_00, 100_00);
+    expect(first.paidMinor).toBe(20_00);
+    expect(() => applyRefund(total, first.paidMinor, 30_00)).toThrow(/exceeds the 20\.00 held/);
+  });
+
+  it('refuses to refund an invoice holding nothing', () => {
+    expect(() => applyRefund(total, 0, 10_00)).toThrow(/nothing to refund/);
+  });
+
+  it.each([0, -1, -500])('rejects a refund of %i', (amount) => {
+    expect(() => applyRefund(total, 120_00, amount)).toThrow(/greater than zero/);
+  });
+
+  it('does not drift over many partial refunds', () => {
+    // Integer minor units throughout. Ten refunds of 0.01 must leave exactly
+    // 119.90 held, not 119.89999999999999.
+    let paid = 120_00;
+    for (let i = 0; i < 10; i++) paid = applyRefund(total, paid, 1).paidMinor;
+    expect(fromMinor(paid)).toBe('119.90');
   });
 });

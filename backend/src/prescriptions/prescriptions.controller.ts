@@ -2,23 +2,22 @@ import {
   Body,
   Controller,
   Get,
-  Header,
   Param,
   ParseIntPipe,
   Patch,
   Post,
-  Res,
 } from '@nestjs/common';
-import { Response } from 'express';
-import { UserRole } from '@prisma/client';
+import { UserRole, TenantModule } from '@prisma/client';
 import { PrescriptionsService } from './prescriptions.service';
 import { CreatePrescriptionDto } from './dto/create-prescription.dto';
 import { Roles } from '../common/decorators/roles.decorator';
+import { RequiresModule } from '../common/decorators/requires-module.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { AuditAction } from '../common/decorators/audit.decorator';
 import { AuthUser } from '../common/types/auth-user';
 
 @Controller('prescriptions')
+@RequiresModule(TenantModule.CLINIC)
 export class PrescriptionsController {
   constructor(private readonly prescriptions: PrescriptionsService) {}
 
@@ -36,14 +35,15 @@ export class PrescriptionsController {
     return this.prescriptions.findOne(id, user);
   }
 
-  /** Reception may print, but never read the prescription as data. */
-  @Get(':id/print')
-  @Roles(UserRole.DOCTOR, UserRole.RECEPTIONIST, UserRole.PHARMACIST)
-  @Header('Content-Type', 'text/html; charset=utf-8')
-  @AuditAction('PRESCRIPTION_PRINT')
-  async print(@Param('id', ParseIntPipe) id: number, @Res() res: Response) {
-    res.send(await this.prescriptions.renderPrintable(id));
-  }
+  /*
+   * `GET :id/print` used to live here and returned hand-built HTML with
+   * `<h1>Meridian Hospital</h1>` — the demo seed's name — on every tenant's
+   * prescriptions. It is replaced by `GET /documents/prescriptions/:id/pdf`,
+   * which draws the calling hospital's own letterhead and returns a real PDF.
+   *
+   * Removed rather than kept alongside: two renderers of the same document
+   * drift, and the one that drifts is the one nobody is looking at.
+   */
 
   @Patch(':id/cancel')
   @Roles(UserRole.DOCTOR)

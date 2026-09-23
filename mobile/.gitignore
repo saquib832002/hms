@@ -3,3 +3,19 @@ node_modules/
 dist/
 *.tsbuildinfo
 .env.local
+
+# Release credentials. Committing any of these is the worst mistake available
+# in this directory, and each is a plausible one:
+#
+#   play-service-account.json  authorises uploads to this app's Play listing
+#   *.jks / *.keystore         the upload key; a leaked one lets somebody else
+#                              sign something Play will accept as an update
+#   credentials.json           where EAS keeps local keystore passwords
+#
+# `eas.json` names the service account by path on purpose, so the file sits
+# here beside it and is easy to forget. Hence the ignore rather than trust.
+play-service-account.json
+*-service-account.json
+credentials.json
+*.jks
+*.keystore

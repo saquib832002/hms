@@ -15,7 +15,14 @@ import { useLiveData } from '@/lib/use-live-data';
 import { theme } from '@/lib/theme';
 import { relativeAge } from '@/lib/format';
 import { AppHeader, Button, Card, ErrorBanner, Field, Screen } from '@/components/ui';
-import type { AdminDashboard, DoctorReport, DoctorReportRow, FinanceReport } from '@/lib/types';
+import type {
+  AdminDashboard,
+  DoctorReport,
+  DoctorReportRow,
+  FinanceReport,
+  TenantModule,
+} from '@/lib/types';
+import { useAuth } from '@/lib/auth-context';
 import { useMoney } from '@/lib/use-money';
 
 /**
@@ -52,6 +59,19 @@ import { useMoney } from '@/lib/use-money';
  */
 export default function OverviewScreen() {
   const fmt = useMoney();
+  const { user } = useAuth();
+  /*
+   * The owner's overview is the floor — every tenant has one — and nearly every
+   * card on it belonged to a module. A pharmacy-only tenant read appointments,
+   * occupancy and a doctors list, all empty, and nothing about the shop it
+   * runs. Zeroes for something never bought read as breakage.
+   */
+  const has = (m: TenantModule) => user?.hospital.modules?.includes(m) ?? true;
+  const clinic = has('CLINIC');
+  const wards = has('WARDS');
+  const billing = has('BILLING');
+  const pharmacy = has('PHARMACY');
+  const laboratory = has('LABORATORY');
   const [dashboard, setDashboard] = useState<AdminDashboard | null>(null);
   const [finance, setFinance] = useState<FinanceReport | null>(null);
   const [doctors, setDoctors] = useState<DoctorReport | null>(null);
@@ -137,25 +157,76 @@ export default function OverviewScreen() {
           <>
             <Text style={s.group}>Today</Text>
             <View style={s.row}>
-              <Metric label="Appointments" value={dashboard.appointments.today} />
-              <Metric label="Completed" value={dashboard.appointments.completedToday} tone={theme.color.success} />
+              {clinic && <Metric label="Appointments" value={dashboard.appointments.today} />}
+              {clinic && (
+                <Metric
+                  label="Completed"
+                  value={dashboard.appointments.completedToday}
+                  tone={theme.color.success}
+                />
+              )}
+              {/* What left the shelf, and whether any of it was uncharged —
+                  the two questions a shop owner opens this screen with. */}
+              {pharmacy && <Metric label="Dispensed" value={dashboard.pharmacy.dispensesToday} />}
+              {pharmacy && (
+                <Metric
+                  label="Unpriced"
+                  value={dashboard.pharmacy.unpricedSalesToday}
+                  tone={
+                    dashboard.pharmacy.unpricedSalesToday > 0 ? theme.color.warning : undefined
+                  }
+                />
+              )}
+              {laboratory && (
+                <Metric label="Tests ordered" value={dashboard.laboratory.ordersToday} />
+              )}
+              {/* Resulted but not authorised: finished from the bench and
+                  invisible to the doctor who asked. */}
+              {laboratory && (
+                <Metric
+                  label="To authorise"
+                  value={dashboard.laboratory.awaitingAuthorisation}
+                  tone={
+                    dashboard.laboratory.awaitingAuthorisation > 0
+                      ? theme.color.warning
+                      : undefined
+                  }
+                />
+              )}
             </View>
 
             {/* Takings, counted from payments actually received — not from
                 invoices raised, which is a different number that looks the
                 same and moves at roughly the same times. */}
+            {/*
+              NET is the headline, not gross.
+              -----------------------------
+              This showed `collected.today`, so a payment refunded in full still
+              read as money taken — while billing's payments ledger, which is
+              signed, showed nothing for the same day. Two screens disagreeing
+              about one day is worse than either being wrong alone.
+
+              Gross in and gross out stay underneath: reconciling against a bank
+              statement needs them, because a day that took 5,000 and refunded
+              500 is not the same day as one that took 4,500.
+            */}
+            {billing && (
+            <>
             <Text style={s.group}>Money in</Text>
             <Card>
-              <Text style={s.muted}>Collected today</Text>
+              <Text style={s.muted}>Kept today</Text>
               <Text style={[s.big, { color: theme.color.success }]}>
-                {finance ? fmt(finance.collected.today) : '—'}
+                {finance ? fmt(finance.net.today) : '—'}
               </Text>
               <Text style={s.muted}>
                 {finance
-                  ? `${finance.collected.paymentsToday} payments · ${fmt(
-                      finance.collected.thisMonth,
-                    )} this month`
+                  ? `${fmt(finance.collected.today)} in · ${fmt(finance.refunded.today)} back · ${
+                      finance.collected.paymentsToday
+                    } payments`
                   : ' '}
+              </Text>
+              <Text style={s.muted}>
+                {finance ? `${fmt(finance.net.thisMonth)} kept this month` : ' '}
               </Text>
             </Card>
 
@@ -192,7 +263,11 @@ export default function OverviewScreen() {
                   : ''}
               </Text>
             </Card>
+            </>
+            )}
 
+            {wards && (
+            <>
             <Text style={s.group}>Occupancy</Text>
             <Card>
               <Text
@@ -208,8 +283,10 @@ export default function OverviewScreen() {
                 {dashboard.occupancy.available} free
               </Text>
             </Card>
+            </>
+            )}
 
-            {doctors && <Doctors report={doctors} fmt={fmt} onPrice={setPricing} />}
+            {clinic && doctors && <Doctors report={doctors} fmt={fmt} onPrice={setPricing} />}
 
             <Text style={s.group}>Staff and access</Text>
             <View style={s.row}>

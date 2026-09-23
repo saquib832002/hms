@@ -1,10 +1,11 @@
 import { Body, Controller, Get, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
 import { IsOptional, IsString, MaxLength } from 'class-validator';
-import { UserRole } from '@prisma/client';
+import { UserRole, TenantModule } from '@prisma/client';
 import { MedicinesService } from './medicines.service';
 import { CreateMedicineDto } from './dto/create-medicine.dto';
 import { UpdateMedicineDto } from './dto/update-medicine.dto';
 import { Roles } from '../common/decorators/roles.decorator';
+import { RequiresModule } from '../common/decorators/requires-module.decorator';
 import { AuditAction } from '../common/decorators/audit.decorator';
 
 class MedicineQueryDto {
@@ -16,6 +17,7 @@ class LinkItemDto {
 }
 
 @Controller('medicines')
+@RequiresModule(TenantModule.PHARMACY)
 export class MedicinesController {
   constructor(private readonly medicines: MedicinesService) {}
 

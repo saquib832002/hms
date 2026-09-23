@@ -1,0 +1,23 @@
+-- The requester on a lab order is optional.
+--
+-- WHY THIS IS ITS OWN MIGRATION
+-- -----------------------------
+-- It belongs with `20260906120000_referral_accession` and was originally
+-- appended to it — after that migration had already been applied. Prisma
+-- records a checksum per migration, so editing an applied one is never picked
+-- up by `migrate deploy` and can fail it outright with a checksum mismatch.
+-- The symptom was a null-constraint violation on `doctorId` from a client whose
+-- schema said the column was nullable and a database where it was not.
+--
+-- Never edit an applied migration. Add another one.
+--
+-- WHY THE COLUMN IS NULLABLE
+-- --------------------------
+-- A referring clinician works at another company, and `doctors` requires a
+-- `users` row — so representing them would mean fabricating a login and putting
+-- somebody who does not work here into the staff list. The requester's name
+-- travels on the referral instead.
+--
+-- It also unblocks the standalone laboratory, which has no CLINIC module and
+-- therefore no doctors at all.
+ALTER TABLE "lab_orders" ALTER COLUMN "doctorId" DROP NOT NULL;

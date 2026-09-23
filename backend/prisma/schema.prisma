@@ -19,6 +19,21 @@ enum UserRole {
   RECEPTIONIST
   PHARMACIST
   BILLING_STAFF
+
+  /// Runs the diagnostic lab: receives specimens, enters results, authorises
+  /// reports.
+  ///
+  /// Its own role rather than an extension of PHARMACIST, which was the cheap
+  /// option. A pharmacist who can read every blood result in the hospital is a
+  /// minimum-necessary failure, and in any hospital larger than one room these
+  /// are different people. A small clinic where they are the same person is
+  /// what multi-role assignment already exists for.
+  ///
+  /// Deliberately NOT clinical in the sense ADMIN is barred from: a lab
+  /// technician sees the patient, the order and the result, because they cannot
+  /// do the work otherwise. They do not see the diagnosis, the notes, the drug
+  /// chart or the rest of the record — the same shape as PHARMACIST.
+  LAB_TECHNICIAN
 }
 
 enum AppointmentStatus {
@@ -28,6 +43,109 @@ enum AppointmentStatus {
   COMPLETED
   CANCELLED
   NO_SHOW
+}
+
+/// Where a prescription is meant to be filled.
+///
+/// WHY THIS EXISTS
+/// ---------------
+/// Every prescription previously landed in the hospital's own dispensing queue,
+/// because there was nowhere else for one to go. That is wrong in two ordinary
+/// situations: a clinic with no pharmacy accumulates a queue nobody works, and
+/// a patient who intends to use the chemist near their home still shows as
+/// waiting at a counter they will never visit.
+///
+/// A DESTINATION IS NOT A REFUSAL
+/// ------------------------------
+/// Marking a prescription external must never stop the hospital's own pharmacy
+/// dispensing it if the patient turns up. People change their minds, and a
+/// routing note hardening into "computer says no" is the same failure the
+/// payment gate and the subscription guard both refuse.
+enum PrescriptionDestination {
+  /// The hospital's own pharmacy. The default where one exists.
+  IN_HOUSE
+  /// The patient takes it away. Printed, and filled wherever they choose.
+  EXTERNAL
+  /// Sent to a named partner pharmacy running on this platform. See
+  /// `PrescriptionReferral` for why that is a copy rather than shared access.
+  PARTNER
+}
+
+/// Where a hospital stands with the vendor commercially.
+///
+/// WHAT THIS MUST NEVER DO
+/// -----------------------
+/// It never blocks a read, and it never blocks signing in. A clinician losing
+/// access to a patient record mid-consultation because a card expired is a
+/// patient-safety event caused by a billing event nobody in the building knew
+/// about — the same class of mistake as gating medicine on payment, which
+/// `consultation-billing.spec.ts` refuses.
+///
+/// LAPSED means writes are refused and everything remains readable. That is
+/// commercial leverage a hospital can act on without anyone being harmed by it.
+enum SubscriptionStatus {
+  /// Evaluating. Behaves exactly like ACTIVE until `subscriptionEndsAt` passes.
+  TRIAL
+  ACTIVE
+  /// Payment overdue, still fully working. A warning state the vendor sets by
+  /// hand — deliberately distinct from lapsing, because chasing an invoice and
+  /// restricting a hospital are different decisions taken at different times.
+  PAST_DUE
+  /// Writes refused, reads allowed. Set by the vendor, or reached by expiry.
+  SUSPENDED
+  /// Offboarded. Same behaviour as SUSPENDED — the data must survive the
+  /// retention period, so this is never a delete.
+  CANCELLED
+}
+
+/// Whether the pharmacy bills on its own account or on the hospital's.
+///
+/// A hospital pharmacy is very often a separate business — separate books,
+/// separate till, sometimes a separate owner — and just as often it is a
+/// department that puts everything on one bill. Neither is a preference about
+/// how screens look; each changes which invoice a dispense lands on, who can
+/// see the drug names, and whose takings the money counts towards.
+///
+/// SEPARATE is the default because it is the one that keeps medicine names away
+/// from a role that has no clinical business with them. A hospital that wants
+/// one bill opts in, which is the right way round for a decision with that
+/// consequence.
+enum PharmacyBillingMode {
+  /// Medicines are charged on their own PHARMACY invoice, paid at the pharmacy
+  /// counter, and counted as the pharmacy's takings.
+  SEPARATE
+  /// Medicines are appended to the patient's hospital invoice, so there is one
+  /// balance to settle. Billing staff see a rolled-up total, never the drugs.
+  COMBINED
+}
+
+/// What an invoice is for. Drives who may see it and whose takings it is.
+enum InvoiceKind {
+  HOSPITAL
+  PHARMACY
+  /// Diagnostics, when the lab bills as its own business. Kept apart from
+  /// PHARMACY rather than folded into a general "ancillary" kind, because a
+  /// hospital may run one, both or neither, and the two settle at different
+  /// counters into different tills.
+  LAB
+}
+
+/// What an invoice line is for.
+///
+/// This is the field the role-shaped invoice response keys on: MEDICINE lines
+/// name a drug, and a drug name on a bill is a clinical fact. Billing staff get
+/// them collapsed into one total; the pharmacist who sold them sees the detail.
+enum InvoiceItemKind {
+  SERVICE
+  MEDICINE
+  /// A diagnostic test, and the sharpest clinical leak on an invoice.
+  ///
+  /// A drug name implies a condition. A test name frequently **is** the
+  /// question: "HIV antibody", "Beta-hCG", "Drug screen" on a bill tells a
+  /// billing clerk something the patient told their doctor in confidence, and
+  /// often something they have not told anybody else. Collapsed for
+  /// BILLING_STAFF by `invoice-response.ts` exactly as MEDICINE lines are.
+  LAB_TEST
 }
 
 enum InvoiceStatus {
@@ -80,12 +198,255 @@ enum AdmissionStatus {
 /// Why a scheduled dose did not simply happen.
 /// REFUSED and WITHHELD are clinically distinct and must not be merged:
 /// the patient declined, versus a clinician decided against giving it.
+/// How often this patient's observations are due.
+///
+/// EXPLICIT INTERVALS, AND NO "CONTINUOUS"
+/// --------------------------------------
+/// Every member names a real charting interval, because the board has to work
+/// out whether a set is overdue and cannot do that against a word. "Continuous
+/// monitoring" is deliberately absent rather than mapped to a guessed number:
+/// it means the patient is on a monitor, which is a different thing from how
+/// often somebody writes a set down, and inventing an interval for it would
+/// make the board confidently wrong about the sickest patient on the ward.
+/// Fifteen-minutely is what a paper chart uses for that case.
+enum ObservationFrequency {
+  QUARTER_HOURLY
+  HALF_HOURLY
+  HOURLY
+  TWO_HOURLY
+  FOUR_HOURLY
+  SIX_HOURLY
+  TWELVE_HOURLY
+  DAILY
+}
+
+/// A ward's request for stock the pharmacy holds.
+///
+/// No CANCELLED member yet: a ward that no longer needs something says so in a
+/// note and the pharmacist declines it, which keeps one person deciding what
+/// leaves the shelf. Worth revisiting if wards start raising many in error.
+enum SupplyRequestStatus {
+  REQUESTED
+  SUPPLIED
+  DECLINED
+}
+
+/// A nurse's request that a doctor prescribe something.
+///
+/// PRESCRIBED rather than APPROVED, because the thing that closes this request
+/// is a real `Prescription` existing — not somebody agreeing in principle. A
+/// status that can be set without the prescription being written would let the
+/// chart and the request disagree about whether a medicine exists.
+enum MedicationRequestStatus {
+  REQUESTED
+  PRESCRIBED
+  DECLINED
+}
+
 enum DoseStatus {
   DUE
   GIVEN
   MISSED
   REFUSED
   WITHHELD
+}
+
+// ───────────────────────────── diagnostics ─────────────────────────────
+
+/// What kind of work a test is, which decides who does it and how it reports.
+///
+/// IMAGING is in the same list as the bench disciplines deliberately. An
+/// ultrasound and a full blood count are the same thing to everybody except
+/// the person performing them: a clinician orders it, somebody does it, a
+/// report comes back and is attached to the patient. Two parallel modules
+/// would mean two queues, two report screens and two places to look for
+/// "what did we order for this patient", which is the question being asked.
+enum LabCategory {
+  HAEMATOLOGY
+  BIOCHEMISTRY
+  MICROBIOLOGY
+  SEROLOGY
+  HISTOPATHOLOGY
+  IMAGING
+  OTHER
+}
+
+/// What has to be taken from the patient before the test can be run.
+///
+/// NONE is what makes imaging fit: an X-ray needs no specimen, so the workflow
+/// skips collection rather than pretending a phantom tube exists. A queue full
+/// of imaging orders waiting to be "collected" would be a queue nobody could
+/// clear.
+enum LabSpecimenType {
+  BLOOD
+  URINE
+  STOOL
+  SWAB
+  SPUTUM
+  TISSUE
+  FLUID
+  /// Imaging and anything else performed on the patient directly.
+  NONE
+}
+
+/// How quickly it is wanted.
+///
+/// This changes the order of the worklist and nothing else. It deliberately
+/// does not page anybody — see `LabOrder.criticalNotifiedAt` for why a control
+/// that looks like it summons a human and does not is worse than none.
+enum LabPriority {
+  ROUTINE
+  URGENT
+  /// Immediately, and ahead of everything. Real in a hospital lab.
+  STAT
+}
+
+/// Where a test is meant to be performed. Mirrors `PrescriptionDestination`,
+/// for the same reasons and with the same rule: a destination is a filter,
+/// never a refusal.
+enum LabOrderDestination {
+  /// This hospital's own lab. The default where one exists.
+  IN_HOUSE
+  /// A lab that is not on this platform. Printed for the patient to carry, and
+  /// the result typed back in when it arrives on paper.
+  EXTERNAL
+  /// A named partner lab running on this platform. See `LabReferral` — what
+  /// crosses is a copy, and the result comes back the same way.
+  PARTNER
+}
+
+/// Where an order has got to.
+///
+/// REJECTED is separate from CANCELLED and the distinction is the point. A
+/// cancelled order is one nobody wants any more; a rejected one is a specimen
+/// that could not be used — haemolysed, clotted, insufficient, mislabelled —
+/// and it means somebody has to take blood from the patient **again**.
+/// Collapsing them would turn "we need another sample" into "never mind",
+/// which is discovered when a doctor chases a result that is never coming.
+enum LabOrderStatus {
+  ORDERED
+  /// Specimen taken, or the patient sent for imaging.
+  COLLECTED
+  /// On the bench.
+  IN_PROGRESS
+  /// Values entered, not yet authorised. Deliberately not visible to the
+  /// ordering doctor as a result — see `verifiedAt`.
+  RESULTED
+  /// Authorised by the lab, and only now a result anybody may act on.
+  VERIFIED
+  CANCELLED
+  /// The specimen was unusable. Needs recollection.
+  REJECTED
+}
+
+/// How a single value compares with its reference range.
+///
+/// CRITICAL_LOW and CRITICAL_HIGH are separate members rather than a severity
+/// flag on ABNORMAL because they mean something operationally different: a
+/// critical value obliges somebody to pick up a telephone, and a report that
+/// renders it the same colour as a mildly raised one has lost the only piece of
+/// information that changes what happens next.
+enum LabResultFlag {
+  NORMAL
+  LOW
+  HIGH
+  /// Outside the range, where the range is not a simple pair of numbers —
+  /// "Growth of E. coli" against an expected "No growth".
+  ABNORMAL
+  CRITICAL_LOW
+  CRITICAL_HIGH
+  /// No range was defined for this analyte, so nothing was compared. Stated
+  /// rather than reported as NORMAL: "looked and found nothing wrong" and
+  /// "did not look" render identically and mean opposite things.
+  UNKNOWN
+}
+
+/// A part of the product a hospital has been sold.
+///
+/// WHY THIS IS NOT A ROLE, A PLAN OR A BOOLEAN COLUMN
+/// --------------------------------------------------
+/// Not a role: roles say what a *person* may do inside a hospital that has the
+/// feature. This says whether the hospital has it at all, and the two answer to
+/// different people — an administrator grants roles, only the vendor grants
+/// modules.
+///
+/// Not a plan, yet: named tiers bundle these, and every real agreement at this
+/// stage is negotiated one at a time. A plan table can wrap this later without
+/// changing a single enforcement point, whereas starting with plans means
+/// building the override mechanism the first time somebody buys "lab plus
+/// billing".
+///
+/// Not five booleans on `Tenant`: an array is one column to read, one to write,
+/// and one thing for `ModuleGuard` to check. Five booleans is five places to
+/// forget.
+///
+/// WHAT IS DELIBERATELY NOT HERE
+/// -----------------------------
+/// Patients, staff accounts, roles, departments, clinic settings, the
+/// letterhead and the audit log. Every tenant needs somebody to serve, somebody
+/// to serve them, and a record of who did what — a "module" nobody can turn off
+/// is not a module, it is the product.
+enum TenantModule {
+  /// Outpatient work: appointments, doctors, the queue, consultation records
+  /// and prescribing.
+  CLINIC
+  /// Inpatient work: admissions, the ward board, vitals, the drug round,
+  /// observation orders and ward requests.
+  WARDS
+  /// Dispensing, stock, counter sales, the pharmacy till and partner
+  /// pharmacies.
+  PHARMACY
+  /// The test catalogue, the worklist, results, the lab till and partner labs.
+  LABORATORY
+  /// Hospital invoicing: invoices, payments, aging and the finance reports.
+  /// The pharmacy and lab tills come with their own modules, because a
+  /// standalone shop has to be able to take money without buying the
+  /// hospital's ledger.
+  BILLING
+}
+
+/// Whether the lab is a department of the hospital or a business beside it.
+/// Mirrors `PharmacyBillingMode` exactly, and for the same three questions:
+/// whose invoice a test lands on, who may take the payment, and whose takings
+/// it counts towards.
+enum LabBillingMode {
+  /// Tests are charged on their own LAB invoice, paid at the lab counter, and
+  /// reported apart from the hospital's takings.
+  SEPARATE
+  /// Tests are appended to the patient's open hospital invoice, so there is one
+  /// balance to settle. Billing staff still never see a test name.
+  COMBINED
+}
+
+/// Who settles with the laboratory for work one hospital referred to another.
+///
+/// Both are ordinary commercial arrangements and neither is a default anybody
+/// should be given silently.
+///
+/// `ORIGIN_PAYS` is the reference-laboratory contract: the specimen travels,
+/// the patient never learns which lab ran the test, and the lab invoices the
+/// institution that sent it. `PATIENT_PAYS` is the requisition model — the
+/// clinic writes the request and charges nothing for it, and the patient walks
+/// into the diagnostic centre and pays at the counter.
+///
+/// **The difference is not only the debtor.** It decides where the patient
+/// physically is, and therefore when work can start and when money can be
+/// taken: under `ORIGIN_PAYS` the hospital bills at ordering and the lab bills
+/// an institution that is not standing there, and under `PATIENT_PAYS` nothing
+/// is billed until the patient arrives — which is also the moment the specimen
+/// is taken, so collection is where the unpaid invoice belongs.
+///
+/// Held on the partnership rather than on either tenant. One laboratory
+/// routinely has a wholesale contract with a hospital group and takes walk-in
+/// referrals from a single-doctor clinic down the road; a tenant-level field
+/// cannot express one lab with two commercial relationships.
+enum ReferralBilling {
+  /// The referring hospital settles with the lab, and recovers it from the
+  /// patient itself. `Invoice.patientId` is null at the lab.
+  ORIGIN_PAYS
+  /// The patient settles at the lab counter. The referring hospital raises no
+  /// charge at all — which is *not* the same as failing to price one.
+  PATIENT_PAYS
 }
 
 // ───────────────────────────── tenancy ─────────────────────────────
@@ -113,7 +474,29 @@ model Tenant {
 
   /// Set instead of deleting. An offboarded hospital's rows must survive for
   /// the retention period; a deactivated tenant simply cannot authenticate.
-  isActive  Boolean  @default(true)
+  isActive Boolean @default(true)
+
+  /// ── What this hospital was sold ─────────────────────────────────────────
+  ///
+  /// A standalone laboratory is a real customer of this product, and so is a
+  /// pharmacy. Neither manages doctors, admits patients or runs a ward, and
+  /// showing them those screens is not a harmless extra — it is a menu of
+  /// things that do not work, and a role list offering staff who have nothing
+  /// to do.
+  ///
+  /// An array on the tenant rather than a plan name, deliberately. A plan is a
+  /// commercial fact that changes for reasons this system does not model —
+  /// discounts, pilots, a hospital that bought the lab a year after the clinic
+  /// — and the day somebody sells a combination the enum does not have, the
+  /// only exit is a migration. What the code needs to ask is always "does this
+  /// hospital have the laboratory", and that question is answered by a set.
+  ///
+  /// The default is every module, so every existing hospital keeps exactly the
+  /// product it already had. An empty array is legal and means a tenant that
+  /// can register patients, keep staff accounts and read its audit log —
+  /// which is the correct floor, because those are the things no customer can
+  /// be without.
+  modules TenantModule[] @default([CLINIC, WARDS, PHARMACY, LABORATORY, BILLING])
 
   // ── the clinic day ──────────────────────────────────────────────────────
   //
@@ -144,33 +527,202 @@ model Tenant {
   clinicStartHour Int @default(9)
   clinicEndHour   Int @default(17)
 
+  /// Whether medicines are billed by the pharmacy or on the hospital's invoice.
+  /// See `PharmacyBillingMode`. Default is deliberately the restrictive one.
+  pharmacyBilling PharmacyBillingMode @default(SEPARATE)
+
+  /// Does this hospital run a pharmacy at all?
+  ///
+  /// Many small clinics do not, and for them the dispensing queue, the stock
+  /// screens and the PHARMACIST role are all furniture for a room that does not
+  /// exist. When false every prescription is external and the doctor is not
+  /// asked the question.
+  hasPharmacy Boolean @default(true)
+
+  /// ── Letterhead ───────────────────────────────────────────────────────────
+  ///
+  /// What goes at the top of anything this hospital prints and hands to a
+  /// patient. The prescription renderer had `<h1>Meridian Hospital</h1>` written
+  /// into it — the demo seed's name, on every tenant's prescriptions. A patient
+  /// walked into a pharmacy holding a document naming a hospital they had never
+  /// attended, and a pharmacist cannot tell a rendering fault from a forgery.
+  ///
+  /// Every field is optional and the document degrades rather than refusing: a
+  /// clinic that has filled none still prints under its own name.
+  addressLine1 String?
+  addressLine2 String?
+  city         String?
+  postcode     String?
+  country      String?
+  contactPhone String?
+  contactEmail String?
+  website      String?
+
+  /// The hospital's own licence number, printed in the header. Statutory on a
+  /// prescription in most of the places this product is aimed at.
+  registrationNo String?
+
+  /// Small print: VAT number, complaints address, "not a receipt". Free text,
+  /// because what a jurisdiction demands here differs everywhere.
+  footerText String?
+
+  /// `data:image/png;base64,...`. On the row rather than in object storage:
+  /// file storage is the riskiest item in Phase 8 and none of it exists. The
+  /// API caps the upload, and `ClinicSettingsService` does not select this, so
+  /// it is read when a document prints and not on every request.
+  logoDataUrl String?
+
+  /// Will this pharmacy accept prescriptions written at another hospital?
+  ///
+  /// The receiving half of a two-sided opt-in. A hospital must not be able to
+  /// send work to a pharmacy that never agreed to handle it, and — just as
+  /// important — a tenant must not become discoverable to every other tenant
+  /// without saying so. Default false: appearing in somebody else's directory
+  /// is a decision, not an accident.
+  acceptsExternalPrescriptions Boolean @default(false)
+
+  /// ── Diagnostics ──────────────────────────────────────────────────────────
+
+  /// Whether tests are billed by the lab or on the hospital's invoice.
+  /// See `LabBillingMode`. Default is the restrictive one, as with the pharmacy.
+  labBilling LabBillingMode @default(SEPARATE)
+
+  /// Does this hospital run a lab at all?
+  ///
+  /// Most small clinics do not — they draw the blood and send it out, or send
+  /// the patient. For them the worklist and the LAB_TECHNICIAN role are
+  /// furniture for a room that does not exist, and every order should default
+  /// to leaving the building rather than joining a queue nobody works.
+  hasLab Boolean @default(true)
+
+  /// Will this lab accept orders raised at another hospital?
+  ///
+  /// The receiving half of the same two-sided opt-in the pharmacy uses, and
+  /// default false for the same reason: appearing in another hospital's
+  /// directory is a decision, not something that happens because a column
+  /// defaulted true.
+  acceptsExternalLabOrders Boolean @default(false)
+
+  /// Which payers this lab will take referred work under. See
+  /// `ReferralBilling`.
+  ///
+  /// The second half of the handshake, and it has to exist: the sending
+  /// hospital chooses the mode, and one side alone must not be able to decide
+  /// who ends up owing the money. A lab with no accounts-receivable function
+  /// declares `[PATIENT_PAYS]` and cannot be handed an institutional debt; one
+  /// that will not chase individual patients declares `[ORIGIN_PAYS]` and
+  /// cannot be handed that job.
+  ///
+  /// An array rather than two booleans, for the reason `modules` is one: a lab
+  /// that does both is the common case, and two flags would be two places to
+  /// forget. An empty array means it accepts external orders under no billing
+  /// arrangement at all, which is a real state — and the partner lookup says so
+  /// rather than reporting the lab as not found.
+  ///
+  /// Defaults to `[ORIGIN_PAYS]`, which is what every lab predating this was
+  /// silently doing.
+  acceptedReferralBilling ReferralBilling[] @default([ORIGIN_PAYS])
+
+  /// Work we sent out and have not yet settled with the laboratory.
+  partnerLabCharges     PartnerLabCharge[] @relation("PartnerLabChargeOwner")
+  /// Work other hospitals sent us, as it appears in *their* books.
+  partnerLabChargesOwed PartnerLabCharge[] @relation("PartnerLabChargeLab")
+
+  // ── the vendor relationship ─────────────────────────────────────────────
+  //
+  // Columns rather than a `Subscription` model, because there is exactly one
+  // per hospital and the alternative invites a "current subscription" lookup
+  // that can return two rows. History lives in that hospital's audit log,
+  // where every platform action is already written.
+
+  subscriptionStatus SubscriptionStatus @default(TRIAL)
+
+  /// When the current period ends. NULL means open-ended — an invoiced
+  /// customer with no fixed renewal, which is normal for a hospital contract.
+  ///
+  /// NULL is deliberately *not* treated as expired. A missing date is an
+  /// absence of information, and defaulting an absence to "cut them off" is how
+  /// a data-entry gap becomes an outage in a hospital.
+  subscriptionEndsAt DateTime?
+
+  /// Free text for the vendor: PO number, who signed, why it was extended.
+  /// Never shown to the hospital.
+  subscriptionNote String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  users                      User[]
-  doctors                    Doctor[]
-  departments                Department[]
-  patients                   Patient[]
-  wards                      Ward[]
-  beds                       Bed[]
-  medicines                  Medicine[]
-  stockBatches               StockBatch[]
-  invoices                   Invoice[]
-  appointments               Appointment[]
-  prescriptions              Prescription[]
-  admissions                 Admission[]
-  medicalRecords             MedicalRecord[]
-  auditLogs                  AuditLog[]
-  allergies                  Allergy[]
-  prescriptionItems          PrescriptionItem[]
-  vitals                     Vital[]
-  medicationAdministrations  MedicationAdministration[]
-  dispenseEvents             DispenseEvent[]
-  dispenseLines              DispenseLine[]
-  payments                   Payment[]
-  invoiceItems               InvoiceItem[]
-  roleAssignments            UserRoleAssignment[]
-  breakGlassGrants           BreakGlassGrant[]
+  users                     User[]
+  doctors                   Doctor[]
+  departments               Department[]
+  patients                  Patient[]
+  wards                     Ward[]
+  beds                      Bed[]
+  medicines                 Medicine[]
+  stockBatches              StockBatch[]
+  invoices                  Invoice[]
+  appointments              Appointment[]
+  prescriptions             Prescription[]
+  admissions                Admission[]
+  medicalRecords            MedicalRecord[]
+  auditLogs                 AuditLog[]
+  allergies                 Allergy[]
+  prescriptionItems         PrescriptionItem[]
+  vitals                    Vital[]
+  medicationAdministrations MedicationAdministration[]
+  dispenseEvents            DispenseEvent[]
+  dispenseLines             DispenseLine[]
+  payments                  Payment[]
+  refunds                   Refund[]
+  invoiceItems              InvoiceItem[]
+  roleAssignments           UserRoleAssignment[]
+  breakGlassGrants          BreakGlassGrant[]
+  pharmacyPartners          PharmacyPartner[]          @relation("PartnerOwner")
+  partnerOf                 PharmacyPartner[]          @relation("PartnerPharmacy")
+  referralsReceived         PrescriptionReferral[]     @relation("ReferralReceiver")
+  referralsSent             PrescriptionReferral[]     @relation("ReferralSender")
+  referralItems             PrescriptionReferralItem[]
+  labTests                  LabTest[]
+  labAnalytes               LabAnalyte[]
+  labOrders                 LabOrder[]
+  labOrderItems             LabOrderItem[]
+  labResultValues           LabResultValue[]
+  labPartners               LabPartner[]               @relation("LabPartnerOwner")
+  labPartnerOf              LabPartner[]               @relation("LabPartnerLab")
+  labReferralsReceived      LabReferral[]              @relation("LabReferralReceiver")
+  labReferralsSent          LabReferral[]              @relation("LabReferralSender")
+  labReferralItems          LabReferralItem[]
+  labAttachments            LabAttachment[]
+  labAttachmentData         LabAttachmentData[]
+  /// Tax off entirely, and off by default.
+  ///
+  /// Not merely "no rates defined". A hospital can set its rates up, check
+  /// them, and switch them on when it is ready — rather than the first rate it
+  /// creates silently taxing every sale, which is what an implicit switch
+  /// would do. It also gives the screens something to gate on, so a clinic
+  /// that charges no tax never sees a tax column at all.
+  taxEnabled                Boolean                    @default(false)
+
+  /// Whether the prices staff type already contain tax.
+  ///
+  /// India: the MRP printed on a box includes GST and is the number the
+  /// patient expects to pay, so tax is extracted from it. United States: the
+  /// shelf price is net and tax is added at the till. Both are "the price is
+  /// 10.00" and they mean different amounts of money.
+  pricesIncludeTax Boolean @default(false)
+
+  /// The rate applied to consultation fees, if any. Deliberately separate from
+  /// the medicine default: in India healthcare services are largely exempt
+  /// while the medicines dispensed at the same visit are not, and collapsing
+  /// the two would make one of them wrong.
+  consultationTaxRateId Int?
+
+  taxRates          TaxRate[]
+  taxRateComponents TaxRateComponent[]
+  supplyRequests     SupplyRequest[]
+  medicationRequests MedicationRequest[]
+  observationOrders      ObservationOrder[]
+  observationEscalations ObservationEscalation[]
 
   @@map("tenants")
 }
@@ -199,10 +751,85 @@ model PlatformUser {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  grants        BreakGlassGrant[] @relation("GrantHolder")
-  grantsCreated BreakGlassGrant[] @relation("GrantCreator")
+  grants               BreakGlassGrant[]   @relation("GrantHolder")
+  grantsCreated        BreakGlassGrant[]   @relation("GrantCreator")
+  applicationsReviewed TenantApplication[]
 
   @@map("platform_users")
+}
+
+/// Somebody asking to become a customer.
+///
+/// WHY THIS IS NOT A `Tenant` ROW WITH isActive = false
+/// ----------------------------------------------------
+/// The tempting shortcut is to have public signup create an inactive hospital
+/// and have approval flip the flag. It is a trap in two directions.
+///
+/// Anyone on the internet could then create rows in `tenants` — the table every
+/// piece of tenancy keys on — at whatever rate they liked, and a half-built
+/// hospital would be indistinguishable from a real one that had been suspended.
+/// `slug` is also `@unique`, so a script could squat every plausible hospital
+/// name before a real customer reached the form.
+///
+/// And it conflates two different facts: "these people asked" and "this
+/// hospital exists". A rejected application must stay on record without ever
+/// having been a hospital, which a flag on `tenants` cannot express.
+///
+/// So an application is its own thing, owned by the vendor, and approval is the
+/// moment a `Tenant` is created.
+model TenantApplication {
+  id Int @id @default(autoincrement())
+
+  /// What they want to be called, and the slug they would like. The slug is a
+  /// *request* — it is checked for collision at approval, not at signup, so a
+  /// public form cannot be used to probe which hospitals already exist.
+  hospitalName  String
+  requestedSlug String?
+
+  contactName  String
+  contactEmail String
+  contactPhone String?
+
+  /// Free text: how many staff, what they need, where they heard about it.
+  /// Deliberately unstructured — a signup form that interrogates somebody
+  /// before they have agreed to anything loses most of them.
+  notes String?
+
+  /// What the applicant asked for. Applied at approval, validated then.
+  timezone String?
+  currency String?
+
+  status TenantApplicationStatus @default(PENDING)
+
+  /// Set on approval. The hospital that came out of this application.
+  tenantId Int?
+
+  reviewedBy   PlatformUser? @relation(fields: [reviewedById], references: [id])
+  reviewedById Int?
+  reviewedAt   DateTime?
+  /// Required when rejecting, and kept: "why did we turn them down" is a
+  /// question somebody asks months later.
+  reviewNote   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// The IP the form was submitted from, for abuse triage only.
+  ///
+  /// Not indexed and not used for rate limiting — the throttler does that in
+  /// memory. This exists so a flood of junk applications can be recognised as
+  /// one source rather than fifty separate decisions.
+  submittedFromIp String?
+
+  @@index([status, createdAt])
+  @@index([contactEmail])
+  @@map("tenant_applications")
+}
+
+enum TenantApplicationStatus {
+  PENDING
+  APPROVED
+  REJECTED
 }
 
 /// Time-boxed permission for one platform user to look at one hospital.
@@ -235,9 +862,9 @@ model BreakGlassGrant {
   expiresAt DateTime
   revokedAt DateTime?
 
-  createdAt          DateTime @default(now())
-  createdBy          PlatformUser @relation("GrantCreator", fields: [createdById], references: [id])
-  createdById        Int
+  createdAt   DateTime     @default(now())
+  createdBy   PlatformUser @relation("GrantCreator", fields: [createdById], references: [id])
+  createdById Int
 
   @@index([tenantId])
   @@index([platformUserId, expiresAt])
@@ -247,9 +874,9 @@ model BreakGlassGrant {
 // ───────────────────────────── identity ─────────────────────────────
 
 model User {
-  id           Int      @id @default(autoincrement())
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
-  tenantId Int
+  id           Int    @id @default(autoincrement())
+  tenant       Tenant @relation(fields: [tenantId], references: [id])
+  tenantId     Int
   email        String
   passwordHash String
   fullName     String
@@ -262,10 +889,10 @@ model User {
   /// *default*, and the assignments say what else the person may switch to.
   /// The default is always one of the assigned roles — assertRolesConsistent
   /// pins that.
-  role         UserRole
-  isActive     Boolean  @default(true)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  role      UserRole
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   // Login lockout — see AuthService.login
   failedLoginAttempts Int       @default(0)
@@ -276,23 +903,38 @@ model User {
   /// response signals it and the client cannot proceed until it is cleared —
   /// an admin-chosen password is known to at least two people, which is one
   /// too many for a credential that reads patient records.
-  mustChangePassword  Boolean   @default(false)
+  mustChangePassword Boolean @default(false)
 
   /// Every role this person may act as. See UserRoleAssignment.
-  roleAssignments      UserRoleAssignment[]
+  roleAssignments UserRoleAssignment[]
 
-  doctorProfile        Doctor?
-  auditLogs            AuditLog[]
-  refreshTokens        RefreshToken[]
-  devices              Device[]
-  dispensedPrescriptions Prescription[] @relation("DispensedBy")
-  recordedVitals       Vital[]         @relation("VitalsRecordedBy")
-  administeredDoses    MedicationAdministration[] @relation("DosesGivenBy")
-  dispenseEvents       DispenseEvent[] @relation("DispensedEvents")
-  paymentsReceived     Payment[]       @relation("PaymentsReceived")
+  doctorProfile          Doctor?
+  auditLogs              AuditLog[]
+  refreshTokens          RefreshToken[]
+  devices                Device[]
+  dispensedPrescriptions Prescription[]             @relation("DispensedBy")
+  recordedVitals         Vital[]                    @relation("VitalsRecordedBy")
+  administeredDoses      MedicationAdministration[] @relation("DosesGivenBy")
+  supplyRequestsRaised     SupplyRequest[]     @relation("SupplyRequestedBy")
+  supplyRequestsAnswered   SupplyRequest[]     @relation("SupplyRespondedBy")
+  medRequestsRaised        MedicationRequest[] @relation("MedRequestedBy")
+  medRequestsAnswered      MedicationRequest[] @relation("MedRespondedBy")
+  observationOrdersSet     ObservationOrder[]      @relation("ObsOrderSetBy")
+  escalationsRaised        ObservationEscalation[] @relation("EscalationRaisedBy")
+  dispenseEvents         DispenseEvent[]            @relation("DispensedEvents")
+  paymentsReceived       Payment[]                  @relation("PaymentsReceived")
+  refundsIssued          Refund[]                   @relation("RefundsIssued")
+  reversedDispenses      DispenseEvent[]            @relation("ReversedDispenses")
+  labCollections         LabOrder[]                 @relation("LabCollectedBy")
+  labVerifications       LabOrder[]                 @relation("LabVerifiedBy")
+  partnerLabSettlements  PartnerLabCharge[]         @relation("PartnerLabChargeSettledBy")
+  labCancellations       LabOrder[]                 @relation("LabCancelledBy")
+  labResultsEntered      LabOrderItem[]             @relation("LabResultedBy")
+  labCriticalCalls       LabOrderItem[]             @relation("LabCriticalNotifiedBy")
+  labAttachmentsUploaded LabAttachment[]            @relation("LabAttachmentUploadedBy")
 
-  @@index([tenantId])
   @@unique([tenantId, email])
+  @@index([tenantId])
   @@map("users")
 }
 
@@ -318,15 +960,15 @@ model User {
 /// in use, so the trail reads "Dr Smith, acting as ADMIN, viewed the
 /// dashboard" — which is the sentence a compliance review needs.
 model UserRoleAssignment {
-  id     Int      @id @default(autoincrement())
-  tenant Tenant   @relation(fields: [tenantId], references: [id])
+  id       Int      @id @default(autoincrement())
+  tenant   Tenant   @relation(fields: [tenantId], references: [id])
   tenantId Int
-  user   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  userId Int
-  role   UserRole
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId   Int
+  role     UserRole
 
   /// Who granted it and when. Granting oneself ADMIN is the interesting row.
-  grantedAt DateTime @default(now())
+  grantedAt   DateTime @default(now())
   grantedById Int?
 
   /// One row per role per user — assigning DOCTOR twice is a no-op, not a
@@ -376,8 +1018,8 @@ model RefreshToken {
 
 model Doctor {
   id             Int         @id @default(autoincrement())
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
-  tenantId Int
+  tenant         Tenant      @relation(fields: [tenantId], references: [id])
+  tenantId       Int
   user           User        @relation(fields: [userId], references: [id])
   userId         Int         @unique
   fullName       String
@@ -386,6 +1028,13 @@ model Doctor {
   department     Department? @relation(fields: [departmentId], references: [id])
   phone          String?
   registrationNo String?
+
+  /// "MBBS, MD (Medicine)" — printed under the name on a prescription, where in
+  /// most of this product's markets it is expected and sometimes required.
+  ///
+  /// Free text: qualification schemes differ by country, and an enum would be
+  /// wrong everywhere except where it was written.
+  qualifications String?
 
   /// What this doctor charges for a consultation, in the hospital's currency.
   ///
@@ -397,11 +1046,12 @@ model Doctor {
   /// Decimal, never a float — see billing/money.ts.
   consultationFee Decimal? @db.Decimal(10, 2)
 
-  createdAt      DateTime    @default(now())
+  createdAt DateTime @default(now())
 
   appointments   Appointment[]
   prescriptions  Prescription[]
   medicalRecords MedicalRecord[]
+  labOrders      LabOrder[]
 
   @@index([departmentId])
   @@index([tenantId])
@@ -409,14 +1059,14 @@ model Doctor {
 }
 
 model Department {
-  id      Int      @id @default(autoincrement())
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  id       Int      @id @default(autoincrement())
+  tenant   Tenant   @relation(fields: [tenantId], references: [id])
   tenantId Int
-  name    String
-  doctors Doctor[]
+  name     String
+  doctors  Doctor[]
 
-  @@index([tenantId])
   @@unique([tenantId, name])
+  @@index([tenantId])
   @@map("departments")
 }
 
@@ -424,8 +1074,8 @@ model Department {
 
 model Patient {
   id                    Int      @id @default(autoincrement())
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
-  tenantId Int
+  tenant                Tenant   @relation(fields: [tenantId], references: [id])
+  tenantId              Int
   fullName              String
   dob                   DateTime
   gender                Gender
@@ -440,6 +1090,20 @@ model Patient {
   /// deliberately absent from a doctor's response, which has no use for it.
   insurerName           String?
   insurancePolicyNumber String?
+
+  /// Registered because another hospital sent work here, not because they
+  /// walked in.
+  ///
+  /// A reference laboratory has to register a referred patient — it labels
+  /// tubes and prints a report carrying their identifiers, and ISO 15189 makes
+  /// the *performing* lab accountable for that. What it must not do is put a
+  /// stranger into the list reception searches, which is the same objection
+  /// that keeps a pharmacy walk-in out of `Patient` entirely.
+  ///
+  /// So the row exists and is flagged, and patient search excludes it. The
+  /// laboratory reaches these through its own worklist.
+  isReferralOrigin      Boolean  @default(false)
+
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 
@@ -450,6 +1114,8 @@ model Patient {
   allergies      Allergy[]
   admissions     Admission[]
   vitals         Vital[]
+  dispenseEvents DispenseEvent[]
+  labOrders      LabOrder[]
 
   // Powers ⌘K search. Tenant-prefixed because every query under RLS is
   // `tenant_id = X AND full_name …` — a bare index on the name alone no
@@ -463,8 +1129,8 @@ model Patient {
 /// Surfaced on every patient view in the UI and cross-checked when prescribing.
 model Allergy {
   id        Int             @id @default(autoincrement())
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
-  tenantId Int
+  tenant    Tenant          @relation(fields: [tenantId], references: [id])
+  tenantId  Int
   patient   Patient         @relation(fields: [patientId], references: [id], onDelete: Cascade)
   patientId Int
   substance String
@@ -479,8 +1145,8 @@ model Allergy {
 
 model MedicalRecord {
   id          Int      @id @default(autoincrement())
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
-  tenantId Int
+  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+  tenantId    Int
   patient     Patient  @relation(fields: [patientId], references: [id])
   patientId   Int
   doctor      Doctor?  @relation(fields: [doctorId], references: [id])
@@ -499,8 +1165,8 @@ model MedicalRecord {
 
 model Appointment {
   id          Int               @id @default(autoincrement())
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
-  tenantId Int
+  tenant      Tenant            @relation(fields: [tenantId], references: [id])
+  tenantId    Int
   patient     Patient           @relation(fields: [patientId], references: [id])
   patientId   Int
   doctor      Doctor            @relation(fields: [doctorId], references: [id])
@@ -513,6 +1179,7 @@ model Appointment {
 
   prescription Prescription?
   invoice      Invoice?
+  labOrders    LabOrder[]
 
   // NO plain @@unique here, and the reason matters.
   //
@@ -534,17 +1201,32 @@ model Appointment {
 }
 
 model Prescription {
-  id            Int                @id @default(autoincrement())
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
-  tenantId Int
-  patient       Patient            @relation(fields: [patientId], references: [id])
+  id            Int          @id @default(autoincrement())
+  tenant        Tenant       @relation(fields: [tenantId], references: [id])
+  tenantId      Int
+  patient       Patient      @relation(fields: [patientId], references: [id])
   patientId     Int
-  doctor        Doctor             @relation(fields: [doctorId], references: [id])
+  doctor        Doctor       @relation(fields: [doctorId], references: [id])
   doctorId      Int
-  appointment   Appointment?       @relation(fields: [appointmentId], references: [id])
-  appointmentId Int?               @unique
-  issuedAt      DateTime           @default(now())
+  appointment   Appointment? @relation(fields: [appointmentId], references: [id])
+  appointmentId Int?         @unique
+  issuedAt      DateTime     @default(now())
   notes         String?
+
+  /// Where this is meant to be filled. See `PrescriptionDestination`.
+  ///
+  /// The hospital's own queue shows IN_HOUSE only, so a prescription the
+  /// patient is taking elsewhere stops appearing as work nobody is doing. It is
+  /// a filter, never a refusal: if the patient walks up to the counter anyway,
+  /// the pharmacist can pull it in.
+  destination PrescriptionDestination @default(IN_HOUSE)
+
+  /// The partner pharmacy it was sent to, when destination is PARTNER.
+  ///
+  /// This is the *other* hospital's id, held on this hospital's row purely as
+  /// a record of where the copy went. It grants nothing — the receiving
+  /// pharmacy reads its own `PrescriptionReferral`, never this row.
+  routedToTenantId Int?
 
   // Gives the "cannot be edited once dispensed" rule something to check.
   status        PrescriptionStatus @default(ISSUED)
@@ -554,6 +1236,8 @@ model Prescription {
 
   items          PrescriptionItem[]
   dispenseEvents DispenseEvent[]
+  /// Set when this prescription was written in answer to a nurse's request.
+  fromRequests   MedicationRequest[]
 
   @@index([patientId, issuedAt])
   @@index([doctorId, issuedAt])
@@ -564,8 +1248,8 @@ model Prescription {
 
 model PrescriptionItem {
   id             Int          @id @default(autoincrement())
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
-  tenantId Int
+  tenant         Tenant       @relation(fields: [tenantId], references: [id])
+  tenantId       Int
   prescription   Prescription @relation(fields: [prescriptionId], references: [id], onDelete: Cascade)
   prescriptionId Int
 
@@ -581,20 +1265,36 @@ model PrescriptionItem {
   /// the catalogue link. That also makes the migration safe — a nullable FK
   /// backfilled by name, with unmatched rows surfacing for a human rather than
   /// failing the migration.
-  medicineName   String
-  medicine       Medicine?    @relation(fields: [medicineId], references: [id])
-  medicineId     Int?
+  medicineName String
+  medicine     Medicine? @relation(fields: [medicineId], references: [id])
+  medicineId   Int?
 
-  dosage         String
-  frequency      String
-  duration       String
+  dosage    String
+  frequency String
+  duration  String
 
-  /// Running total across dispense events. `PrescriptionStatus` moves to
-  /// PARTIALLY_DISPENSED or DISPENSED off the back of this.
+  /// How many units the prescriber is ordering.
+  ///
+  /// WHY THIS HAD TO EXIST
+  /// There was no ordered quantity at all. Completion was decided by inferring
+  /// one from the free-text `frequency` and `duration` — and when either could
+  /// not be parsed the inference returned null, `complete` could never be true,
+  /// and the prescription stayed PARTIALLY_DISPENSED forever even though the
+  /// pharmacist had handed over exactly what was asked for.
+  ///
+  /// Nullable, and the absence is meaningful: a PRN or open-ended course
+  /// genuinely has no total, so the pharmacist decides when it is finished
+  /// rather than the system guessing. What it must never mean again is "the
+  /// parser could not read the duration".
+  quantityPrescribed Int?
+
+  /// Running total across dispense events, in the same units as
+  /// `quantityPrescribed` — whole units handed over, not doses.
   quantityDispensed Int @default(0)
 
   administrations MedicationAdministration[]
   dispenseLines   DispenseLine[]
+  supplyRequests  SupplyRequest[]
 
   @@index([prescriptionId])
   @@index([medicineId])
@@ -604,22 +1304,160 @@ model PrescriptionItem {
 
 // ───────────────────────────── inpatient ─────────────────────────────
 
-model Ward {
-  id    Int    @id @default(autoincrement())
+/// A pharmacy at another hospital that this one may send prescriptions to.
+///
+/// THE SENDING HALF OF A TWO-SIDED OPT-IN
+/// --------------------------------------
+/// The obvious design is "list every tenant that has a pharmacy". It is a trap:
+/// it turns the vendor's customer list into something any doctor at any
+/// hospital can browse, which is the same enumeration problem that made the
+/// public signup form refuse to say whether an email had applied before.
+///
+/// So a hospital adds partners by the slug the pharmacy gives them offline, and
+/// the lookup answers only for tenants that have set
+/// `acceptsExternalPrescriptions`. Nobody can discover anybody.
+model PharmacyPartner {
+  id       Int    @id @default(autoincrement())
+  /// The hospital doing the sending. This row belongs to them.
+  tenant   Tenant @relation("PartnerOwner", fields: [tenantId], references: [id])
+  tenantId Int
+
+  /// The pharmacy being sent to.
+  partner         Tenant @relation("PartnerPharmacy", fields: [partnerTenantId], references: [id])
+  partnerTenantId Int
+
+  /// What the sending hospital calls them. Their own label — a doctor picking
+  /// from a list wants "Apollo, MG Road", not a slug.
+  label String
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@unique([tenantId, partnerTenantId])
+  @@index([tenantId])
+  @@map("pharmacy_partners")
+}
+
+/// A prescription transmitted to another hospital's pharmacy.
+///
+/// WHY THIS IS A COPY AND NOT SHARED ACCESS
+/// ----------------------------------------
+/// The alternative was a policy exception: make a prescription tagged for
+/// hospital B visible to B. One line, and it ends the property that makes the
+/// rest of the isolation provable — `tenantId = app_current_tenant()` stops
+/// being the whole truth, and every future reader of that policy has to know
+/// about the carve-out. The first mistake in it is a cross-hospital breach.
+///
+/// So nothing is shared. A snapshot is written into the receiving tenant, owned
+/// by them, subject to their policy like any other row. This is how real
+/// e-prescribing works: you transmit a message, you do not grant database
+/// access.
+///
+/// IT IS A SNAPSHOT, DELIBERATELY
+/// ------------------------------
+/// The medicines are copied as text at the moment of sending, not read live
+/// from the source prescription. A later edit at the prescribing hospital must
+/// not silently change what another company is about to hand a patient — the
+/// same reasoning that keeps `DispenseLine.unitPrice` and
+/// `PrescriptionItem.medicineName` as captured values.
+///
+/// WHAT IT CARRIES, AND WHAT IT DOES NOT
+/// -------------------------------------
+/// Enough to identify the person and dispense: name, date of birth, the
+/// medicines, who prescribed them. No diagnosis, no notes, no history, and no
+/// allergies — minimum-necessary applies across a company boundary at least as
+/// strongly as it does across a role boundary. The consequence is stated rather
+/// than hidden: the receiving pharmacist is told no allergy check was possible.
+model PrescriptionReferral {
+  id       Int    @id @default(autoincrement())
+  /// The RECEIVING pharmacy. This row is theirs.
+  tenant   Tenant @relation("ReferralReceiver", fields: [tenantId], references: [id])
+  tenantId Int
+
+  /// Where it came from. Recorded as an id *and* a name, because the name is
+  /// what a pharmacist reads and it must survive the sending hospital
+  /// renaming itself later.
+  sourceTenant     Tenant @relation("ReferralSender", fields: [sourceTenantId], references: [id])
+  sourceTenantId   Int
+  sourceTenantName String
+
+  /// The prescription at the other hospital. An identifier for support and
+  /// audit, not something this tenant can read.
+  sourcePrescriptionId Int
+
+  /// What the patient quotes at the counter. Short, unambiguous, and unique
+  /// within the receiving pharmacy so it can be typed rather than searched.
+  reference String
+
+  patientName String
+  patientDob  DateTime?
+
+  prescriberName           String
+  prescriberRegistrationNo String?
+
+  /// When the doctor wrote it, not when it arrived.
+  issuedAt DateTime
+
+  /// Set when this pharmacy has handed the medicines over.
+  dispensedAt     DateTime?
+  /// The sale that filled it. Nullable until then.
+  dispenseEventId Int?
+
+  /// Set if the receiving pharmacy declines it — out of stock, not their
+  /// patient, anything. Kept rather than deleted: a referral that vanished is
+  /// indistinguishable from one that never arrived.
+  declinedAt    DateTime?
+  declineReason String?
+
+  createdAt DateTime @default(now())
+
+  items PrescriptionReferralItem[]
+
+  @@unique([tenantId, reference])
+  @@index([tenantId, dispensedAt])
+  @@map("prescription_referrals")
+}
+
+/// One medicine on a transmitted prescription. Free text, exactly as written.
+///
+/// No `medicineId`: the receiving pharmacy has its own catalogue and the same
+/// drug may be filed under a different name there. Mapping is the pharmacist's
+/// job at the counter, which is the same honest position the uncatalogued-item
+/// flag takes inside a single hospital.
+model PrescriptionReferralItem {
+  id       Int    @id @default(autoincrement())
   tenant   Tenant @relation(fields: [tenantId], references: [id])
   tenantId Int
-  name  String
-  floor String?
-  beds  Bed[]
 
+  referral   PrescriptionReferral @relation(fields: [referralId], references: [id], onDelete: Cascade)
+  referralId Int
+
+  medicineName String
+  dosage       String
+  frequency    String
+  duration     String
+
+  @@index([referralId])
   @@index([tenantId])
+  @@map("prescription_referral_items")
+}
+
+model Ward {
+  id       Int     @id @default(autoincrement())
+  tenant   Tenant  @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  name     String
+  floor    String?
+  beds     Bed[]
+
   @@unique([tenantId, name])
+  @@index([tenantId])
   @@map("wards")
 }
 
 model Bed {
   id       Int     @id @default(autoincrement())
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenant   Tenant  @relation(fields: [tenantId], references: [id])
   tenantId Int
   ward     Ward    @relation(fields: [wardId], references: [id])
   wardId   Int
@@ -653,19 +1491,19 @@ model Bed {
 /// column gives exactly the guarantee we want — one non-null row per bed —
 /// using only what Prisma supports.
 model Admission {
-  id        Int             @id @default(autoincrement())
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
-  tenantId Int
-  patient   Patient         @relation(fields: [patientId], references: [id])
+  id        Int     @id @default(autoincrement())
+  tenant    Tenant  @relation(fields: [tenantId], references: [id])
+  tenantId  Int
+  patient   Patient @relation(fields: [patientId], references: [id])
   patientId Int
-  bed       Bed             @relation(fields: [bedId], references: [id])
+  bed       Bed     @relation(fields: [bedId], references: [id])
   bedId     Int
 
-  status      AdmissionStatus @default(ADMITTED)
-  admittedAt  DateTime        @default(now())
+  status       AdmissionStatus @default(ADMITTED)
+  admittedAt   DateTime        @default(now())
   dischargedAt DateTime?
-  reason      String?
-  notes       String?
+  reason       String?
+  notes        String?
 
   /// Mirrors `bedId` while admitted, NULL once discharged. Unique → one
   /// live admission per bed. Never set this by hand; AdmissionsService owns it.
@@ -677,11 +1515,217 @@ model Admission {
   vitals Vital[]
   doses  MedicationAdministration[]
 
+  supplyRequests     SupplyRequest[]
+  medicationRequests MedicationRequest[]
+  observationOrders  ObservationOrder[]
+  escalations        ObservationEscalation[]
+  labOrders          LabOrder[]
+
   @@index([patientId, admittedAt])
   @@index([bedId])
   @@index([status])
   @@index([tenantId])
   @@map("admissions")
+}
+
+/// A ward asking the pharmacy to send stock of something already prescribed.
+///
+/// THE DISTINCTION THIS MODEL EXISTS TO HOLD
+/// -----------------------------------------
+/// This is a *logistics* request, and `MedicationRequest` below is a *clinical*
+/// one. They read alike — "the nurse needs a medicine that is not here" — and
+/// they differ in what is actually missing and therefore in who answers.
+///
+/// Here the prescription already exists and the drug is physically absent from
+/// the ward, so the answer comes from a pharmacist. Merging the two into one
+/// "request medication" button would route half of each to the wrong person,
+/// and the failure available at that point is a drug supplied that nobody
+/// prescribed.
+///
+/// Hence `prescriptionItemId` is REQUIRED and not free text. A supply request
+/// that could name any medicine would be prescribing with extra steps.
+model SupplyRequest {
+  id       Int    @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+
+  admission   Admission @relation(fields: [admissionId], references: [id])
+  admissionId Int
+  patientId   Int
+
+  /// The prescribed line this is a request to supply. Never nullable.
+  prescriptionItem   PrescriptionItem @relation(fields: [prescriptionItemId], references: [id])
+  prescriptionItemId Int
+
+  /// How many the ward is asking for. Advisory — the pharmacist decides what
+  /// actually goes, and the dispense records what did.
+  quantity Int?
+  note     String?
+
+  status      SupplyRequestStatus @default(REQUESTED)
+  requestedBy User                @relation("SupplyRequestedBy", fields: [requestedById], references: [id])
+  requestedById Int
+  requestedAt DateTime            @default(now())
+
+  respondedBy   User?     @relation("SupplyRespondedBy", fields: [respondedById], references: [id])
+  respondedById Int?
+  respondedAt   DateTime?
+  /// Required on DECLINED. A refusal a ward cannot act on is worse than a delay.
+  responseNote  String?
+
+  @@index([status, requestedAt])
+  @@index([admissionId])
+  @@index([tenantId])
+  @@map("supply_requests")
+}
+
+/// How often this patient's observations are due, and who decided.
+///
+/// WHY THIS EXISTS
+/// ---------------
+/// The ward board computed "observations overdue" from a hard-coded four hours
+/// for every patient in the hospital. That is one clinical policy applied to a
+/// post-operative patient and to somebody waiting for a lift home, and nobody
+/// could change it — so the one number that decides whether a nurse is chased
+/// about a deteriorating patient was a constant in a source file.
+///
+/// A row is never edited. Each change writes a new row and the newest wins, so
+/// "who moved this patient to hourly obs, and when" is answerable — which is
+/// the first question after a deterioration nobody caught.
+model ObservationOrder {
+  id       Int    @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+
+  admission   Admission @relation(fields: [admissionId], references: [id])
+  admissionId Int
+  patientId   Int
+
+  frequency ObservationFrequency
+
+  /// Why the frequency changed. Free text, and worth reading at a handover.
+  reason String?
+
+  /**
+   * True when a nurse raised the frequency rather than a doctor setting it.
+   *
+   * A nurse may always tighten observations — noticing a patient looks unwell
+   * and increasing them is the whole point of having a nurse at the bedside —
+   * and may never relax them, because that is a clinical decision about how
+   * closely somebody needs watching. The service enforces it; this records
+   * which happened, so a chart shows a doctor's plan and a nurse's concern as
+   * different things.
+   */
+  isEscalation Boolean @default(false)
+
+  setBy   User @relation("ObsOrderSetBy", fields: [setById], references: [id])
+  setById Int
+  setAt   DateTime @default(now())
+
+  @@index([admissionId, setAt])
+  @@index([tenantId])
+  @@map("observation_orders")
+}
+
+/// A nurse raising a concern about a deteriorating patient, and what came back.
+///
+/// WHY THIS IS A ROW AND NOT A NOTE
+/// --------------------------------
+/// "I escalated at 03:40, spoke to the on-call registrar, was told to repeat
+/// obs in an hour" is the single most-asked-for fact in an incident review, and
+/// until now there was nowhere to put it. A free-text nursing note would hold
+/// the words and none of the structure: who, when, and whether anybody answered
+/// are the parts that get looked up.
+///
+/// `respondedAt` being null is itself the finding. An escalation nobody replied
+/// to is exactly what a review is looking for, so it is a visible open state
+/// rather than an absent field.
+model ObservationEscalation {
+  id       Int    @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+
+  admission   Admission @relation(fields: [admissionId], references: [id])
+  admissionId Int
+  patientId   Int
+
+  /// The observation set that prompted it, when there was one. Nullable
+  /// because a nurse may escalate on how a patient looks, which is a
+  /// legitimate reason and pre-dates any number being written down.
+  vital   Vital? @relation(fields: [vitalId], references: [id])
+  vitalId Int?
+
+  /// Who was told — free text on purpose. The on-call registrar covering at
+  /// 3am often has no account in this hospital's system, and forcing a user id
+  /// would mean the commonest real escalation could not be recorded at all.
+  escalatedTo String
+
+  /// What was wrong. Required: an escalation with no concern recorded is a
+  /// row saying somebody made a phone call.
+  concern String
+
+  raisedBy   User @relation("EscalationRaisedBy", fields: [raisedById], references: [id])
+  raisedById Int
+  raisedAt   DateTime @default(now())
+
+  /// What came back, filled in when it does. Null means still waiting.
+  response    String?
+  respondedAt DateTime?
+
+  @@index([admissionId, raisedAt])
+  @@index([respondedAt])
+  @@index([tenantId])
+  @@map("observation_escalations")
+}
+
+/// A nurse asking a doctor to prescribe something that is not on the chart.
+///
+/// THE RULE THIS ENCODES
+/// ---------------------
+/// A nurse asks; a nurse never prescribes. In the UK, US and India alike,
+/// prescribing is a prescriber's act unless the nurse holds a separate
+/// qualification this system does not model — so there is no path here that
+/// puts a medicine on a chart. The outcome of a request is a `Prescription`
+/// written by a doctor, or a decline with a reason.
+///
+/// `medicineText` is free text and deliberately not a catalogue FK: the nurse
+/// is describing a need ("something for the nausea"), not selecting a product.
+/// Making it a FK would quietly turn the request into a draft prescription.
+model MedicationRequest {
+  id       Int    @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+
+  admission   Admission @relation(fields: [admissionId], references: [id])
+  admissionId Int
+  patientId   Int
+
+  /// What the nurse is asking for, in their words.
+  medicineText String
+  /// Why. Required — a prescriber cannot answer "she needs something" and a
+  /// request with no clinical reason is one that gets ignored or guessed at.
+  reason       String
+
+  status      MedicationRequestStatus @default(REQUESTED)
+  requestedBy User                    @relation("MedRequestedBy", fields: [requestedById], references: [id])
+  requestedById Int
+  requestedAt DateTime                @default(now())
+
+  respondedBy   User?     @relation("MedRespondedBy", fields: [respondedById], references: [id])
+  respondedById Int?
+  respondedAt   DateTime?
+  /// Required on DECLINED, and kept forever. "I asked and was told no, and
+  /// here is why" is precisely what a nurse needs on record afterwards.
+  responseNote  String?
+
+  /// Set when a doctor answered by actually writing one.
+  prescription   Prescription? @relation(fields: [prescriptionId], references: [id])
+  prescriptionId Int?
+
+  @@index([status, requestedAt])
+  @@index([admissionId])
+  @@index([tenantId])
+  @@map("medication_requests")
 }
 
 /// A set of observations recorded at the bedside.
@@ -691,8 +1735,8 @@ model Admission {
 /// The service rejects a set where everything is empty.
 model Vital {
   id          Int        @id @default(autoincrement())
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
-  tenantId Int
+  tenant      Tenant     @relation(fields: [tenantId], references: [id])
+  tenantId    Int
   patient     Patient    @relation(fields: [patientId], references: [id])
   patientId   Int
   admission   Admission? @relation(fields: [admissionId], references: [id])
@@ -717,6 +1761,8 @@ model Vital {
   /// would duplicate the observation. Unique, so the replay is a no-op.
   clientRef String? @unique
 
+  escalations ObservationEscalation[]
+
   createdAt DateTime @default(now())
 
   @@index([patientId, recordedAt])
@@ -733,18 +1779,18 @@ model Vital {
 /// patient refused it" are very different facts at a handover.
 model MedicationAdministration {
   id                 Int              @id @default(autoincrement())
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
-  tenantId Int
+  tenant             Tenant           @relation(fields: [tenantId], references: [id])
+  tenantId           Int
   prescriptionItem   PrescriptionItem @relation(fields: [prescriptionItemId], references: [id])
   prescriptionItemId Int
   admission          Admission        @relation(fields: [admissionId], references: [id])
   admissionId        Int
   patientId          Int
 
-  dueAt   DateTime
-  status  DoseStatus @default(DUE)
-  givenAt DateTime?
-  givenBy   User?    @relation("DosesGivenBy", fields: [givenById], references: [id])
+  dueAt     DateTime
+  status    DoseStatus @default(DUE)
+  givenAt   DateTime?
+  givenBy   User?      @relation("DosesGivenBy", fields: [givenById], references: [id])
   givenById Int?
   notes     String?
 
@@ -798,19 +1844,41 @@ enum DrugClass {
 }
 
 model Medicine {
-  id       Int        @id @default(autoincrement())
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
-  tenantId Int
-  name     String
+  id        Int       @id @default(autoincrement())
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  tenantId  Int
+  name      String
   /// Tablet, capsule, syrup, injection…
-  form     String
+  form      String
   /// "5 mg", "500 mg/5 ml" — the catalogue strength, not the prescribed dose.
-  strength String
+  strength  String
   drugClass DrugClass @default(OTHER)
 
   /// Controlled drugs need a stricter paper trail. Flagged so the UI can say
   /// so; the extra register is not built yet.
   isControlled Boolean @default(false)
+
+  /// What one unit sells for, in the tenant's currency.
+  ///
+  /// FOUR DECIMAL PLACES, ON PURPOSE
+  /// ------------------------------
+  /// A tablet at 0.35 each is ordinary, and so is 0.0725. Rounding the unit
+  /// price to 2dp and then multiplying by 30 loses real money; the rounding
+  /// happens once, on the line total, which is stored at 2dp.
+  ///
+  /// NULLABLE, AND NULL IS NOT ZERO
+  /// ------------------------------
+  /// Same argument as `Doctor.consultationFee`. Blank means nobody has priced
+  /// this yet and the dispense records no charge for it — reported back to the
+  /// pharmacist and counted on the admin dashboard, never silently free. Zero
+  /// means the hospital genuinely gives it away. Collapsing the two turns a
+  /// forgotten price into a decision nobody made, and the first anyone knows is
+  /// a month of stock that left without being billed.
+  ///
+  /// The *current* price, and only that. What a sale was actually charged at
+  /// lives on `DispenseLine.unitPrice`, captured at the moment of sale — see
+  /// the note there.
+  sellingPrice Decimal? @db.Decimal(10, 4)
 
   /// Total units below which the medicine appears on the low-stock report.
   reorderLevel Int     @default(20)
@@ -822,10 +1890,16 @@ model Medicine {
   batches           StockBatch[]
   prescriptionItems PrescriptionItem[]
   dispenseLines     DispenseLine[]
+  invoiceItems      InvoiceItem[]
+  /// Which rate this medicine is taxed at. Null means the tenant's default —
+  /// so a hospital that has just switched tax on does not have to touch every
+  /// row in the catalogue before it can sell anything.
+  taxRate           TaxRate?           @relation(fields: [taxRateId], references: [id])
+  taxRateId         Int?
 
+  @@unique([tenantId, name])
   @@index([drugClass])
   @@index([tenantId])
-  @@unique([tenantId, name])
   @@map("medicines")
 }
 
@@ -836,14 +1910,22 @@ model Medicine {
 /// is the question that actually matters when handing medicine to a patient.
 model StockBatch {
   id          Int      @id @default(autoincrement())
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
-  tenantId Int
+  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+  tenantId    Int
   medicine    Medicine @relation(fields: [medicineId], references: [id])
   medicineId  Int
   batchNumber String
   expiresAt   DateTime
   quantity    Int
   receivedAt  DateTime @default(now())
+
+  /// What this delivery cost per unit. Optional; margin reporting needs it.
+  ///
+  /// On the batch rather than the medicine because it is a property of the
+  /// delivery: the same tablet costs differently from a different supplier in a
+  /// different month, and a single figure on `Medicine` would restate the
+  /// margin on every past sale each time a new box arrived.
+  costPrice Decimal? @db.Decimal(10, 4)
 
   lines DispenseLine[]
 
@@ -859,37 +1941,114 @@ model StockBatch {
 /// dispensed in parts, and each part is its own event with its own timestamp
 /// and its own signature.
 model DispenseEvent {
-  id             Int      @id @default(autoincrement())
+  id       Int    @id @default(autoincrement())
   tenant   Tenant @relation(fields: [tenantId], references: [id])
   tenantId Int
-  prescription   Prescription @relation(fields: [prescriptionId], references: [id])
-  prescriptionId Int
-  pharmacist     User     @relation("DispensedEvents", fields: [pharmacistId], references: [id])
-  pharmacistId   Int
-  dispensedAt    DateTime @default(now())
-  notes          String?
+
+  /// NULL for an over-the-counter sale.
+  ///
+  /// WHY A COUNTER SALE IS THE SAME MODEL
+  /// ------------------------------------
+  /// The obvious alternative is a `CounterSale` table beside this one. It is a
+  /// trap: both are the same physical act — stock leaves a batch, against a
+  /// price, handed over by a named person — and splitting them gives the
+  /// hospital two stock ledgers that have to be summed together to answer "what
+  /// left the shelf today". Every report would need to remember both, and the
+  /// day one of them forgot, the count would still look plausible.
+  prescription   Prescription? @relation(fields: [prescriptionId], references: [id])
+  prescriptionId Int?
+
+  /// Who it was for, where that is known.
+  ///
+  /// Denormalised from the prescription on purpose, because a counter sale has
+  /// no prescription to read it from, and often no patient at all — somebody
+  /// buying paracetamol is not a hospital record. Nullable for exactly that
+  /// case, and the reason `Invoice.patientId` is nullable too.
+  patient   Patient? @relation(fields: [patientId], references: [id])
+  patientId Int?
+
+  /// The referral this sale filled, for a prescription written elsewhere.
+  ///
+  /// Nullable and rare. A referral is dispensed through the counter-sale path
+  /// rather than the prescription one, because the prescription belongs to
+  /// another hospital and no `Prescription` row exists here to key on.
+  referralId Int?
+
+  /// The invoice this sale was charged to, if it was charged at all.
+  ///
+  /// Nullable because dispensing never blocks on money: an unpriced medicine,
+  /// or a hospital that has not set any prices yet, still gets handed over and
+  /// still gets a stock movement. A NULL here is the thing the unpriced-sales
+  /// figure counts.
+  invoice   Invoice? @relation(fields: [invoiceId], references: [id])
+  invoiceId Int?
+
+  pharmacist   User     @relation("DispensedEvents", fields: [pharmacistId], references: [id])
+  pharmacistId Int
+  dispensedAt  DateTime @default(now())
+  notes        String?
+
+  /// Reversed: the medicine came back before it left the pharmacy.
+  ///
+  /// WHY THIS IS NOT THE SAME AS A REFUND
+  /// ------------------------------------
+  /// A refund returns money for medicine the patient has. A reversal undoes a
+  /// handover that did not happen — the patient could not pay, or changed
+  /// their mind, and the box never left the counter. Stock goes back to the
+  /// exact batches it came from, the prescription becomes dispensable again,
+  /// and the invoice is voided.
+  ///
+  /// It is deliberately NOT available once medicine has left the premises:
+  /// dispensed medicine cannot lawfully be resold in most jurisdictions, and
+  /// an automatic re-increment would overstate the number the whole dispensing
+  /// flow trusts. Putting a returned box back on the shelf stays a deliberate
+  /// act through `POST /pharmacy/stock`.
+  reversedAt     DateTime?
+  reversedBy     User?     @relation("ReversedDispenses", fields: [reversedById], references: [id])
+  reversedById   Int?
+  reversalReason String?
 
   lines DispenseLine[]
 
   @@index([prescriptionId])
+  @@index([patientId])
+  @@index([invoiceId])
   @@index([dispensedAt])
   @@index([tenantId])
   @@map("dispense_events")
 }
 
 model DispenseLine {
-  id                 Int              @id @default(autoincrement())
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
-  tenantId Int
-  event              DispenseEvent    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  id                 Int               @id @default(autoincrement())
+  tenant             Tenant            @relation(fields: [tenantId], references: [id])
+  tenantId           Int
+  event              DispenseEvent     @relation(fields: [eventId], references: [id], onDelete: Cascade)
   eventId            Int
-  prescriptionItem   PrescriptionItem @relation(fields: [prescriptionItemId], references: [id])
-  prescriptionItemId Int
-  medicine           Medicine         @relation(fields: [medicineId], references: [id])
+  /// NULL on a counter sale — nothing was prescribed.
+  prescriptionItem   PrescriptionItem? @relation(fields: [prescriptionItemId], references: [id])
+  prescriptionItemId Int?
+  medicine           Medicine          @relation(fields: [medicineId], references: [id])
   medicineId         Int
-  batch              StockBatch       @relation(fields: [batchId], references: [id])
+  batch              StockBatch        @relation(fields: [batchId], references: [id])
   batchId            Int
   quantity           Int
+
+  /// What this was actually charged at, captured now and never recomputed.
+  ///
+  /// THIS IS THE `medicineName` DECISION AGAIN
+  /// -----------------------------------------
+  /// Reading the price back off `Medicine.sellingPrice` at report time would be
+  /// one fewer column and would be wrong in the same way a catalogue FK would
+  /// have been wrong for prescription text: repricing a medicine tomorrow
+  /// silently restates what every patient was charged for it last year. A sale
+  /// is a record of something that happened, not a view over current settings.
+  ///
+  /// NULL where the medicine had no price, which is how an unbilled handover
+  /// stays visible instead of reading as free.
+  unitPrice Decimal? @db.Decimal(10, 4)
+
+  /// `unitPrice × quantity`, rounded to currency precision exactly once.
+  lineTotal Decimal? @db.Decimal(10, 2)
 
   @@index([eventId])
   @@index([prescriptionItemId])
@@ -900,30 +2059,69 @@ model DispenseLine {
 // ───────────────────────────── billing ─────────────────────────────
 
 model Invoice {
-  id          Int           @id @default(autoincrement())
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
-  tenantId Int
-  patient     Patient       @relation(fields: [patientId], references: [id])
-  patientId   Int
-  totalAmount Decimal       @db.Decimal(10, 2)
+  id        Int      @id @default(autoincrement())
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  tenantId  Int
+  /// NULL only on an over-the-counter pharmacy sale.
+  ///
+  /// Required everywhere else, and the application enforces that: a HOSPITAL
+  /// invoice with no patient is meaningless, and a prescription sale always has
+  /// one. But somebody buying paracetamol at the counter is not a hospital
+  /// record, and forcing a `Patient` row for them would put a walk-in's name
+  /// into the patient list — where reception searches, and where it would be
+  /// indistinguishable from someone under the hospital's care.
+  patient   Patient? @relation(fields: [patientId], references: [id])
+  patientId Int?
+
+  /// Whether this is the hospital's bill or the pharmacy's.
+  ///
+  /// Load-bearing for access, not just for reporting. In SEPARATE mode the
+  /// pharmacy is a different business: its invoices are listed, paid and
+  /// refunded by PHARMACIST, and billing staff do not see them at all. Keeping
+  /// that as a column rather than a separate table means one payment path, one
+  /// refund path and one aging calculation — the parts that were hard to get
+  /// right once and should not be got right twice.
+  kind InvoiceKind @default(HOSPITAL)
+
+  totalAmount Decimal @db.Decimal(10, 2)
 
   /// Running total across payments. Denormalised on purpose: the outstanding
   /// balance is read on every list, aging report and payment screen, and
   /// re-summing the payment rows each time would make the most-used query the
   /// slowest. Maintained inside the same transaction as the payment insert, so
   /// it cannot drift.
-  amountPaid  Decimal       @default(0) @db.Decimal(10, 2)
+  amountPaid Decimal @default(0) @db.Decimal(10, 2)
 
-  status      InvoiceStatus @default(PENDING)
-  issuedAt    DateTime      @default(now())
-  dueDate     DateTime?
-  notes       String?
+  /// How much of the charge has been cancelled — the credit-note total.
+  ///
+  /// WHY THIS EXISTS
+  /// ---------------
+  /// A refund without it leaves the charge standing, so the balance reappears
+  /// and the invoice becomes payable again. That loop is real and was found in
+  /// use: pay, refund, back to outstanding, pay again, forever, with no state
+  /// that terminates.
+  ///
+  /// A refund and a credit answer different questions. "We gave the money
+  /// back" is a refund. "…and we should not have charged for it" is a credit.
+  /// Usually both, occasionally only the first — a returned deposit against a
+  /// charge that still stands. Keeping them separate is what lets the second
+  /// case exist at all.
+  ///
+  /// What is owed is `totalAmount - creditedAmount - amountPaid`. The original
+  /// `totalAmount` is never rewritten: an invoice that quietly changes what it
+  /// says it charged is not a record.
+  creditedAmount Decimal @default(0) @db.Decimal(10, 2)
+
+  status   InvoiceStatus @default(PENDING)
+  issuedAt DateTime      @default(now())
+  dueDate  DateTime?
+  notes    String?
 
   /// Invoices are voided, never deleted — a missing invoice number is
   /// indistinguishable from a cover-up, and the audit trail points at a row
   /// that has to still exist.
-  voidedAt    DateTime?
-  voidReason  String?
+  voidedAt   DateTime?
+  voidReason String?
 
   /// The consultation this invoice bills for, when it came from one.
   ///
@@ -938,10 +2136,17 @@ model Invoice {
   appointment   Appointment? @relation(fields: [appointmentId], references: [id])
   appointmentId Int?         @unique
 
-  items    InvoiceItem[]
-  payments Payment[]
+  items          InvoiceItem[]
+  payments       Payment[]
+  refunds        Refund[]
+  /// The sales charged onto this invoice. Usually none, one for a pharmacy
+  /// invoice, and several where a hospital bill collected repeat dispensing.
+  dispenseEvents DispenseEvent[]
+  /// Diagnostics charged onto this invoice.
+  labOrders      LabOrder[]      @relation("LabOrderInvoice")
 
   @@index([patientId])
+  @@index([kind, status])
   @@index([status, dueDate])
   @@index([dueDate])
   @@index([tenantId])
@@ -955,8 +2160,8 @@ model Invoice {
 /// say so even when it moved by mistake.
 model Payment {
   id           Int           @id @default(autoincrement())
-  tenant   Tenant @relation(fields: [tenantId], references: [id])
-  tenantId Int
+  tenant       Tenant        @relation(fields: [tenantId], references: [id])
+  tenantId     Int
   invoice      Invoice       @relation(fields: [invoiceId], references: [id])
   invoiceId    Int
   amount       Decimal       @db.Decimal(10, 2)
@@ -968,22 +2173,180 @@ model Payment {
   receivedAt   DateTime      @default(now())
   notes        String?
 
+  /// Refunds issued against this payment. Usually none.
+  refunds Refund[]
+
   @@index([invoiceId])
   @@index([receivedAt])
   @@index([tenantId])
   @@map("payments")
 }
 
-model InvoiceItem {
-  id          Int     @id @default(autoincrement())
+/// Money going back out.
+///
+/// A separate row rather than a negative `Payment`, and the distinction is
+/// load-bearing. Every takings figure in the system sums payment rows; folding
+/// refunds in as negatives would silently reduce "collected today" with no way
+/// to see that it happened, and reconciliation against a bank statement would
+/// stop being possible. Gross in, gross out, net derived — never a single
+/// figure that hides one inside the other.
+///
+/// Refunds are records, never deletions, for the same reason a voided invoice
+/// is kept: a missing row is indistinguishable from a cover-up.
+model Refund {
+  id        Int     @id @default(autoincrement())
+  tenant    Tenant  @relation(fields: [tenantId], references: [id])
+  tenantId  Int
+  invoice   Invoice @relation(fields: [invoiceId], references: [id])
+  invoiceId Int
+
+  /// The payment being reversed, where one is identifiable.
+  ///
+  /// Optional because a cash refund at the desk often does not correspond to
+  /// one earlier payment. Set it where it is known — a card reversal has to go
+  /// back to the card it came from, and that is the row that says which.
+  payment   Payment? @relation(fields: [paymentId], references: [id])
+  paymentId Int?
+
+  amount Decimal       @db.Decimal(10, 2)
+  method PaymentMethod
+
+  /// Required, and enforced at the DTO. A refund with no reason is an
+  /// unexplained withdrawal from the clinic's own takings.
+  reason String
+
+  refundedBy   User     @relation("RefundsIssued", fields: [refundedById], references: [id])
+  refundedById Int
+  refundedAt   DateTime @default(now())
+
+  @@index([invoiceId])
+  @@index([refundedAt])
+  @@index([tenantId])
+  @@map("refunds")
+}
+
+/// A tax rate this hospital charges, named as its staff would name it.
+///
+/// WHY NAMED RATES AND NOT ONE PERCENTAGE
+/// --------------------------------------
+/// One "tax %" setting is wrong in both places this system is aimed at, in
+/// opposite directions. An Indian pharmacy stocks items at 5%, 12% and 18%
+/// alongside nil-rated ones, while healthcare *services* are exempt. A US
+/// clinic has no national rate at all — it is state plus county plus city, and
+/// prescription drugs are exempt in most states while OTC is not.
+///
+/// The shape common to both is a named rate chosen per thing sold. A hospital
+/// that charges no tax defines none, every line resolves to zero, and invoices
+/// look exactly as they did before this existed.
+model TaxRate {
+  id       Int    @id @default(autoincrement())
   tenant   Tenant @relation(fields: [tenantId], references: [id])
   tenantId Int
+
+  /// "GST 12%", "Exempt", "Sales tax 8.25%". The name carries the distinction
+  /// between zero-rated and exempt, which the arithmetic cannot.
+  name String
+
+  /// Basis points: 1250 is 12.5%. An integer, for the same reason money is
+  /// held in minor units — see `billing/money.ts`.
+  rateBasisPoints Int @default(0)
+
+  /// Applied to anything with no rate of its own. Exactly one per tenant.
+  isDefault Boolean @default(false)
+
+  /// Retired rather than deleted: invoices record the rate they used, but the
+  /// row is what a reader follows back to a name.
+  isActive Boolean @default(true)
+
+  medicines  Medicine[]
+  labTests   LabTest[]
+  createdAt  DateTime           @default(now())
+  components TaxRateComponent[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("tax_rates")
+}
+
+/// One named part of a rate: CGST 6% + SGST 6%, or State 4% + County 1.5%.
+///
+/// WHY PARTS OF ONE RATE RATHER THAN SEVERAL RATES PER ITEM
+/// --------------------------------------------------------
+/// Both components are charged on the same taxable value. India's 12% GST is
+/// 6% + 6%, not 6% and then 6% on the result; a US rate is state plus county
+/// plus city, each on the shelf price. Applying rates in sequence would
+/// compound them, which is wrong in both places and grows with the rate.
+///
+/// So `TaxRate.rateBasisPoints` remains the authoritative total and the sale
+/// arithmetic is untouched — components exist so the invoice can *show* the
+/// split, which an Indian statutory invoice is invalid without.
+model TaxRateComponent {
+  id        Int     @id @default(autoincrement())
+  tenant    Tenant  @relation(fields: [tenantId], references: [id])
+  tenantId  Int
+  taxRate   TaxRate @relation(fields: [taxRateId], references: [id], onDelete: Cascade)
+  taxRateId Int
+
+  /// "CGST", "SGST", "State", "County". Printed on the invoice as written.
+  name            String
+  rateBasisPoints Int    @default(0)
+  /// Display order. CGST before SGST is conventional and worth preserving.
+  position        Int    @default(0)
+
+  @@index([taxRateId])
+  @@index([tenantId])
+  @@map("tax_rate_components")
+}
+
+model InvoiceItem {
+  id          Int     @id @default(autoincrement())
+  tenant      Tenant  @relation(fields: [tenantId], references: [id])
+  tenantId    Int
   invoice     Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   invoiceId   Int
   description String
   amount      Decimal @db.Decimal(10, 2)
 
+  /// SERVICE or MEDICINE. What the role-shaped response keys on.
+  ///
+  /// A MEDICINE line's description names a drug, which is a clinical fact
+  /// arriving on a financial document. That is fine for the pharmacist who sold
+  /// it and not fine for a general billing clerk, so the response collapses
+  /// them rather than the database withholding them — the itemisation has to
+  /// exist, or the patient cannot be given a receipt.
+  kind InvoiceItemKind @default(SERVICE)
+
+  /// Set on MEDICINE lines. A service line is one charge, not a quantity.
+  quantity  Int?
+  unitPrice Decimal? @db.Decimal(10, 4)
+
+  /// Which medicine, where it is catalogued. Nullable for the same reason
+  /// `PrescriptionItem.medicineId` is: the line is the record, the link is an
+  /// addition to it, and a catalogue rename must never rewrite a past bill.
+  medicine   Medicine? @relation(fields: [medicineId], references: [id])
+  medicineId Int?
+
+  /// Tax as it was applied, captured at the moment of billing.
+  ///
+  /// The rate is copied rather than referenced for the same reason
+  /// `unitPrice` and `medicineName` are captured: changing a rate next year
+  /// must not restate what a patient was charged last year. `taxRateName` is
+  /// held too, so an invoice can be read without resolving a row that may
+  /// since have been renamed or retired.
+  taxRateBasisPoints Int     @default(0)
+  taxRateName        String?
+  /// `amount` is the NET. These two complete it; net + tax is what is paid.
+  taxAmount          Decimal @default(0) @db.Decimal(10, 2)
+  /// The component split as it was applied: `[{name, rateBasisPoints, amount}]`.
+  ///
+  /// Captured like the rate itself. An invoice printed today must still show
+  /// CGST 6% / SGST 6% next year, after somebody has restructured the rate it
+  /// used — and a statutory document that cannot be reproduced is not one.
+  /// Null on a flat rate with no components, which is the ordinary case.
+  taxBreakdown       Json?
+
   @@index([invoiceId])
+  @@index([medicineId])
   @@index([tenantId])
   @@map("invoice_items")
 }
@@ -995,8 +2358,778 @@ model InvoiceItem {
 ///
 /// `userId` is nullable on purpose: a failed login with an unknown email has
 /// no user to attribute, and those are exactly the rows worth keeping.
+// ───────────────────────────── diagnostics ─────────────────────────────
+//
+// A test is ordered by a clinician, performed somewhere, and comes back as a
+// report attached to the patient. That last clause is the whole feature: a
+// result that a doctor cannot find on the patient's record is a result that
+// gets telephoned, written on paper, and lost.
+//
+// The shape mirrors the pharmacy deliberately — a catalogue, an order, a
+// worklist, a partner directory that cannot be enumerated, and a copy that
+// crosses tenants rather than a shared row. One difference is load-bearing and
+// is explained on `LabReferral`: a prescription referral is one-way because the
+// medicine is the deliverable, and a lab referral cannot be, because the result
+// is.
+
+/// A test this hospital can offer. The catalogue.
+///
+/// SEED-ONLY WOULD HAVE BEEN THE FOURTH TIME
+/// -----------------------------------------
+/// The medicine catalogue, `Doctor` profiles and wards were each creatable only
+/// by `prisma/seed.ts` for six phases, so every hospital that arrived through
+/// the platform — which is every real one — had an empty table and no route to
+/// a first row. The symptom always surfaced two roles away: an empty screen
+/// that looks identical to an unbuilt feature.
+///
+/// So `POST /lab-tests` exists from the start and `self-provisionable.spec.ts`
+/// asserts it, because a hospital with no test catalogue cannot order anything
+/// at all and nothing on screen would say why.
+model LabTest {
+  id       Int    @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+
+  /// The hospital's own code — "FBC", "U+E", "CXR". Short, because it is what
+  /// goes on a worklist and a specimen label.
+  code String
+  name String
+
+  category     LabCategory
+  specimenType LabSpecimenType @default(BLOOD)
+
+  /// What the test sells for. Four decimal places and nullable for exactly the
+  /// reasons on `Medicine.sellingPrice`: **blank is not zero**. Blank means
+  /// nobody has priced it, so the test is still performed and simply not
+  /// charged for, with the omission named back rather than silently forgiven.
+  /// Zero means the hospital genuinely does it for nothing.
+  sellingPrice Decimal? @db.Decimal(10, 4)
+
+  /// Which rate it is taxed at. Null takes the tenant's active rates, like a
+  /// medicine with no rate of its own.
+  taxRate   TaxRate? @relation(fields: [taxRateId], references: [id])
+  taxRateId Int?
+
+  /// Roughly how long results take, in hours. Displayed to the ordering doctor
+  /// so "when will this be back" has an answer that is not a phone call.
+  /// Nullable: an unknown turnaround is honest, and a made-up one is not.
+  turnaroundHours Int?
+
+  /// How the specimen must be taken — "Fasting, 8 hours", "Purple top EDTA".
+  /// Free text, shown on the order and on the collection screen, because the
+  /// commonest cause of a rejected specimen is the wrong tube.
+  preparation String?
+
+  /// Retired rather than deleted. Orders record what they ordered as text, but
+  /// the row is what a reader follows back to a price and a reference range.
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  analytes   LabAnalyte[]
+  orderItems LabOrderItem[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@index([category])
+  @@map("lab_tests")
+}
+
+/// One measured component of a test, and the range it is judged against.
+///
+/// WHY THE RANGE IS DATA AND NOT A CONSTANT
+/// ----------------------------------------
+/// Reference ranges differ by laboratory, by analyser and by population — they
+/// are a property of the lab that produced the number, not of the analyte. A
+/// hard-coded table would be wrong somewhere on day one and would silently
+/// stay wrong, and a flag computed from a wrong range is worse than no flag at
+/// all: it reads as a lab having checked.
+///
+/// A test with no analytes is ordinary rather than incomplete — that is what
+/// an X-ray is. Those report as narrative only.
+model LabAnalyte {
+  id       Int     @id @default(autoincrement())
+  tenant   Tenant  @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  test     LabTest @relation(fields: [testId], references: [id], onDelete: Cascade)
+  testId   Int
+
+  /// "Haemoglobin", "Sodium", "White cell count".
+  name String
+  /// "g/L", "mmol/L", "10^9/L". Nullable for a ratio or a count of nothing.
+  unit String?
+
+  /// The normal range. Numeric where the analyte is numeric.
+  refLow  Decimal? @db.Decimal(12, 4)
+  refHigh Decimal? @db.Decimal(12, 4)
+
+  /// For analytes where "normal" is not a pair of numbers — "No growth",
+  /// "Not detected", "Negative". Printed on the report as the expected value
+  /// and compared as text.
+  refText String?
+
+  /// Outside these, somebody has to be told before the report is filed.
+  /// Nullable and usually null: most analytes have no critical threshold, and
+  /// inventing one would make the screen shout about the wrong things.
+  criticalLow  Decimal? @db.Decimal(12, 4)
+  criticalHigh Decimal? @db.Decimal(12, 4)
+
+  /// Report order. A full blood count has a conventional sequence and a
+  /// haematologist reads it by position.
+  position Int @default(0)
+
+  @@unique([testId, name])
+  @@index([tenantId])
+  @@index([testId])
+  @@map("lab_analytes")
+}
+
+/// A requisition: one clinician, one patient, one moment, one or more tests.
+model LabOrder {
+  id       Int    @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+
+  patient   Patient @relation(fields: [patientId], references: [id])
+  patientId Int
+  /// Who asked for it. Null when the work came from another hospital.
+  ///
+  /// `Doctor` requires a `User`, so a referring clinician at another company
+  /// cannot be represented without fabricating a login here — and a fake
+  /// account in the staff list is worse than an absent one. The requester's
+  /// name travels on the referral instead and the response reads it from
+  /// there.
+  ///
+  /// It also unblocks the standalone laboratory, which has no CLINIC module
+  /// and therefore no doctors at all.
+  doctor    Doctor? @relation(fields: [doctorId], references: [id])
+  doctorId  Int?
+
+  /// The consultation it came out of, when there is one. Same rule as a
+  /// prescription: only attached where the appointment is *today*, so a test
+  /// ordered six weeks later is not filed under a visit it was not part of.
+  appointment   Appointment? @relation(fields: [appointmentId], references: [id])
+  appointmentId Int?
+
+  /// Set for an inpatient, so a ward round can see what is outstanding.
+  admission   Admission? @relation(fields: [admissionId], references: [id])
+  admissionId Int?
+
+  /// The number on the tube. See `accession.ts`.
+  ///
+  /// Unique **per hospital**, restarting each year, with a check character —
+  /// deliberately not `id`, which is global, sequential and unchecked. This is
+  /// the identifier a technician reads out, a courier's manifest carries and a
+  /// clinician quotes back, and a transposed digit that silently resolves to
+  /// another patient's specimen is the worst failure available in a laboratory.
+  ///
+  /// Nullable only because rows predating it exist; every new order gets one.
+  accession String?
+
+  priority LabPriority @default(ROUTINE)
+
+  /// Where it is meant to be performed. See `LabOrderDestination`. The
+  /// hospital's own worklist shows IN_HOUSE only, so a test being run elsewhere
+  /// stops reading as work nobody is doing — and, exactly as with dispensing,
+  /// this is a filter and never a refusal.
+  /// Set when this order exists because another hospital referred the work.
+  ///
+  /// A referral used to be reported in one shot — values typed into a form and
+  /// fired across — which skipped every stage the local flow enforces:
+  /// specimen acceptance, the bench, and above all the separation between
+  /// values entered and values *authorised*. "Nothing is a result until it is
+  /// verified" was true of this hospital's own orders and not of the work it
+  /// did for anybody else.
+  ///
+  /// Accepting a referral now raises one of these, so referred work runs the
+  /// identical state machine and the return leg fires on verification.
+  referral   LabReferral? @relation("ReferralLocalOrder", fields: [referralId], references: [id])
+  referralId Int?         @unique
+
+  destination LabOrderDestination @default(IN_HOUSE)
+
+  /// The partner lab it was sent to. The other hospital's id, held here purely
+  /// as a record of where the copy went; it grants nothing.
+  routedToTenantId Int?
+
+  /// When the specimen physically left for the partner laboratory.
+  ///
+  /// THE SEND-OUT THIS EXISTS FOR
+  /// ----------------------------
+  /// A clinic with no bench still draws the blood itself: the patient is
+  /// standing in *its* building, gives the sample at *its* desk, and pays *its*
+  /// bill. Only the tube travels. That is how send-out work actually runs and
+  /// it is the commonest reason a small practice has a partner laboratory at
+  /// all.
+  ///
+  /// The worklist filtered `destination: IN_HOUSE` on the reasoning that work
+  /// running elsewhere "is work somebody else is doing" — true of the
+  /// examination and false of the specimen, so a PARTNER order vanished from
+  /// the only screen that could have recorded a collection. The clinic had no
+  /// place to say the blood had been taken, no moment at which to print the
+  /// label, and nothing to hand the courier.
+  ///
+  /// `collectedAt` says the tube exists; this says it is no longer here.
+  /// Separate because the gap between them is real — a specimen drawn at 09:14
+  /// and collected by a courier at 16:00 spent the day on a bench, and a
+  /// potassium from it means something different.
+  dispatchedAt DateTime?
+
+  /// Why the test is being asked for — "?anaemia", "pre-op". Genuinely
+  /// clinical, and it goes to the lab because a lab that does not know the
+  /// question cannot comment usefully on the answer. It is one of the reasons
+  /// LAB_TECHNICIAN is a clinical role rather than an operational one.
+  clinicalDetails String?
+
+  status LabOrderStatus @default(ORDERED)
+
+  orderedAt     DateTime  @default(now())
+  collectedAt   DateTime?
+  collectedBy   User?     @relation("LabCollectedBy", fields: [collectedById], references: [id])
+  collectedById Int?
+
+  /// Authorisation. **Nothing is a result until this is set.**
+  ///
+  /// A number on a bench is not a report. Values entered and not yet checked
+  /// are visible to the lab and to nobody else, because a doctor who acts on an
+  /// unverified potassium is acting on something the lab has not stood behind.
+  verifiedAt   DateTime?
+  verifiedBy   User?     @relation("LabVerifiedBy", fields: [verifiedById], references: [id])
+  verifiedById Int?
+
+  /// Who authorised it at the *other* end, for a partner or external result.
+  /// Free text for the same reason `ObservationEscalation.escalatedTo` is: the
+  /// pathologist at another company has no account here, and demanding a user
+  /// id would mean the commonest real case could not be recorded at all.
+  externalVerifiedBy String?
+
+  cancelledAt   DateTime?
+  cancelledBy   User?     @relation("LabCancelledBy", fields: [cancelledById], references: [id])
+  cancelledById Int?
+  cancelReason  String?
+
+  /// The specimen could not be used. Separate from cancellation because it
+  /// means somebody must take another one.
+  rejectedAt   DateTime?
+  rejectReason String?
+
+  /// The charge raised when the order was placed, so cancelling before any work
+  /// was done can void it. Null for a partner or external order, which this
+  /// hospital does not bill for.
+  invoice   Invoice? @relation("LabOrderInvoice", fields: [invoiceId], references: [id])
+  invoiceId Int?
+
+  items LabOrderItem[]
+
+  @@unique([tenantId, accession])
+  @@index([patientId, orderedAt])
+  @@index([doctorId, orderedAt])
+  @@index([status, priority])
+  @@index([admissionId])
+  @@index([tenantId])
+  @@map("lab_orders")
+}
+
+/// One test on a requisition, and its result.
+///
+/// The catalogue link is an *added* nullable `testId`, and `testName` and
+/// `testCode` are captured text that stay as written forever. Same rule as
+/// `PrescriptionItem.medicineName` and `DispenseLine.unitPrice`: renaming or
+/// retiring a test next year must not restate what was performed on a patient
+/// last year, and a report has to stay readable after the catalogue row behind
+/// it has gone.
+model LabOrderItem {
+  id       Int      @id @default(autoincrement())
+  tenant   Tenant   @relation(fields: [tenantId], references: [id])
+  tenantId Int
+  order    LabOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId  Int
+
+  test   LabTest? @relation(fields: [testId], references: [id])
+  testId Int?
+
+  testCode     String
+  testName     String
+  category     LabCategory
+  specimenType LabSpecimenType @default(BLOOD)
+
+  /// What this test was charged at, captured at the moment of ordering. Null
+  /// means it was not priced — performed and not billed, counted and named
+  /// rather than silently free.
+  unitPrice Decimal? @db.Decimal(10, 4)
+
+  /// Somebody else is charging for this one, so this hospital deliberately did
+  /// not.
+  ///
+  /// **Not the same fact as an unpriced test, and collapsing the two is the
+  /// mistake this field exists to prevent.** A test sent to a partner under
+  /// `PATIENT_PAYS` raises no line here on purpose; without this flag it is
+  /// indistinguishable from one nobody got round to pricing, and every "went
+  /// out uncharged" figure in the system — the lab dashboard, the admin
+  /// overview, the accession notice — would report it forever, at which point
+  /// people stop reading those figures.
+  ///
+  /// Third time in this codebase: blank is not zero for `Medicine.sellingPrice`
+  /// and for `Doctor.consultationFee`, and here *not ours to charge* is not
+  /// *nobody charged*.
+  payableExternally Boolean @default(false)
+
+  /// The narrative half of a report. An X-ray has no analytes and is entirely
+  /// this; a microbiology culture has both.
+  ///
+  /// Two fields rather than one because they are read differently: a clinician
+  /// in a hurry reads the impression, and the findings are what they go back to
+  /// when the impression does not fit the patient in front of them.
+  findings   String?
+  impression String?
+
+  /// How it was measured, where that matters to interpretation — the assay, the
+  /// analyser, the stain. Optional and usually empty.
+  methodology String?
+
+  resultedAt   DateTime?
+  resultedBy   User?     @relation("LabResultedBy", fields: [resultedById], references: [id])
+  resultedById Int?
+
+  /// Who actually performed it, where that is not a user of this system — the
+  /// partner lab's technician, or a named external laboratory.
+  performedByName String?
+
+  /// A value outside its critical range obliges somebody to pick up a
+  /// telephone, and this records that they did: who was told, when, by whom.
+  ///
+  /// **Nothing here notifies anybody**, and both clients say so in as many
+  /// words. A control that looks like it pages a doctor and does not is worse
+  /// than no control, because the lab technician stops ringing.
+  criticalNotifiedAt   DateTime?
+  criticalNotifiedTo   String?
+  criticalNotifiedBy   User?     @relation("LabCriticalNotifiedBy", fields: [criticalNotifiedById], references: [id])
+  criticalNotifiedById Int?
+
+  values      LabResultValue[]
+  attachments LabAttachment[]
+
+  @@index([orderId])
+  @@index([testId])
+  @@index([tenantId])
+  @@map("lab_order_items")
+}
+
+/// One measured value.
+///
+/// `value` IS A STRING, DELIBERATELY
+/// ---------------------------------
+/// "5.4" is a result and so are "<0.01", "Not detected", "Growth of E. coli
+/// sensitive to trimethoprim" and "Insufficient sample". A numeric column would
+/// force every one of those into a note field where nobody reads it, or into a
+/// zero, which is a lie about a laboratory measurement.
+///
+/// `numericValue` is the parsed form where one exists, held **beside** the text
+/// rather than instead of it, so a value can be trended without the report ever
+/// showing something other than what the lab issued.
+model LabResultValue {
+  id          Int          @id @default(autoincrement())
+  tenant      Tenant       @relation(fields: [tenantId], references: [id])
+  tenantId    Int
+  orderItem   LabOrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  orderItemId Int
+
+  /// Captured from the analyte at the moment of resulting, never a foreign key
+  /// — for the same reason as `testName`.
+  analyteName String
+  unit        String?
+
+  value        String
+  numericValue Decimal? @db.Decimal(12, 4)
+
+  /// The range this value was judged against, captured as text so a report
+  /// reprinted next year shows the range that was actually applied rather than
+  /// today's.
+  referenceRange String?
+
+  flag LabResultFlag @default(UNKNOWN)
+
+  position Int @default(0)
+
+  @@index([orderItemId])
+  @@index([tenantId])
+  @@map("lab_result_values")
+}
+
+/// What kind of thing an attachment is.
+///
+/// Not a free-text label, because the ordering doctor reads this to decide
+/// whether to open a 4MB file on a ward tablet — "the analyser's own printout"
+/// and "the signed report" are different answers to "do I need this now".
+enum LabAttachmentKind {
+  /// The laboratory's own signed report, usually a PDF.
+  REPORT
+  /// Raw output from an analyser, a scanned worksheet, a photographed gel.
+  RAW
+  /// Anything else, named by the technician in `description`.
+  OTHER
+}
+
+/// A file attached to one test's result.
+///
+/// WHY THIS IS TWO TABLES
+/// ----------------------
+/// The bytes live in `LabAttachmentData`, not here, and that separation is the
+/// whole design rather than tidiness.
+///
+/// Prisma selects every scalar column unless a query says otherwise. A `Bytes`
+/// column on THIS table would mean `labAttachment.findMany()` — the query that
+/// draws a list of filenames — pulling every PDF on the order into memory, and
+/// the mistake would be invisible at the call site. Putting the bytes behind a
+/// relation makes that structurally impossible: a blob only arrives if somebody
+/// writes an `include`, and exactly one method does.
+///
+/// It is also the answer to the rule in CLAUDE.md that the tenant logo's base64
+/// column "must not be copied" the moment a second binary needs storing. That
+/// warning is about a blob on a row read on every request; this is a blob on a
+/// row nothing reads except a download.
+///
+/// WHAT THIS IS NOT
+/// ----------------
+/// Not object storage. For a hospital running one API against one Postgres —
+/// which is every deployment of this system today — a table is the boring,
+/// correct answer: one backup, one restore, one set of RLS policies, no
+/// credentials, no bucket lifecycle, and no second thing to secure. It stops
+/// being the right answer at the point where files outgrow the database's
+/// backup window, and `LabAttachmentStorage` exists so that swap is one file.
+model LabAttachment {
+  id       Int    @id @default(autoincrement())
+  tenant   Tenant @relation(fields: [tenantId], references: [id])
+  tenantId Int
+
+  orderItem   LabOrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  orderItemId Int
+
+  /// As uploaded, sanitised. Shown to the doctor and used for the download.
+  fileName String
+  /// Validated against the file's own leading bytes, never trusted as sent.
+  mimeType String
+  sizeBytes Int
+  /// SHA-256 of the content. Lets a reader confirm the file they downloaded is
+  /// the file that was uploaded, which is the question asked when a report is
+  /// disputed.
+  checksum String
+
+  kind LabAttachmentKind @default(REPORT)
+  /// Optional note — "second sample, repeat assay", "page 2 of 3".
+  description String?
+
+  uploadedBy   User?    @relation("LabAttachmentUploadedBy", fields: [uploadedById], references: [id])
+  uploadedById Int?
+  uploadedAt   DateTime @default(now())
+
+  data LabAttachmentData?
+
+  @@index([orderItemId])
+  @@index([tenantId])
+  @@map("lab_attachments")
+}
+
+/// The bytes, alone in their own table.
+///
+/// One row per attachment, joined only by the download route. See the note on
+/// `LabAttachment` for why this is not a column there.
+model LabAttachmentData {
+  id           Int           @id @default(autoincrement())
+  tenant       Tenant        @relation(fields: [tenantId], references: [id])
+  tenantId     Int
+  attachment   LabAttachment @relation(fields: [attachmentId], references: [id], onDelete: Cascade)
+  attachmentId Int           @unique
+
+  content Bytes
+
+  @@index([tenantId])
+  @@map("lab_attachment_data")
+}
+
+/// A lab at another hospital that this one may send work to.
+///
+/// The sending half of a two-sided opt-in, identical in shape and reasoning to
+/// `PharmacyPartner`: partnerships start offline, the lab gives out its code,
+/// and the lookup answers only for tenants that have set
+/// `acceptsExternalLabOrders`. A browsable directory of every lab on the
+/// platform would turn the vendor's customer base into something any
+/// administrator can read.
+/// What this hospital owes a partner laboratory for work it sent out.
+///
+/// WHY THIS ROW EXISTS AT ALL
+/// --------------------------
+/// Under `ORIGIN_PAYS` the laboratory raises a real invoice against this
+/// hospital — in **its own** tenant. So the debt was entirely invisible from
+/// this side: the clinic's books showed the patient's charge and nothing
+/// owing, and "what do we owe them this month" could not be answered from
+/// anywhere in the product. The clinic found out when a statement arrived.
+///
+/// That is the same shape as the hole this whole feature started with. There,
+/// neither party billed; here, one party billed and the other could not see
+/// it. Both are a number that exists in one tenant and matters in two.
+///
+/// WHY A COPY RATHER THAN A SHARED INVOICE
+/// ---------------------------------------
+/// The lab's `Invoice` belongs to the lab. Making it visible here would need a
+/// policy exception on `invoices` — after which `tenantId =
+/// app_current_tenant()` is no longer the whole truth for the most
+/// money-sensitive table in the system. So the laboratory writes a **notice**
+/// into this hospital's scope, owned by them, protected by their own policy,
+/// exactly as `LabReferral` and the result write-back already do.
+///
+/// It is a snapshot for the same reason those are: the amount is what was
+/// charged at accession, and the lab repricing its catalogue next quarter must
+/// not restate a debt already incurred.
+///
+/// WHAT THIS IS NOT
+/// ----------------
+/// Not an accounts-payable ledger. There are no part-payments, no credit
+/// notes, no aging buckets — settlement between two companies is a bank
+/// transfer and a telephone call, and modelling half of it would produce a
+/// balance that disagrees with both parties' real books. `settledAt` records
+/// that somebody here says it has been dealt with, and nothing more.
+model PartnerLabCharge {
+  id Int @id @default(autoincrement())
+
+  /// The hospital that owes it. **This row lives in their scope**, written by
+  /// the laboratory across the boundary.
+  tenant   Tenant @relation("PartnerLabChargeOwner", fields: [tenantId], references: [id])
+  tenantId Int
+
+  /// The laboratory that is owed. Held as an id and a name: the id so the list
+  /// can group, the name so the row still reads correctly after a rename or
+  /// after the partnership has ended.
+  partnerTenant   Tenant @relation("PartnerLabChargeLab", fields: [partnerTenantId], references: [id])
+  partnerTenantId Int
+  partnerName     String
+
+  /// The referral this came from, in **the laboratory's** scope. Opaque here
+  /// and deliberately not a relation — it is what somebody quotes on the
+  /// telephone, nothing more.
+  sourceReferralId Int
+  /// The six-character reference both sides can say out loud.
+  reference        String
+
+  /// **Our own** specimen number for the work this bill is for.
+  ///
+  /// The thing that makes this row auditable rather than merely a figure. The
+  /// referral reference identifies the transmission; this identifies the order
+  /// a doctor here actually raised, so "what is this charge for" is answered
+  /// against our own records rather than by ringing the laboratory.
+  ///
+  /// Nullable for rows written before accessions reached the payable, and for
+  /// the case where the order somehow had none.
+  sourceAccession  String?
+
+  /// What the laboratory charged, captured at accession.
+  amount Decimal @db.Decimal(10, 2)
+  /// How many tests it covered. Enough to sanity-check an amount without
+  /// carrying the test names, which are a sharper leak than a drug name and
+  /// have no business in this hospital's payables.
+  testCount Int
+
+  incurredAt DateTime @default(now())
+
+  /// Somebody here says it has been paid. Not a payment — no money moves in
+  /// this system between two companies — and reversible for that reason.
+  settledAt   DateTime?
+  settledBy   User?     @relation("PartnerLabChargeSettledBy", fields: [settledById], references: [id])
+  settledById Int?
+  settledNote String?
+
+  /// One notice per referral, so a retried write-back cannot double the debt.
+  /// The write happens after the accession transaction has committed — like
+  /// `transmit` — so a retry is a real possibility rather than a theoretical
+  /// one.
+  @@unique([tenantId, partnerTenantId, sourceReferralId])
+  @@index([tenantId, settledAt])
+  @@map("partner_lab_charges")
+}
+
+model LabPartner {
+  id             Int    @id @default(autoincrement())
+  tenant         Tenant @relation("LabPartnerOwner", fields: [tenantId], references: [id])
+  tenantId       Int
+  partner        Tenant @relation("LabPartnerLab", fields: [partnerTenantId], references: [id])
+  partnerTenantId Int
+
+  label String
+
+  /// Who pays this laboratory for work sent to it. See `ReferralBilling`.
+  ///
+  /// A commercial term of *this* relationship, which is why it sits here and
+  /// not on either tenant. It must also be known at **ordering** time, because
+  /// that is when the sending hospital decides whether to charge the patient —
+  /// resolving it only at accession would mean the referring hospital had
+  /// already billed, or already failed to bill, before anybody knew which was
+  /// correct.
+  ///
+  /// Only ever read when a referral is sent. Every read at the receiving end
+  /// uses `LabReferral.billing`, which is the snapshot.
+  billing ReferralBilling @default(ORIGIN_PAYS)
+
+  /// Removal is a soft delete and has to be: orders already sent carry
+  /// `routedToTenantId`, and "where did this go" is asked precisely when a
+  /// partnership has ended. Re-adding reactivates the row — the unique index
+  /// covers inactive rows too, so a hard refusal would name a row the
+  /// administrator cannot see and has no way to reach.
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@unique([tenantId, partnerTenantId])
+  @@index([tenantId])
+  @@map("lab_partners")
+}
+
+/// A test order transmitted to a partner lab, and the result coming back.
+///
+/// WHY THIS IS NOT ONE-WAY, AND THE PRESCRIPTION REFERRAL IS
+/// --------------------------------------------------------
+/// `PrescriptionReferral` deliberately never reports back: the medicine handed
+/// to the patient is the deliverable, and making the receiving hospital write
+/// into the sender's rows would double the blast radius of that feature for a
+/// convenience.
+///
+/// A lab referral cannot be built that way, because **the result is the
+/// deliverable**. An order sent out that never comes back is a doctor
+/// telephoning another company for a number, which is the thing this replaces.
+///
+/// So the write-back is the exact mirror of the send. The result is a snapshot
+/// written into the *ordering* hospital's scope through `forTenant`, owned by
+/// them, protected by their own policy like any other row of theirs. No shared
+/// rows, and — the part worth re-reading before changing this — **no policy
+/// exception**: `tenantId = app_current_tenant()` stays the whole truth on both
+/// tables. That is also how real electronic result delivery works. You send a
+/// message; you do not grant database access.
+///
+/// What crosses, in both directions, is the patient's name and date of birth,
+/// the tests, the clinical question, and the result. No diagnosis, no notes, no
+/// other results, no allergies. `NEVER_TRANSMITTED` in `lab-referral.ts` is
+/// data so a test can assert on it.
+model LabReferral {
+  id       Int    @id @default(autoincrement())
+  /// The lab that received it. This row belongs to them.
+  tenant   Tenant @relation("LabReferralReceiver", fields: [tenantId], references: [id])
+  tenantId Int
+
+  sourceTenant     Tenant @relation("LabReferralSender", fields: [sourceTenantId], references: [id])
+  sourceTenantId   Int
+  /// Denormalised, so the referral still names the sender after a rename.
+  sourceTenantName String
+
+  /// Opaque ids in the sender's scope. Meaningless to read here, and exactly
+  /// what the write-back needs in order to land on the right rows.
+  sourceOrderId Int
+
+  /// The **sending** hospital's accession number for this work.
+  ///
+  /// Carried so both organisations can quote one number at each other. A
+  /// send-out that has two identifiers and no mapping between them is how a
+  /// telephone call about a specimen turns into twenty minutes of searching;
+  /// real reference laboratories print the referring site's number on the
+  /// report beside their own for exactly this reason.
+  ///
+  /// The receiving lab still raises its **own** accession when it accessions
+  /// the work — that is what goes on its own tube and its own worklist. This
+  /// is the other party's, held alongside.
+  sourceAccession String?
+
+  /// Six characters, quoted by whoever chases it. Same alphabet as a
+  /// prescription reference — no 0/O/1/I/L.
+  reference String
+
+  patientName String
+  patientDob  DateTime?
+
+  requestedByName String
+  /// The clinical question. Sent because a lab that does not know why a test
+  /// was asked for cannot comment usefully on the answer.
+  clinicalDetails String?
+  priority        LabPriority @default(ROUTINE)
+
+  receivedAt DateTime @default(now())
+
+  /// Who owes this laboratory for this piece of work. See `ReferralBilling`.
+  ///
+  /// **A snapshot, taken at the moment of sending**, exactly as
+  /// `PrescriptionReferralItem` captures the medicine as text and
+  /// `DispenseLine` captures `unitPrice`. Renegotiating the contract next
+  /// quarter must not restate who owed what for work already sent.
+  ///
+  /// Everything at this end reads it from here and never from `LabPartner` —
+  /// which is one line shorter, wrong, and impossible anyway, since the
+  /// partnership row lives in the *sender's* scope and there is none here.
+  billing ReferralBilling @default(ORIGIN_PAYS)
+
+  /// When the **sending** hospital drew the specimen, and when it left them.
+  ///
+  /// A reference laboratory receiving a send-out is not drawing blood from
+  /// anybody — the patient was never there. What it needs to know is when the
+  /// tube was taken, because time-since-draw changes how a potassium, a
+  /// glucose and a coagulation screen should be read, and a laboratory that
+  /// cannot see it is guessing at sample integrity.
+  ///
+  /// Null means the sender has not drawn it yet: the referral has been
+  /// transmitted so the lab can expect it, and the tube is still to come.
+  /// That is an ordinary state and the incoming queue says so rather than
+  /// showing a specimen that does not exist.
+  collectedAt  DateTime?
+  dispatchedAt DateTime?
+
+  /// When this lab took the work on and raised its own order for it.
+  /// Null means it is still sitting in the incoming queue, unaccessioned.
+  acceptedAt DateTime?
+
+  /// The order this lab raised to actually do the work. One per referral.
+  localOrder LabOrder? @relation("ReferralLocalOrder")
+
+  /// Answered — the result has been written back into the sender's scope.
+  resultedAt DateTime?
+
+  /// Refused, with a reason that is kept. "Sample degraded in transit, please
+  /// resend" changes what the sending hospital does next; a bare refusal sends
+  /// them to the telephone, which is what this replaces.
+  declinedAt    DateTime?
+  declineReason String?
+
+  createdAt DateTime @default(now())
+
+  items LabReferralItem[]
+
+  @@unique([tenantId, reference])
+  @@index([tenantId, resultedAt])
+  @@map("lab_referrals")
+}
+
+/// One test on a referral.
+///
+/// Carries no `testId`: the receiving lab has its own catalogue and mapping a
+/// name onto it is a human job at the bench, exactly as it is at a pharmacy
+/// counter. `sourceOrderItemId` is what the result is written back against.
+model LabReferralItem {
+  id         Int         @id @default(autoincrement())
+  tenant     Tenant      @relation(fields: [tenantId], references: [id])
+  tenantId   Int
+  referral   LabReferral @relation(fields: [referralId], references: [id], onDelete: Cascade)
+  referralId Int
+
+  /// Opaque id of the corresponding row in the sender's scope.
+  sourceOrderItemId Int
+
+  testCode     String
+  testName     String
+  category     LabCategory
+  specimenType LabSpecimenType @default(BLOOD)
+
+  @@index([referralId])
+  @@index([tenantId])
+  @@map("lab_referral_items")
+}
+
 model AuditLog {
-  id         Int          @id @default(autoincrement())
+  id Int @id @default(autoincrement())
 
   /// Nullable, unlike every other tenant-scoped table.
   ///
@@ -1008,9 +3141,9 @@ model AuditLog {
   /// Consequence: the RLS policy on audit_logs differs from the others. Reads
   /// are still restricted to the caller's hospital, so a NULL-tenant row is
   /// invisible to every tenant and readable only by platform tooling.
-  tenant   Tenant? @relation(fields: [tenantId], references: [id])
-  tenantId Int?
-  user       User?        @relation(fields: [userId], references: [id])
+  tenant     Tenant?   @relation(fields: [tenantId], references: [id])
+  tenantId   Int?
+  user       User?     @relation(fields: [userId], references: [id])
   userId     Int?
   actorEmail String?
   actorRole  UserRole?

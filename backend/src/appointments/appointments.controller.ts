@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
-import { UserRole } from '@prisma/client';
+import { UserRole, TenantModule } from '@prisma/client';
 import { AppointmentsService } from './appointments.service';
 import { BillingService } from '../billing/billing.service';
 import { CreateAppointmentDto } from './dto/create-appointment.dto';
@@ -7,11 +7,13 @@ import { UpdateAppointmentDto } from './dto/update-appointment.dto';
 import { QueryAppointmentsDto } from './dto/query-appointments.dto';
 import { ChangeStatusDto } from './dto/change-status.dto';
 import { Roles } from '../common/decorators/roles.decorator';
+import { RequiresModule } from '../common/decorators/requires-module.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { AuditAction } from '../common/decorators/audit.decorator';
 import { AuthUser } from '../common/types/auth-user';
 
 @Controller('appointments')
+@RequiresModule(TenantModule.CLINIC)
 export class AppointmentsController {
   constructor(
     private readonly appointments: AppointmentsService,

@@ -10,13 +10,33 @@
 
 import { fromMinor, sumMinor, toMinor, toMoneyString } from '../billing/money';
 
-/** A payment reduced to what a report needs. No payer, no invoice, no patient. */
+/**
+ * A payment reduced to what a report needs. No payer, no patient, no invoice —
+ * only which *kind* of invoice, which is a fact about whose books the money is
+ * on and not about who paid it or what for.
+ */
 export interface ReportablePayment {
   amountMinor: number;
   /** `YYYY-MM` in the hospital's own timezone, not the server's. */
   monthKey: string;
   method: string;
   receivedAt: Date;
+  /**
+   * HOSPITAL, PHARMACY or LAB.
+   *
+   * Reports split on this rather than summing everything, because in SEPARATE
+   * mode these are separate businesses and one number covering all of them
+   * answers a question nobody asked. Optional so existing callers and fixtures
+   * keep working; absent means the hospital's, which is what every payment
+   * before the pharmacy could bill actually was.
+   *
+   * LAB was added with diagnostics and is treated exactly as PHARMACY is —
+   * reported beside the hospital's takings, never inside them. The failure to
+   * avoid is the one this report was rewritten to fix: a plausible figure that
+   * silently adds a second business's trade to a clinic's and answers a
+   * question nobody asked.
+   */
+  kind?: 'HOSPITAL' | 'PHARMACY' | 'LAB';
 }
 
 export interface MonthTotal {
@@ -354,12 +374,63 @@ export interface CollectedPayment {
  * be counted from the thing that records money. The audit trail says a payment
  * was recorded; the payment row says how much.
  */
+/** A refund, reduced to who issued it and how much. */
+export interface IssuedRefund {
+  refundedById: number;
+  amountMinor: number;
+}
+
+export interface StaffCollection {
+  /** Gross taken. */
+  total: string;
+  /** Gross given back. */
+  refunded: string;
+  /**
+   * What the hospital actually kept. This is the figure a screen should lead
+   * with — it is the one that agrees with the payments ledger billing staff
+   * read, and two screens disagreeing about the same day destroys trust in
+   * both.
+   */
+  net: string;
+  count: number;
+  refunds: number;
+  methods: { method: string; amount: string }[];
+}
+
+/**
+ * What each member of staff took, gave back, and kept.
+ *
+ * WHY ALL THREE
+ * -------------
+ * `total` alone was the bug: a £500 payment refunded in full read as £500
+ * collected on the admin's screen while billing's ledger showed nothing. But
+ * netting them into a single figure would be the opposite error — a day that
+ * took 5,000 and refunded 500 is not the same day as one that took 4,500, and
+ * only the gross pair can tell them apart when somebody reconciles against a
+ * bank statement. Gross in, gross out, net derived.
+ *
+ * `methods` stays gross deliberately. It answers "what was in the card
+ * terminal", and a refund does not remove a card payment from the terminal's
+ * batch — it appears as its own reversal.
+ *
+ * A member of staff who only issued refunds today still gets a row: their net
+ * is negative, which is a real thing that happened and should not vanish
+ * because no positive payment shares the key.
+ */
 export function collectionsByStaff(
   payments: CollectedPayment[],
-): Map<number, { total: string; count: number; methods: { method: string; amount: string }[] }> {
+  refunds: IssuedRefund[] = [],
+): Map<number, StaffCollection> {
   const grouped = new Map<number, CollectedPayment[]>();
   for (const p of payments) {
     grouped.set(p.receivedById, [...(grouped.get(p.receivedById) ?? []), p]);
+  }
+
+  const refundsByStaff = new Map<number, number[]>();
+  for (const r of refunds) {
+    refundsByStaff.set(r.refundedById, [...(refundsByStaff.get(r.refundedById) ?? []), r.amountMinor]);
+    // Somebody who refunded and took nothing still belongs in the report.
+    if (!grouped.has(r.refundedById)) grouped.set(r.refundedById, []);
   }
 
   return new Map(
@@ -367,11 +438,20 @@ export function collectionsByStaff(
       const byMethod = new Map<string, number[]>();
       for (const r of rows) byMethod.set(r.method, [...(byMethod.get(r.method) ?? []), r.amountMinor]);
 
+      const takenMinor = sumMinor(rows.map((r) => r.amountMinor));
+      const givenBack = refundsByStaff.get(userId) ?? [];
+      const refundedMinor = sumMinor(givenBack);
+
       return [
         userId,
         {
-          total: fromMinor(sumMinor(rows.map((r) => r.amountMinor))),
+          total: fromMinor(takenMinor),
+          refunded: fromMinor(refundedMinor),
+          // Subtracted in minor units. Two money strings subtracted as floats
+          // is how a penny goes missing across a month of rows.
+          net: fromMinor(takenMinor - refundedMinor),
           count: rows.length,
+          refunds: givenBack.length,
           methods: [...byMethod.entries()]
             .map(([method, amounts]) => ({ method, amount: fromMinor(sumMinor(amounts)) }))
             .sort((a, b) => toMinor(b.amount) - toMinor(a.amount)),
