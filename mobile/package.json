@@ -5,15 +5,19 @@
   "main": "expo-router/entry",
   "scripts": {
     "start": "expo start",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
     "typecheck": "tsc --noEmit",
     "test": "jest",
-    "icons": "node scripts/make-icons.mjs"
+    "icons": "node scripts/make-icons.mjs",
+    "prebuild:android": "expo prebuild --platform android --clean",
+    "sign:android": "node patch-signing.js",
+    "aab": "npm run prebuild:android && npm run sign:android && cd android && gradlew bundleRelease"
   },
   "dependencies": {
     "expo": "~52.0.0",
     "expo-asset": "~11.0.5",
+    "expo-build-properties": "~0.13.3",
     "expo-constants": "~17.0.0",
     "expo-crypto": "~14.0.0",
     "expo-device": "~7.0.0",
@@ -28,6 +32,7 @@
     "expo-secure-store": "~14.0.0",
     "expo-sharing": "~13.0.1",
     "expo-status-bar": "~2.0.0",
+    "expo-system-ui": "~4.0.9",
     "react": "18.3.1",
     "react-native": "0.76.9",
     "react-native-safe-area-context": "4.12.0",

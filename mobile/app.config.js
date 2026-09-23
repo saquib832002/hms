@@ -74,6 +74,23 @@ const ENVIRONMENTS = {
 const BRAND_FIELD = '#0D1317';
 const BRAND_RED = '#E8262D';
 
+/**
+ * Android's `versionCode`, and the one number a local build will not invent.
+ *
+ * EAS keeps this remotely and increments it per build (`appVersionSource:
+ * "remote"` in `eas.json`). A Gradle build has no such memory, so it is here —
+ * and Play refuses any upload whose `versionCode` is not strictly higher than
+ * the last one it accepted. That refusal arrives *after* a fifteen-minute
+ * build and an upload, which is why this sits at the top of the file rather
+ * than buried in the Android block.
+ *
+ * **Bump it before every release build.** It is unrelated to `version` below:
+ * that string is what a person reads on the store page, this integer is what
+ * Android compares. They move independently and a release can change one
+ * without the other.
+ */
+const VERSION_CODE = Number(process.env.ANDROID_VERSION_CODE ?? 1);
+
 const config = ENVIRONMENTS[ENV];
 
 if (!config) {
@@ -138,6 +155,7 @@ module.exports = {
 
     android: {
       package: config.packageId,
+      versionCode: VERSION_CODE,
       permissions: ['USE_BIOMETRIC', 'USE_FINGERPRINT'],
       /*
        * `backgroundColor` must equal the field the foreground was drawn
@@ -175,6 +193,39 @@ module.exports = {
           color: BRAND_RED,
         },
       ],
+
+      /*
+       * The Android build settings a generated project cannot be asked for
+       * afterwards — these have to be in place *before* `expo prebuild` writes
+       * `android/`, because that is the moment the Gradle files are produced.
+       *
+       * `targetSdkVersion: 36` is not a preference. Since 31 August 2026 Play
+       * rejects any upload targeting lower, and Expo SDK 52 defaults to 35 —
+       * so without this line the AAB builds, uploads, and is refused by the
+       * store with a message about the target SDK. SDK 55 and above default to
+       * 36 and this override becomes redundant rather than wrong.
+       *
+       * `useLegacyPackaging: false` loads native libraries straight out of the
+       * APK, which is what Android 15's 16 KB memory pages require. The old
+       * behaviour extracted them at install time and fails on those devices.
+       *
+       * Proguard and resource shrinking are on because this is a release build
+       * of an app that carries patient data — a smaller download is the lesser
+       * reason. Watch the first shrunk build for anything reached reflectively:
+       * that is where shrinking breaks things, and it breaks them at runtime.
+       */
+      [
+        'expo-build-properties',
+        {
+          android: {
+            targetSdkVersion: 36,
+            compileSdkVersion: 36,
+            useLegacyPackaging: false,
+            enableProguardInReleaseBuilds: true,
+            enableShrinkResourcesInReleaseBuilds: true,
+          },
+        },
+      ],
     ],
 
     extra: {
@@ -190,7 +241,7 @@ module.exports = {
        * It is not a secret: it identifies the project on Expo's side and is
        * committed on purpose, like the Android package id beside it.
        */
-      // eas: { projectId: 'paste-the-id-eas-init-prints-here' },
+      eas: { projectId: 'e14e9702-8f6f-4b34-9da1-766e7d3c68d4' },
 
       /**
        * Where the API lives when there is no dev server to ask.
