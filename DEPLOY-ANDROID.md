@@ -283,6 +283,11 @@ phones verify is then Google's and cannot be lost.
 ```powershell
 cd mobile
 
+# 0. Cheapest gate first: bundle the JS exactly as Gradle will, ~20 seconds,
+#    no Android SDK needed. A module that cannot be resolved fails here
+#    instead of three minutes into a release build.
+npm run bundle:check
+
 # 1. Bump the versionCode. Play refuses anything not strictly higher
 #    than the last upload, and it tells you that after the build.
 $env:ANDROID_VERSION_CODE = "2"

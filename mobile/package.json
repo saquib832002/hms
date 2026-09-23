@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "jest",
     "icons": "node scripts/make-icons.mjs",
+    "bundle:check": "expo export --platform android --output-dir dist --clear",
     "prebuild:android": "expo prebuild --platform android --clean",
     "sign:android": "node patch-signing.js",
     "aab": "npm run prebuild:android && npm run sign:android && cd android && gradlew bundleRelease"
@@ -33,6 +34,7 @@
     "expo-sharing": "~13.1.5",
     "expo-status-bar": "~2.2.3",
     "expo-system-ui": "~5.0.11",
+    "query-string": "^7.1.3",
     "react": "19.0.0",
     "react-native": "0.79.6",
     "react-native-safe-area-context": "5.4.0",
