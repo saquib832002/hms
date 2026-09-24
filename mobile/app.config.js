@@ -117,6 +117,33 @@ const VERSION_CODE = Number(process.env.ANDROID_VERSION_CODE ?? 1);
  */
 const ANDROID_SDK = Number(process.env.ANDROID_TARGET_SDK ?? 36);
 
+/**
+ * React Native's new architecture — on by default, and switchable off from the
+ * command line because on Windows it is what makes the build fail.
+ *
+ *   $env:ANDROID_NEW_ARCH = "false"
+ *
+ * The new architecture generates C++ for every native module, and CMake names
+ * each object file by embedding the whole source path *inside* the build path.
+ * The result reaches about 400 characters in this repository, and Windows
+ * refuses anything past 260 unless long paths are enabled — reported by ninja
+ * as *"Filename longer than 260 characters"* against a generated file nobody
+ * wrote, after Kotlin has compiled and the JS bundle has been built.
+ *
+ * **Moving the project does not fix it.** The arithmetic was checked: even a
+ * `subst` drive at `X:\mobile` still comes to 311. The path is dominated by
+ * `react-native-safe-area-context`'s own codegen directories, which no choice
+ * of clone location can shorten. Either Windows allows long paths, or the C++
+ * is not generated at all — and turning the new architecture off is the
+ * second of those.
+ *
+ * It is a real trade rather than a free escape. The old bridge is what every
+ * released React Native app ran on until recently and RN 0.79 fully supports
+ * it, so it is safe; it is also being retired, so this is a way to get an
+ * installable build today rather than somewhere to stay.
+ */
+const NEW_ARCH = process.env.ANDROID_NEW_ARCH !== 'false';
+
 const config = ENVIRONMENTS[ENV];
 
 if (!config) {
@@ -150,7 +177,7 @@ module.exports = {
     orientation: 'portrait',
     scheme: config.scheme,
     userInterfaceStyle: 'light',
-    newArchEnabled: true,
+    newArchEnabled: NEW_ARCH,
 
     /*
      * Square, full-bleed, no transparency. Both stores mask the corners

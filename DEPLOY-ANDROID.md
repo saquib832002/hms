@@ -327,6 +327,70 @@ keytool -printcert -jarfile android\app\build\outputs\bundle\release\app-release
 On macOS or Linux the only differences are `./gradlew bundleRelease` and
 `ANDROID_VERSION_CODE=2 APP_ENV=production` in front of the command.
 
+#### 3c. Windows refuses the C++ build: "Filename longer than 260 characters"
+
+```
+ninja: error: Stat(safeareacontext_autolinked_build/CMakeFiles/
+  react_codegen_safeareacontext.dir/C_/…/safeareacontextJSI-generated.cpp.o):
+  Filename longer than 260 characters
+> Task :app:buildCMakeRelWithDebInfo[arm64-v8a] FAILED
+```
+
+React Native's **new architecture** generates C++ for every native module, and
+CMake names each object file by embedding the whole source path *inside* the
+build path — so the two are added together. In this repository that reaches
+about **397 characters**, against a Windows limit of 260.
+
+**Moving the project does not fix this**, which is the counter-intuitive part
+and worth the arithmetic:
+
+| Clone location | Worst-case path |
+| --- | --- |
+| `C:\Najmus\ReactApp\hospital-management-system\mobile` | 397 |
+| `C:\Najmus\ReactApp\hms\mobile` | 351 |
+| `C:\hms\mobile` | 319 |
+| `subst X:` → `X:\mobile` | **311** |
+
+Even a one-letter drive is over. The length is dominated by
+`react-native-safe-area-context`'s own codegen directories, which no choice of
+clone location shortens. So `subst` and renaming the folder are both dead ends
+— worth knowing before spending an afternoon on them.
+
+Two things actually work.
+
+**a. Let Windows use long paths.** The real fix, and it helps every tool on the
+machine. In an **Administrator** PowerShell:
+
+```powershell
+New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+  -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force
+git config --system core.longpaths true
+```
+
+Reboot. Then rebuild. The caveat: the program that has to honour it is the
+`ninja` bundled with the Android SDK's CMake, and older builds of it are not
+long-path aware whatever the registry says. If it still refuses, install a
+newer CMake from **Android Studio → SDK Manager → SDK Tools → CMake** and try
+again before moving on.
+
+**b. Build without the new architecture.** No codegen, so the path never
+exists:
+
+```powershell
+$env:ANDROID_NEW_ARCH = "false"; $env:ANDROID_VERSION_CODE = "2"; $env:APP_ENV = "production"; npm run aab
+```
+
+One environment variable, no code change. This is a real trade rather than a
+free escape: the old bridge is what every released React Native app ran on
+until recently and RN 0.79 fully supports it, so it is safe — and it is being
+retired, so it is a way to get an installable build *today* rather than
+somewhere to stay. Take the AAB, get the app onto a handset, and come back to
+(a) when there is time.
+
+`patch-signing.js` measures this folder and warns before Gradle starts, because
+the error names a generated file nobody wrote and arrives minutes in, after
+Kotlin has compiled and the JS has bundled.
+
 #### Why step 3 exists at all
 
 `android/` is **generated**, and `--clean` deletes it first — so anything

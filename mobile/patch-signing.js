@@ -290,6 +290,50 @@ if (fs.existsSync(PROPS_FILE)) {
   }
 }
 
+/*
+ * 6. Warn, on Windows, when this directory sits too deep for the C++ build.
+ *
+ * Not an edit — a preflight. React Native's new architecture generates C++ for
+ * every native module, and CMake names each object file by embedding the
+ * **full source path inside the build path**, so the two are added together:
+ *
+ *   …/android/app/.cxx/RelWithDebInfo/<hash>/arm64-v8a/
+ *     safeareacontext_autolinked_build/CMakeFiles/react_codegen_….dir/
+ *       C_/…/node_modules/react-native-safe-area-context/android/build/
+ *         generated/source/codegen/jni/react/renderer/components/…JSI-generated.cpp.o
+ *
+ * Windows refuses that beyond 260 characters unless long paths are switched
+ * on, and ninja reports it as `Stat(...): Filename longer than 260
+ * characters` — a message naming a file nobody wrote, three minutes into a
+ * build, after Kotlin has compiled and the JS bundle has been built. The
+ * length is decided by where the repository was cloned, which is the last
+ * place anybody looks.
+ *
+ * So it is said before Gradle starts, with the remedies, rather than
+ * discovered. See DEPLOY-ANDROID.md.
+ */
+if (process.platform === 'win32') {
+  /* The longest module name seen in practice; the suffix is CMake's, not ours. */
+  const WORST = [
+    'android/app/.cxx/RelWithDebInfo/0000000/arm64-v8a',
+    'safeareacontext_autolinked_build/CMakeFiles/react_codegen_safeareacontext.dir',
+    `${__dirname.replace(/^([A-Za-z]):/, '$1_').replace(/\\/g, '/')}`,
+    'node_modules/react-native-safe-area-context/android/build/generated/source',
+    'codegen/jni/react/renderer/components/safeareacontext',
+    'safeareacontextJSI-generated.cpp.o',
+  ].join('/').length + __dirname.length + 1;
+
+  if (WORST > 260) {
+    console.warn(
+      `\n  ! This folder is ${__dirname.length} characters deep, and the C++ build needs about\n` +
+        `    ${WORST}. Windows refuses paths past 260 unless long paths are enabled, and\n` +
+        '    ninja reports it as "Filename longer than 260 characters" against a\n' +
+        '    generated file, minutes into the build.\n\n' +
+        '    Fix it before building — see DEPLOY-ANDROID.md, section 3c.\n',
+    );
+  }
+}
+
 /* ── write and report ─────────────────────────────────────────────────────── */
 
 fs.writeFileSync(GRADLE, gradle);
