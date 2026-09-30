@@ -319,7 +319,11 @@ DECLARE
   t text;
   -- tenant_applications joins them: an applicant's contact details are the
   -- vendor's record, and one hospital must never learn that another applied.
-  platform_tables text[] := ARRAY['platform_users', 'break_glass_grants', 'tenant_applications'];
+  -- platform_password_reset_tokens holds live links into accounts that can
+  -- open a grant against any hospital. If any table in this product must not
+  -- be readable from inside a tenant's scope, it is this one.
+  platform_tables text[] := ARRAY['platform_users', 'break_glass_grants', 'tenant_applications',
+                                  'platform_password_reset_tokens'];
 BEGIN
   FOREACH t IN ARRAY platform_tables LOOP
     IF to_regclass(format('public.%I', t)) IS NULL THEN

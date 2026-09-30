@@ -338,54 +338,65 @@ ninja: error: Stat(safeareacontext_autolinked_build/CMakeFiles/
 
 React Native's **new architecture** generates C++ for every native module, and
 CMake names each object file by embedding the whole source path *inside* the
-build path — so the two are added together. In this repository that reaches
-about **397 characters**, against a Windows limit of 260.
+build path — so the two are added together.
 
-**Moving the project does not fix this**, which is the counter-intuitive part
-and worth the arithmetic:
+**The registry flag does not fix it, and the reason is specific.** Windows long
+paths were enabled here and the identical error came back. `ninja` refuses
+before it ever calls Windows: it holds its own `path.size() > MAX_PATH` check
+and raises this message itself, so the flag is never consulted. Nothing about
+enabling it is wasted — it helps Gradle, git and the rest of the toolchain, and
+it is worth having — but this particular gate is ninja's own.
 
-| Clone location | Worst-case path |
+**Which means the length that matters is the one in the error, and it is
+relative.** The first measurement here was of the *absolute* path — ~397
+characters — and concluded that no clone location could get under 260. That was
+the wrong string. Ninja prints, and checks, the path relative to its build
+directory:
+
+| Location of `mobile/` | Path ninja measures |
 | --- | --- |
-| `C:\Najmus\ReactApp\hospital-management-system\mobile` | 397 |
-| `C:\Najmus\ReactApp\hms\mobile` | 351 |
-| `C:\hms\mobile` | 319 |
-| `subst X:` → `X:\mobile` | **311** |
+| `C:\Najmus\ReactApp\hospital-management-system\mobile` | **294** — fails |
+| `C:\hms\mobile` | 255 — passes, with 5 to spare |
+| `subst X:` → build from `X:\` | 244 on paper — **does not work, see (b)** |
 
-Even a one-letter drive is over. The length is dominated by
-`react-native-safe-area-context`'s own codegen directories, which no choice of
-clone location shortens. So `subst` and renaming the folder are both dead ends
-— worth knowing before spending an afternoon on them.
+So shortening the path *does* work after all, and the earlier table in this
+section was wrong. The dominant term is still
+`react-native-safe-area-context`'s codegen directories, which is why the
+margin is thin even at `C:\hms`.
 
-Two things actually work.
+**a. There is no longer an escape hatch, and this is the important change.**
+`ANDROID_NEW_ARCH=false` used to remove the codegen entirely, and it is what
+produced the first installable build of this app. It is gone: **RN 0.82 ignores
+the flag** — the legacy architecture was removed rather than deprecated — and
+Expo SDK 55 dropped `newArchEnabled` from the config schema. On SDK 57 (RN 0.86)
+it is not a key this project accepts, so it was deleted from `app.config.js`
+rather than left reading against a value nothing consumes.
 
-**a. Let Windows use long paths.** The real fix, and it helps every tool on the
-machine. In an **Administrator** PowerShell:
+Which makes the path length a **hard constraint**. It is the reason the working
+copy lives at `C:\hms` and the reason the five characters of headroom are worth
+watching rather than a curiosity.
 
-```powershell
-New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
-  -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force
-git config --system core.longpaths true
-```
+**b. `subst` does not work, and it was tried.** Building from `X:\` mapped to
+the `mobile` folder failed with the identical message, and the reason is in the
+output: ninja reported *Entering directory
+`C:\Najmus\ReactApp\…\android\app\.cxx\…`*, and the object path still embedded
+`C_/Najmus/…`. Gradle and CMake canonicalise the drive back to its real path, so
+the short prefix never reaches the build. The length argument is right and the
+mechanism for shortening it is not — `subst` is a dead end, so the only way to
+shorten the path is to actually relocate the files.
 
-Reboot. Then rebuild. The caveat: the program that has to honour it is the
-`ninja` bundled with the Android SDK's CMake, and older builds of it are not
-long-path aware whatever the registry says. If it still refuses, install a
-newer CMake from **Android Studio → SDK Manager → SDK Tools → CMake** and try
-again before moving on.
+**c. Move the working copy to `C:\hms`.** 255 characters, and what actually
+fixed this — the only shortening that reaches CMake, since the path is real
+rather than mapped. Five characters of headroom, so a future native module with
+longer codegen directories puts it back over; a shorter root (`C:\h`, 246) buys
+a little more. With (a) gone this is no longer one option among three, it is the
+mechanism, and a dependency bump is now something to re-measure after.
 
-**b. Build without the new architecture.** No codegen, so the path never
-exists:
-
-```powershell
-$env:ANDROID_NEW_ARCH = "false"; $env:ANDROID_VERSION_CODE = "2"; $env:APP_ENV = "production"; npm run aab
-```
-
-One environment variable, no code change. This is a real trade rather than a
-free escape: the old bridge is what every released React Native app ran on
-until recently and RN 0.79 fully supports it, so it is safe — and it is being
-retired, so it is a way to get an installable build *today* rather than
-somewhere to stay. Take the AAB, get the app onto a handset, and come back to
-(a) when there is time.
+**On installing a newer CMake:** worth trying and not promised. Newer `ninja`
+still carries the same explicit check, so it may refuse identically. Nothing in
+the generated project pins a CMake version, so a newer one is not picked up
+just by installing it — AGP needs `cmake.dir` in `android/local.properties`
+pointing at it, which `patch-signing.js` does not write today.
 
 `patch-signing.js` measures this folder and warns before Gradle starts, because
 the error names a generated file nobody wrote and arrives minutes in, after

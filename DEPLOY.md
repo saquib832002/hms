@@ -535,11 +535,25 @@ Leaving `APP_ENV` set in a PowerShell session is worth clearing deliberately:
 the next plain `npx expo start` in that window would otherwise build a
 development app pointing at the live hospital.
 
-**Each environment gets its own package id** — `…meridianhms`,
-`…meridianhms.staging`, `…meridianhms.dev` — so a release candidate and the
-build a nurse is actually using can sit on one phone with different names. The
-Account screen states which build it is, because two similar icons is how
-somebody records vitals into the wrong database.
+**Each environment gets its own package id** — `com.sawera.myhospital`,
+`com.sawera.myhospital.staging`, `com.sawera.myhospital.dev` — so a release
+candidate and the build a nurse is actually using can sit on one phone with
+different names. The Account screen states which build it is, because two
+similar icons is how somebody records vitals into the wrong database.
+
+This paragraph named `…meridianhms` until the product was renamed to OneCare,
+and it had been wrong before that too: the ids have been `com.sawera.myhospital*`
+for as long as `app.config.js` has had them, and `meridianhms` was only ever the
+URL **scheme**. Worth stating rather than quietly correcting, because a deploy
+document naming the wrong package id is the kind of thing somebody copies into a
+Play Console field once.
+
+**The package id is deliberately not being renamed with the product.** An
+Android `applicationId` is the app's identity in the store and on the device:
+changing it does not rename an app, it publishes a second one, and every
+existing install stops receiving updates. The URL scheme moved to `onecare*`
+because nothing depends on it — no deep link in this product targets the app,
+and the password-reset link points at the web app on purpose.
 
 **A non-development build refuses to configure a plain-HTTP origin.** Android
 blocks cleartext anyway, but it fails on the device as "network request failed"
@@ -576,6 +590,14 @@ you need it. Copies on the same VPS also die with the VPS — get them off the b
 ---
 
 ## 11. Updating
+
+**This is the routine case: a handful of migrations, none of them adding a
+tenant-scoped table.** For an upgrade that has accumulated — and in particular
+the first one after the initial deployment, where twenty-eight migrations are
+pending and thirteen of them create tables carrying `tenantId` — use
+[`DEPLOY-UPGRADE.md`](DEPLOY-UPGRADE.md) instead. It rehearses against a
+restored copy first, which is the only way these hand-written migrations meet
+real rows before they meet your customers' rows.
 
 ```bash
 sudo -u postgres pg_dump hms_db | gzip > ~/pre-deploy-$(date +%F).sql.gz

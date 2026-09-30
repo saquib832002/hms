@@ -1,0 +1,25 @@
+-- What the applicant said they wanted, so the reviewer's picker opens on their
+-- answer rather than on all five modules.
+--
+-- HAND-WRITTEN, like the eighteen before it. `prisma migrate diff` needs the
+-- schema engine binary, whose download is blocked on this machine. Check this
+-- against the model with that command before applying it to anything holding
+-- data; `schema-drift.spec.ts` pins the text-against-text half in the meantime.
+--
+-- `npm run db:rls` IS NOT NEEDED. `tenant_applications` already carries the
+-- inverted platform policy — visible only when no hospital is in scope — and
+-- this adds one column to a table that has it. A new *table* would need the
+-- policy; a new column inherits it.
+--
+-- NOT BACKFILLED, and that is the decision worth stating. Every application
+-- that predates this keeps an empty array, which reads as "they did not say"
+-- rather than as "they asked for everything". Defaulting existing rows to all
+-- five would put an answer into the record that nobody gave, and the reviewer
+-- would meet it as though the customer had chosen it — the same reason the
+-- accession migration refuses to invent numbers for orders that never had a
+-- label printed.
+--
+-- `[]` rather than NULL: Prisma list fields are not nullable, and an empty list
+-- already carries the "unanswered" meaning without a third state to reason about.
+ALTER TABLE "tenant_applications"
+  ADD COLUMN "requestedModules" "TenantModule"[] DEFAULT ARRAY[]::"TenantModule"[];

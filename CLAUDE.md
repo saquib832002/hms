@@ -342,6 +342,255 @@ looks like an improvement in review. So a wrong password reveals it too.
 friendlier second wording and a form that keys on the error text, and watching
 three assertions fail.
 
+### A forgotten password had three answers and one of them did not exist
+
+Reported from use: *"I forgot the password on the web or app. There is no way to
+reset the password."* Half right, and the half that was wrong is the dangerous
+one — it looked fine from the inside.
+
+An administrator could reset any member of staff from Admin → Users, and always
+could. What had no route anywhere was **the administrator themselves**.
+`POST /users/:id/reset-password` is `@Roles(ADMIN)`, so they could not reset
+themselves; nobody else in the hospital held the role; and break-glass
+deliberately buys the vendor aggregates and configuration rather than the
+ability to write to `users`. A small clinic has exactly one administrator — the
+owner-doctor this whole multi-role design exists for — so forgetting that
+password locked the hospital out of the product **permanently**, with the only
+exit a database console.
+
+Ninth instance of the family, and the first where the missing route stranded a
+whole customer rather than a feature.
+
+**Four paths now, and which one applies is decided by who is available.**
+
+- **Staff → their administrator.** Unchanged, web-only: a temporary password has to be read out or written down.
+- **Administrator → the vendor**, under a break-glass grant. `POST /platform/tenants/:id/users/:userId/reset-password`, the only write the platform API makes into a hospital's `users` table. It refuses anybody not holding ADMIN — not because resetting a nurse would be more dangerous but because their own administrator already can, and **a power with no case behind it gets used for something else eventually**.
+- **Anybody → themselves**, by email. The path that needs nobody.
+- **`npm run password:reset`** — the floor under all three, needing no mail transport, no vendor account and no working API, because it is what recovers a deployment where one of those is the broken thing.
+
+**The console screen mattered as much as the route.** Break-glass had been
+modelled since the platform API was written and was **curl-only** — and
+curl-only is how a capability quietly stops being one. Shipping the reset
+behind an unreachable grant would have been the same bug wearing a fix.
+
+**`requireActiveGrant` hard-coded the diagnostics route into its denial row.**
+True while diagnostics was its only caller, a lie the moment a second arrived —
+a refused password reset would have been written into the hospital's log as a
+refused diagnostics read. The whole value of those rows is that a hospital can
+ask what the vendor reached for, and an answer naming the wrong thing is worse
+than none.
+
+#### The response is identical whatever happened, and that is the whole design
+
+`POST /auth/forgot-password` returns one sentence for an address with an
+account, one without, a deactivated account, a suspended hospital, and an SMTP
+server that refused the message. Anything else turns a public endpoint into a
+way to ask whether a named person works at a hospital — the enumeration concern
+that already shapes the signup form and the partner-code lookup, and a sharper
+one here because the answer is about an individual. `password-reset.spec.ts`
+asserts it as *"the only thing this method returns is `same`"* rather than by
+comparing strings, because the failure to catch is a fifth branch with a
+friendlier message.
+
+**Timing is deliberately not equalised, and saying so is more honest than
+pretending.** A hit does real work a miss does not. Closing that properly means
+a constant-time path or a queue; the 3/min throttle is what makes the remaining
+signal too expensive to harvest.
+
+**One email, even when the address is at two hospitals — and that is not
+inconsistent with login refusing to guess.** The sign-in form answers *whoever
+is typing*; this answers *the mailbox*. Telling the owner of an address which
+hospitals it is registered at reveals nothing they do not already know, so the
+message lists both with a link for each. It is the only place in the product
+where that ambiguity resolves without the person already knowing the hospital
+code, which is exactly what somebody locked out does not have.
+
+**A token is 32 random bytes, stored only as a sha256 hash, single use, thirty
+minutes** — the same construction as `RefreshToken`, deliberately, because that
+one was hard to get right and a second scheme beside it would be the one nobody
+re-reads. `consumedAt` is a column rather than a delete: a token presented twice
+is either a double click or a replay, and a deleted row makes both
+indistinguishable from one that never existed.
+
+**Strength is checked before the token is spent.** Getting the rules wrong is
+the commonest thing that happens on that form, and burning the link over an
+eleven-character password sends somebody back to the sign-in screen to start
+again — which is how a recovery flow earns a reputation for not working.
+
+**Consuming one link kills every other outstanding link for that person, and so
+does any other password change.** Somebody who clicked "forgot password" three
+times has three live tokens in their mailbox; an administrator resetting them
+afterwards left two of them working. Anybody holding an earlier email takes the
+account straight back, past a reset performed precisely because something was
+wrong. `UsersService.resetPassword` and `changeOwnPassword` both close them —
+through the **proxy**, not `unscoped`, because both run inside a request that is
+already holding a pool connection and a second one there is the self-deadlock
+this project shipped once.
+
+**`PasswordResetToken` carries no `tenantId`, and could not.** It is read on an
+unauthenticated request where `app.tenant_id` is unset, so a row under the
+generic policy would be invisible to the only request that ever needs it — every
+valid link would read as expired. The same shape as the login chicken-and-egg
+that took sign-in down completely. It holds a user id, a hash and two
+timestamps; the hospital is reached through `user`, which is where the tenant is
+supposed to come from anyway.
+
+**The link is built from configuration, never from the `Host` header.** A reset
+URL assembled from a header is one an attacker aims at their own server by
+sending `Host: evil.example`, and the victim clicking it hands over a live
+token.
+
+#### Nothing sent email, and the transport says so rather than pretending
+
+`MailService` is the first outbound channel here apart from push. Three
+decisions are load-bearing:
+
+- **`send` reports delivery rather than returning void.** Every caller is a flow
+  that is worthless if the message does not arrive, and the reset flow cannot
+  tell the user either way — so the reason has to be logged or it is lost
+  entirely.
+- **`nodemailer` is loaded dynamically.** A static import makes an uninstalled
+  dependency a compile failure across the whole API: the ward board goes down
+  because nobody ran `npm install` for a mail library. Same shape as one
+  top-level `expo-notifications` import taking the entire phone app down.
+- **The `log` transport reports `delivered: false`.** It writes the whole
+  message, link included, so a developer can follow the flow — and it does not
+  claim success, because a transport that printed to a console and returned
+  success would make every caller believe mail works here.
+
+**The boot log says what will happen, and the login screens ask before
+offering.** `GET /health` carries `passwordResetAvailable`, and both clients
+render "Forgot your password?" only on `true`. A link into a form that says a
+link is on its way and sends nothing is the failure this file records a dozen
+times, arriving at the one screen where the reader is already stuck. It is safe
+to expose: it describes the installation, not a person or a hospital.
+
+**The ask is on both clients; spending the token is web-only and that is a
+decision rather than a gap.** A reset URL has to be one canonical address that
+works in any mail client on any device, and a deep link into an app the
+recipient may not have installed is not that. Giving the phone a second way to
+spend a token — pasting it into a box — would mean two paths to the most
+security-sensitive write in the product, the second existing only to avoid a
+browser that is already open. What *had* to be on both is the ask: a nurse who
+is locked out is holding a phone, and sending her to find a desktop to type her
+own email address into is *"sign for doses on the mobile app"* pointing the
+other way.
+
+#### An unlock is not a reset, and only one of them changes what you know
+
+Five wrong attempts locks an account for fifteen minutes, and the only way an
+administrator could end that early was `resetPassword` — which also invalidates
+a password the person very likely still remembers. Somebody who mistyped theirs
+five times before coffee was handed a temporary password, a forced change, and
+every session on their phone signed out, to fix a typo.
+
+`POST /users/:id/unlock` clears the counter and nothing else. **Sessions are
+deliberately not revoked**, for the same reason the password is not: nothing
+about a mistyped password suggests an existing session is somebody else's.
+Where there *is* reason to suspect the account, `resetPassword` is the action
+and it still does both. Its own audit action rather than a flag on the reset,
+because `USER_PASSWORD_RESET` means a credential changed and rolling a typo
+correction into it makes the rows that matter harder to find among the ones that
+do not.
+
+**It is the fourth mobile admin write**, and it belongs beside the other three
+on the same test: one tap that unblocks *somebody else's* work right now, with
+nothing to read out. Resetting a password stays on the web and that line has not
+moved.
+
+#### The vendor's own password could not be changed from inside the product
+
+`create-platform-user.js` upserts, so it has always doubled as a reset — and it
+was the *only* way a vendor password could change. That makes the single most
+powerful credential on the deployment one that needs shell access to rotate,
+which means in practice it never gets rotated. `POST /platform/password` closes
+it, on the guarded controller rather than beside login so it inherits
+`PlatformGuard` instead of needing a decorator somebody could forget.
+
+Nothing is revoked afterwards because there is nothing to revoke: platform
+sign-in issues a 30-minute access token and no refresh token. Stated because the
+hospital-side `changeOwnPassword` does revoke, and the difference reads as a
+mistake until you know why.
+
+#### The vendor console has emailed recovery, against the advice written above it
+
+This file and `create-platform-user.js` both said there should be **no** "forgot
+password" for vendor staff: a reset link emailed to a vendor address is a way
+into every hospital on the deployment, guarded by one mailbox, and recovery
+should stay a person with database access.
+
+Asked for anyway by the product owner, and that is a legitimate call rather than
+one to be argued out of — a recovery path that needs a shell is one that fails
+at weekends, and "ask the person with the database password" does not scale past
+the first colleague. The argument above is not repealed; it is **answered**, and
+these three are the answer:
+
+1. **Break-glass waits an hour.** `PlatformUser.passwordResetAt` is stamped by
+   the emailed path only, and `openGrant` refuses until it lapses. The console
+   keeps working — tenants, applications, subscriptions, modules — and reaching
+   *inside* a hospital does not. This is the only one of the three that
+   interrupts the attack rather than narrowing or reporting it: a compromised
+   mailbox followed immediately by a grant into patient data is the whole
+   threat, and a reset is rare and planned where a grant minutes after one is
+   not.
+2. **Every other console account is emailed**, on the request and again on
+   completion. Unlike detection built on logs this needs nobody to be looking.
+   When there are no other accounts it logs that fact, because "somebody else
+   finds out" is then not operating and whoever set the deployment up should
+   know the mailbox is the whole of the security.
+3. **Fifteen minutes, not thirty.** Half the window in which a link sitting in
+   a mailbox is a working credential.
+
+None of the three stops an attacker who owns the mailbox. Together the window is
+short, the reach is limited while it is open, and other people find out. That is
+a real trade, not a claim of safety, and `PLATFORM_RESET_GRANT_COOLDOWN_MINUTES`
+exists because the cost of (1) lands on a real engineer at 3am and somebody may
+reasonably decide against it.
+
+**The cooling-off does not apply to `platform:user`.** That path already needs
+the database owner's credentials, so there is nothing weaker to compensate for —
+and an engineer who reset their own password at a shell must not then be locked
+out of the reason they did it. `passwordResetAt` stays null there, deliberately.
+
+**The token table is its own model, not a nullable column on the hospital one.**
+`PasswordResetToken` has a foreign key to `users`, and a `PlatformUser` is
+emphatically not a `User`. One table serving both means a nullable FK on each
+side and a row valid with neither set — exactly the shape that lets a hospital
+token be mistaken for a vendor one somewhere downstream.
+`PlatformPasswordResetToken` carries the **inverted** RLS policy with the rest
+of the platform tables, rather than being global like its hospital counterpart:
+that one hangs off a hospital user and holds nothing a hospital could not learn
+about itself, and this one names accounts that can reach every hospital.
+
+**The routes are unauthenticated and are deliberately not `@Public()`.** They
+carry `@PlatformRoute()` like every other vendor endpoint. `@Public()` is the
+hospital API's key and `access-matrix.spec.ts` asserts its exact set, which is
+valuable precisely because the list stays short enough to read — folding vendor
+endpoints in would turn "these seven are open to the world" into a sentence
+nobody could trust. `GET /platform/capabilities` answers whether the link should
+be offered, rather than the console reading the hospital `GET /health`, because
+the console may call nothing but `/platform`.
+
+**The first guard for the cooling-off asserted nothing, and was caught the way
+the other three were.** It was a string match — does `openGrant` mention
+`passwordResetAt` and `ForbiddenException` — and it **passed with the condition
+replaced by `if (false)`**. Fourth time in this repo. The decision moved into
+`grantCooldownMinutes` in `break-glass.ts` so a test can call it with arguments
+and assert behaviour instead of text; the string check that remains only
+establishes that `openGrant` reaches it. Same reasoning as `resolveTreatingScope`
+and `course-quantity.ts`, arrived at by the same route.
+
+**A live token is taken out of the address bar on arrival.** The link lands on
+`/platform?reset=…` and the console reads it once, then `history.replaceState`s
+it away. A reset token left in `window.location` ends up in browser history, in
+a screenshot of a support call, and in the `Referer` of anything the page loads
+afterwards — single-use and short-lived are not reasons to leave it on display.
+
+**Nothing here retrieves a password, and nothing ever will.** Passwords exist
+only as Argon2 hashes, so a reset is the only possible answer; a system that
+could email somebody their existing password would be one storing it in a form
+it must not.
+
 ### Access control is three layers, not one
 
 1. **Route** — `@Roles()` + `RolesGuard`. May this role call this endpoint?
@@ -420,6 +669,86 @@ or not that email has applied before, and it does not check slug availability
 live — both would turn a public endpoint into a way to enumerate the vendor's
 customers and prospects. Duplicates surface in the reviewer's queue instead, and
 a slug collision is reported at approval where a human can pick another.
+
+**Nobody could find the form, on either client.** Reported by the product owner:
+*"we should have an option for the public user to apply for a tenant"* — which
+already existed, as `POST /public/signup` and `web/app/signup/page.tsx`, and was
+reachable only by typing a URL nobody had been given. **Eighth instance of a
+capability with no route in, and the widest in consequence**: a hospital that
+wanted to buy the product could not ask.
+
+The mobile half sat in `endpoint-coverage.spec.ts`'s single-client list saying
+*"signing up is done by somebody who is not yet a customer and has no reason to
+have installed a staff app"* — the **fourth false reason** found in that list,
+and the same shape as the three before it. The app is on a public store. A clinic
+owner who finds it, installs it and opens it is precisely the customer this file
+describes as the target market, and they met a sign-in form with no way in.
+
+Both clients now link it from the login screen, below the password field —
+everybody who opens that screen on an ordinary day already has an account, so it
+must not compete with signing in. The label is **Apply for an account** rather
+than *Register*, because "register" on a login screen promises self-service and
+this creates a `TenantApplication` a human reads: no hospital, no account, no
+slug reserved until approval. The exemption is deleted rather than reworded, so
+the guard now fails if either caller disappears.
+
+**The slug field was labelled "Preferred web address", which was false rather
+than merely unclear.** Asked what that field was for, the product owner guessed
+it might be the name another hospital recognises them by — which is exactly
+right, and the label was not saying it. The slug appears in **no URL anywhere**
+in this product: there are no per-hospital subdomains and no tenant path
+segment, checked against every use rather than assumed. What it actually is, in
+the only two places anybody meets it, is the **code a partner pharmacy or
+laboratory identifies this hospital by** (partnerships start offline precisely
+because a browsable directory is the enumeration problem this form avoids) and
+**what staff type at sign-in when they hold accounts at two hospitals**. Both
+clients now call it *Short code for your hospital* and name both uses. A label
+somebody has to ask about is a label that has failed, and this one was inviting
+the reader to expect a website.
+
+On mobile it is a sibling of `LoginScreen` rather than a route, and that is
+forced: `AuthGate` renders above the navigator so no deep link can land past the
+lock, which means nothing under `app/` renders while there is no user — a
+`signup` route would have been unreachable to exactly the person it exists for.
+
+**The application asks what they run, and the answer is a request.** Asked for by
+the product owner: *"ask the customer which module they want — whether they want
+the pharmacy, the entire hospital, or the lab and clinic."*
+`TenantApplication.requestedModules` holds it, and it is advisory in exactly the
+way `requestedSlug` is: **the vendor still sets `Tenant.modules` at approval**,
+because what a hospital was *sold* is a commercial fact a human decides after
+reading the application, and a public endpoint that decided its own entitlements
+would make the approval step theatre.
+
+What it buys is that the reviewer's picker **opens on the customer's answer
+rather than on all five**. It defaulted to everything, so approving a pharmacy
+silently handed it the wards and the clinic unless somebody noticed and corrected
+it by hand every time — and a default nobody adjusted is the commonest way a
+hospital ends up with a menu of screens it never bought. Still fully editable,
+which is the point rather than a caveat: somebody who asked for everything and is
+being sold a pilot gets the pilot.
+
+**Empty means "did not say", and is deliberately not all five.** The column is
+not backfilled and existing applications keep `[]`, because defaulting historic
+rows would put an answer into the record nobody gave and the reviewer would meet
+it as a customer's choice. At the *picker* an empty set falls back to all five —
+"did not say" must not silently become "wants nothing", which would provision a
+hospital with no screens at all over an optional question somebody skipped. The
+console shows *Asked for* only when they actually answered.
+
+**Bundles, not five checkboxes, and the set is what travels.** `TenantModule` is
+the vendor's vocabulary — "Wards" means nothing to a clinic owner deciding
+whether to try the product, and a public form is the one screen here read by
+somebody with no account and no training. So `SIGNUP_BUNDLES` offers *"A
+pharmacy only"*, *"A clinic with a laboratory"*, *"A hospital — everything"*, and
+the module set is derived at submit. The **bundle id never leaves the client**: a
+plan name in the data model is precisely what `Tenant.modules` is a set to avoid,
+and the backend would then have to keep translating it forever, including for a
+bundle nobody sells any more. It lives in `types.ts` because that file is already
+duplicated byte-for-byte into `mobile/lib/types.ts` with a drift test — so the two
+clients cannot disagree about what "a pharmacy" includes, which they otherwise
+would silently, and the person meeting the difference would be a reviewer looking
+at a set that did not match the words the applicant was shown.
 
 **The temporary password is returned exactly once.** Approval creates the tenant
 and its first ADMIN in one transaction — a tenant with no admin is a hospital
@@ -3215,11 +3544,76 @@ name would set in one typeface on a laptop and another in CI, or in a fallback
 that fits badly — and the store page is the one asset nobody looks at twice. The
 wordmark goes on in a design tool, where somebody can see it.
 
+### SDK 53 → 57 in one jump, and the two changes that fail silently
+
+The phone moved from Expo SDK 53 (RN 0.79) to **SDK 57 (RN 0.86, React 19.2)**
+in a single step, after a signed AAB had been produced on 53 and not before —
+the order mattered, because SDK 57 removes the old-architecture fallback the
+first build depended on, so upgrading first would have meant debugging a
+four-major dependency jump with no way back to something known to work.
+
+Every pin came from `node_modules/expo/bundledNativeModules.json` — the SDK's
+own version map — rather than from a guess or a blog post. `expo install --fix`
+is the proper tool and needs `api.expo.dev`, which is blocked on this machine;
+the map ships inside the `expo` package and answers the same question offline.
+
+**Two of the changes are the dangerous kind: a key that stops existing rather
+than erroring.**
+
+- **`splash` is not in the SDK 57 schema.** The top-level `splash` block became
+  `web.splash` (a PWA concern); the app splash is now the `expo-splash-screen`
+  plugin, with the same three options. Left where it was, Expo ignores it and
+  the app ships with **no splash artwork** and no warning — the icon work would
+  have half-disappeared with nothing naming the cause.
+- **`enableProguardInReleaseBuilds` → `enableMinifyInReleaseBuilds`**, renamed
+  in SDK 54 and absent from the SDK 57 reference. `expo-build-properties` does
+  not reject an unknown key loudly, so the old name leaves minification and
+  therefore resource shrinking **quietly off** in a build whose config reads as
+  having asked for both.
+
+Both were found by grepping SDK 57's own `@expo/config-types` for the keys this
+config sets, which is the only way to tell "removed" from "still accepted" —
+a changelog says a key was deprecated, the schema says whether it is still read.
+
+`android.edgeToEdgeEnabled` went the same way and costs nothing: edge-to-edge
+became mandatory, so the key was removed and the template writes it itself. The
+*obligation* is unchanged and still unverified on a handset.
+
+**What changed in code was three things and no more.** `StyleSheet.absoluteFillObject`
+was removed in RN 0.85 → `absoluteFill`, in thirteen files, and
+`role-screens.test.ts` asserted on the **old** name, so it was pinned to the new
+one *and* to the absence of the old rather than loosened to a substring that
+would pass against either. `expo-file-system`'s default export changed in SDK 54
+and the functions this app uses moved to `expo-file-system/legacy` — a plain
+import still resolves and returns a module without them, so it fails when a
+doctor presses print rather than at build time. Nothing imported
+`@react-navigation/*` directly, which is why expo-router forking React
+Navigation in SDK 56 cost nothing here; had a screen imported it, the bundler
+would have refused.
+
 ### Known issues
 
-- **`query-string` is a direct dependency here and should not be**, and the reason is worth keeping. `expo-router@5.1.11` requires it in its built output and **does not declare it** — an upstream packaging bug. Under SDK 52 it resolved by accident, hoisted into the tree by something else that has since dropped it; under SDK 53 the bundle fails with *"Unable to resolve module query-string from expo-router/build/fork/getPathFromState-forks.js"*. Pinned to `^7` because the built code does `require()` and v8 is ESM-only. Remove it when expo-router declares its own dependency, and not before — deleting it because "nothing in our code imports it" breaks the build.
+- **The vendor console's emailed recovery is the weakest link in the deployment by construction, and the three controls around it are not a substitute for a second factor.** A mailbox is now sufficient to take a console account, and the cooling-off only delays the part that reaches patient data. TOTP on `PlatformUser` is the real answer, it is absent rather than half-built, and it is the single highest-value thing left in this file.
+- **The reset notification goes to every other console account, so a one-person vendor gets none.** That is logged and nothing else — the control simply is not operating, and the deployment is exactly as safe as one mailbox. Worth knowing before the first hire rather than after.
+- **`platform_password_reset_tokens` needs `npm run db:rls`.** It is a new table carrying the *inverted* policy and gets none from the migration. Skipping it leaves RLS disabled on the one table whose rows are live links into accounts that can open a grant against any hospital.
+- **Nothing sweeps expired console reset tokens either**, for the same reason and with the same mitigation: expiry is checked per request, so a sweep that has not run cannot make a dead link work.
+- **Password reset has never run against a live database, and nothing has ever sent an email from this system.** The token rules are unit-tested, all three projects typecheck, and `MailService` reports delivery honestly — but nothing has put a message through a real SMTP server, and `nodemailer` has never been installed here. Every previous first live run in this project found something no amount of reading could; assume this has one, and assume it is in the two places a unit test structurally cannot look: whether the `log`/`smtp` switch behaves as described against a real relay, and whether a link built from `WEB_URL` actually resolves for whoever opens it.
+- **The `password_reset_tokens` migration is hand-written** like the nineteen before it — check it with `prisma migrate diff` before applying it to anything holding data. **`npm run db:rls` is *not* needed**, and that is a decision rather than an oversight: the table carries no `tenantId` and deliberately gets no policy, because it is read on an unauthenticated request where `app.tenant_id` is unset and the generic policy would make every valid link read as expired.
+- **Nothing sweeps expired reset tokens.** Expiry is checked per request, so a sweep that has not run can never mean a dead link still works — which is the important half and the reason this did not have to wait for a scheduler. What accumulates is rows: one per request, forever, on a table nothing prunes. `expiresAt` is indexed for the delete that does not exist yet.
+- **A reset link is only as good as the address on the account.** Nothing verifies an email address at any point — an account created with a typo in it has a reset path that silently goes to somebody else, or nowhere. That is the same exposure the temporary-password flow always had, and self-service reset makes it reachable by anybody rather than only by an administrator. Address verification is the fix and is absent rather than half-built.
+- **`MAIL_FROM` defaults to `no-reply@localhost`, which every real relay will refuse.** Deliberate: a plausible-looking default is one somebody ships. The boot log names the transport, so a misconfigured deployment says so at start rather than when a locked-out administrator asks for a link.
+- **The vendor can now reset a hospital administrator, and that is a real transfer of power rather than a technicality.** Bounded by three things — a grant of at most eight hours carrying a written reason, `mustChangePassword` so the customer's first act replaces it, and a row in *that hospital's* audit log — and none of them stops a vendor engineer who has already decided to. Two-person approval is modelled for break-glass (`createdById` differing from `platformUserId`) and is still not enforced anywhere, which matters more now than it did when a grant bought only aggregates.
+- **A vendor password change writes no audit row.** Every row in this system carries a `tenantId` or an explicit null meaning "an anonymous event at no hospital", and this belongs to neither — it is vendor-internal and concerns no hospital, so writing it against one would put a misleading row into their records. A vendor-side log is the right home and does not exist.
+- **`npm run db:migrate` is `migrate deploy`, and was `migrate dev`.** `dev` creates a **shadow database** to check the migration history, so it needs `CREATEDB` — which the owner role here deliberately does not have, and should not: the split that makes RLS mean anything is an application role that cannot run DDL and an owner that can, and neither of them needs to create databases. It failed with `P3014 permission denied to create database`, which reads as a broken migration and is a wrong command. `deploy` applies the pending migrations in order and creates nothing. It is also the only correct command for this repo whatever the permissions: **every migration here is hand-written**, so there is nothing for `dev` to author, and what `dev` adds over `deploy` is exactly the behaviour that is dangerous against a database holding data — it compares the schema to the history and offers to *reset* on drift. `db:migrate:dev` survives for the day somebody genuinely wants Prisma to write one, and granting `CREATEDB` is the wrong fix.
+- **`query-string` was a direct dependency here and is not any more**, and the history is worth keeping because the removal was conditional. `expo-router@5.1.11` required it in its built output and **did not declare it** — an upstream packaging bug. Under SDK 52 it resolved by accident, hoisted in by something else that later dropped it; under SDK 53 the bundle failed with *"Unable to resolve module query-string from expo-router/build/fork/getPathFromState-forks.js"*, so it was added directly and pinned to `^7` (the built code does `require()` and v8 is ESM-only). The note said to remove it *when expo-router declares its own dependency, and not before*. `expo-router@57.0.23` declares `"query-string": "^7.1.3"` in its own `dependencies` — checked against the published manifest rather than assumed — so it went at the SDK 57 upgrade. The condition was the point: deleting it because "nothing in our code imports it" would have broken the build at any time before that.
 - **The bundler is a separate gate from the typechecker, and only it catches a missing module.** That failure survived `tsc --noEmit`, all 199 tests, `expo prebuild` and Gradle's entire Kotlin compile — it surfaced at `createBundleReleaseJsAndAssets`, three minutes into a release build. `npm run bundle:check` runs exactly that step (`expo export`) in about twenty seconds with no Android SDK, so an upgrade can be checked for resolution failures before anything native is attempted. Worth running after any dependency change.
-- **The new architecture cannot be built on Windows from this folder, and moving the folder does not help.** RN's new architecture generates C++ per native module, and CMake embeds the whole source path *inside* the object path — about 397 characters here against a 260 limit, reported by ninja as *"Filename longer than 260 characters"* against a generated file, after Kotlin has compiled and the JS has bundled. The arithmetic was checked rather than assumed: `C:\hms\mobile` is 319 and even a `subst` drive at `X:\mobile` is 311, because the length is dominated by `react-native-safe-area-context`'s own codegen directories. So the obvious remedies are dead ends. What works is enabling Windows long paths (and, if the bundled ninja still refuses, a newer CMake), or `ANDROID_NEW_ARCH=false`, which removes the codegen entirely at the cost of the old bridge. `patch-signing.js` measures the folder and warns before Gradle starts. See [`DEPLOY-ANDROID.md`](DEPLOY-ANDROID.md) section 3c.
+- **`expo-notifications` throws when it is *imported* in Expo Go, so nothing may import it at the top level.** Remote push left Expo Go in SDK 53 and from SDK 55 the module raises rather than warning — and it does so at import, before any of this app's code runs. Expo Router statically requires every file under `app/`, so one top-level import in `alerts.tsx`, a screen nobody had opened, took the **whole app** down at launch with a red screen naming `expo-router/build/ExpoRoot.js` and no file of ours in the stack. The first fix was a guard inside `registerForPush` and **could not work for exactly this reason** — the throw precedes the function. `loadNotifications` in `lib/push.ts` is now the single permitted importer, uses a dynamic `import()`, checks `Constants.executionEnvironment === ExecutionEnvironment.StoreClient` (rather than matching Expo's error text, which would break silently the day they reword it), and resolves to `null` where push is unavailable — which every caller already treats as ordinary. `setNotificationHandler` moved inside it, because module scope is the thing that cannot be reached safely. `push-import.test.ts` fails the build on any static import, because the mistake is invisible in review: it is what the library's own docs show, it typechecks, and it works perfectly in a development build — so it can be written, merged and released, and only breaks for whoever next opens Expo Go. A release build was never affected. **Testing push at all needs a development build**, which nothing in this project has produced.
+- **SDK 57 has not been built, bundled or run.** The pins come from the SDK's own version map and the code changes are the ones its schema and RN's release notes name, but nothing has installed the tree, typechecked against React 19.2, bundled, prebuilt or produced an AAB. Every previous first run in this project found something no amount of reading could; assume this has one. The order to check in: `npm install`, then `npx tsc --noEmit`, then `npm test`, then `npm run bundle:check` (twenty seconds, catches a module that cannot resolve — which is exactly what the SDK 53 jump failed on), and only then `npm run aab`.
+- **`globalThis.fetch` is Expo's implementation from SDK 56, not React Native's.** Every API call this app makes goes through `fetch` in `lib/api.ts`, and the swap happened silently under us — it is WinterTC-compliant rather than RN's older behaviour. Nothing here is known to depend on the difference, and the places it could bite are the ones this app actually does: the `FormData` multipart upload in `documents.ts` where the boundary is deliberately left to the runtime, and the `Authorization` header on every request. If a networking regression appears after the upgrade, `EXPO_PUBLIC_USE_RN_FETCH=1` in `.env` restores the old implementation — worth knowing before spending an afternoon in the backend.
+- **`expo-file-system/legacy` is a deferral, not a fix.** `lib/documents.ts` imports it for `cacheDirectory`, `downloadAsync` and `deleteAsync`. Expo said in SDK 54 that the legacy path would go in 55 and it is still published in 57, so there is room — but the one call that is not a rename is `downloadAsync(url, target, { headers })`, and an authenticated download is the entire purpose of that module. Migrating it deserves its own change rather than being folded into an SDK bump.
+- **TypeScript stayed on 5.9 while the SDK 57 template pins 6.0.3.** A deliberate one-variable-at-a-time call: a TypeScript major on top of a four-major SDK jump means a typecheck failure could be either, and `ts-jest@29` is not known here to support TS 6. Worth revisiting on its own, and it is a real divergence from the template rather than an oversight.
+- **The path length is now a hard constraint, because the flag that used to sidestep it no longer exists.** `ANDROID_NEW_ARCH=false` removed the C++ codegen and produced the first installable build of this app. RN 0.82 **ignores** `newArchEnabled=false` — the legacy architecture was removed, not deprecated — and Expo SDK 55 dropped the key from the config schema, so on SDK 57 it is not a key this project accepts. It was deleted from `app.config.js` rather than left reading against a value nothing consumes: a lever that silently does nothing is the failure this file keeps reopening, and somebody would have set it during a bad afternoon and believed they had changed something. So `C:\hms` is not a preference — it is what keeps ninja's own `path.size() > MAX_PATH` check satisfied, at 255 against 260. **Re-measure after any dependency change**, since the dominant term is a third-party module's codegen directory names and five characters is the whole margin.
+- **The new architecture could not be built on Windows from the original folder, and the arithmetic that said moving would not help was measuring the wrong string.** RN's new architecture generates C++ per native module, and CMake embeds the whole source path *inside* the object path; ninja reports *"Filename longer than 260 characters"* against a generated file, minutes in, after Kotlin has compiled and the JS has bundled. Enabling Windows long paths does **not** fix it — ninja holds its own `path.size() > MAX_PATH` check and refuses before Windows is ever asked, so the registry flag is never consulted. The first measurement here was of the *absolute* path (~397) and concluded every clone location was over; ninja checks the path **relative** to its build directory, which is 294 today and **255** at `C:\hms\mobile`. So shortening the path does work, and this entry said the opposite for a while — one more false reason that read as a decision somebody had made. **`subst` is not a way to shorten it**, though the arithmetic says 244: building from a mapped `X:\` failed identically, with ninja reporting *Entering directory `C:\Najmus\…`* and the object path still embedding `C_/Najmus/…`, because Gradle and CMake canonicalise the drive away before the path is ever written. Only relocating the files actually reaches CMake. The certain remedy is still `ANDROID_NEW_ARCH=false`, which removes the codegen entirely at the cost of the old bridge; a newer CMake is worth trying and is not promised, since newer ninja carries the same check and nothing in the generated project pins a CMake version for it to be picked up by. `patch-signing.js` measures the folder and warns before Gradle starts. See [`DEPLOY-ANDROID.md`](DEPLOY-ANDROID.md) section 3c.
 - **Edge-to-edge is on and no screen has been looked at under it.** At `targetSdkVersion` 36 Android draws app content under the status and navigation bars with no way to opt out, so `edgeToEdgeEnabled` is declared rather than inherited. `AppHeader` already wraps itself in `SafeAreaView edges={['top']}` and the tab bar takes its bottom inset from react-navigation, so the pieces are there — but "the pieces are there" is not the same as "the header does not sit under the clock", and this project has twice found a layout fault only by rendering something and looking at it. First thing to check on a handset.
 - **No icon has been seen on a phone.** The artwork is generated rather than exported by hand, the geometry is checked against Android's 72% safe area, and every size was drawn and looked at — but nothing has installed the app and looked at the home screen, and an icon is the one asset that is *only* judged that way. Watch the first install for the two things the source cannot show: whether the heartbeat cut survives the handset's own downscaling to 48dp, and whether `adaptiveIcon.backgroundColor` and the artwork's field actually match on the device, since a mismatch there draws a stripe across the icon rather than shifting its shade.
 - **The store assets are generated on a developer's machine, not in CI.** `npm run icons` needs `sharp`, and nothing fails the build if `assets/` is empty or stale — Expo substitutes its own blank artwork and the build succeeds. So a red changed in the script and not regenerated ships the old icon silently. A check that the PNGs are newer than the script is the obvious guard and does not exist.
