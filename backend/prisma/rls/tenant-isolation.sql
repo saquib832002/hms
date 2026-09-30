@@ -188,23 +188,65 @@ CREATE POLICY tenant_isolation ON audit_logs
 -- table.
 
 DO $$
+DECLARE
+  can_set boolean := false;
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'hms_definer') THEN
     CREATE ROLE hms_definer NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
   END IF;
 
   /*
-   * Membership, because `ALTER FUNCTION ... OWNER TO` requires the connecting
-   * role to be a member of the role it is giving the function to.
+   * `ALTER FUNCTION ... OWNER TO` requires the connecting role to be able to
+   * SET ROLE to the role it is handing the function to — which is a stronger
+   * thing than membership, and the distinction is what made the first version
+   * of this block wrong.
    *
-   * Creating a role with CREATEROLE does not imply membership on every
-   * PostgreSQL version — 16 grants the creator ADMIN OPTION automatically,
-   * earlier ones do not — and the failure is a flat "must be able to SET ROLE",
-   * which reads as a permissions problem with the connection rather than a
-   * missing grant. Asserted here so the script works the same on both.
+   * It tested `pg_has_role(current_user, 'hms_definer', 'MEMBER')` and skipped
+   * the grant when that was true. On PostgreSQL 16+ a membership can be granted
+   * `WITH SET FALSE`, and the creator of a role is given ADMIN OPTION
+   * automatically while earlier versions give nothing — so `MEMBER` can report
+   * true on a role this connection may not become. The grant was then skipped
+   * and the failure arrived several statements later as
+   *
+   *   must be able to SET ROLE "hms_definer"
+   *
+   * which names no fix and reads as a problem with the connection rather than a
+   * missing grant. The comment above this block predicted that exact message
+   * and the check underneath it did not prevent it.
+   *
+   * So the test is the operation: try to become the role. Nothing else is
+   * authoritative across versions, and a subtransaction makes the attempt free.
    */
-  IF NOT pg_has_role(current_user, 'hms_definer', 'MEMBER') THEN
-    EXECUTE format('GRANT hms_definer TO %I', current_user);
+  BEGIN
+    SET LOCAL ROLE hms_definer;
+    can_set := true;
+    RESET ROLE;
+  EXCEPTION WHEN OTHERS THEN
+    can_set := false;
+  END;
+
+  IF NOT can_set THEN
+    /*
+     * A plain GRANT, and deliberately NOT `WITH ADMIN OPTION`. Creating a role
+     * already makes this connection its grantor, and PostgreSQL refuses to
+     * grant the admin option back to a grantor — "ADMIN option cannot be
+     * granted back to your own grantor" — so asking for it turns the ordinary
+     * fresh install into a hard failure. Measured on 18.4 rather than reasoned
+     * about: plain succeeds in every case where anything can, and SET ROLE
+     * works immediately afterwards.
+     */
+    BEGIN
+      EXECUTE format('GRANT hms_definer TO %I', current_user);
+    EXCEPTION WHEN OTHERS THEN
+      RAISE EXCEPTION
+        'Cannot make "%" able to SET ROLE to hms_definer: %'
+        '  |  That role exists and this connection may neither become it nor grant '
+        'it, which happens when hms_definer was created by a different role — '
+        'usually a superuser on an earlier run. Nothing in this script can repair '
+        'that from here. Run this once as a superuser, then re-run npm run db:rls:'
+        '  GRANT hms_definer TO "%";',
+        current_user, SQLERRM, current_user;
+    END;
   END IF;
 END $$;
 

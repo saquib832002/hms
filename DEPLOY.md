@@ -591,30 +591,40 @@ you need it. Copies on the same VPS also die with the VPS — get them off the b
 
 ## 11. Updating
 
-**This is the routine case: a handful of migrations, none of them adding a
-tenant-scoped table.** For an upgrade that has accumulated — and in particular
-the first one after the initial deployment, where twenty-eight migrations are
-pending and thirteen of them create tables carrying `tenantId` — use
-[`DEPLOY-UPGRADE.md`](DEPLOY-UPGRADE.md) instead. It rehearses against a
-restored copy first, which is the only way these hand-written migrations meet
-real rows before they meet your customers' rows.
+**This is the routine case: a handful of migrations on a deployment you updated
+recently.** Check which is which before you start —
 
 ```bash
-sudo -u postgres pg_dump hms_db | gzip > ~/pre-deploy-$(date +%F).sql.gz
+sudo -u hms -i -- bash -c 'cd /opt/hms/app/backend && node prisma/admin-cli.js migrate status'
+```
+
+— and if that lists more than a few, or if this is the first upgrade after the
+initial deployment, use [`DEPLOY-UPGRADE.md`](DEPLOY-UPGRADE.md) instead. It
+rehearses against a restored copy first, which is the only way these
+hand-written migrations meet real rows before they meet your customers' rows.
+
+```bash
+sudo -u postgres pg_dump --format=custom --file=/tmp/hms-pre-deploy.dump hms_db
 
 sudo -u hms -i
 cd /opt/hms/app && git pull
-cd backend && npm ci && npx prisma generate && npm run build \
-  && node prisma/admin-cli.js migrate deploy && npm run db:constraints
-cd ../web && npm ci && npm run build
+cd backend && npm ci && npx prisma generate \
+  && node prisma/admin-cli.js migrate deploy \
+  && npm run db:rls && npm run db:rls:verify && npm run db:constraints && npm run build
+cd ../web && npm ci && rm -rf .next && npm run build
 exit
 
 sudo systemctl restart hms-api hms-web
+curl -s localhost:3000/api/v1/health
 ```
 
-Re-run `npm run db:rls` whenever a migration adds a table. A new table has no
-policy until one is applied, and **a table without a policy is visible to every
-tenant**. The script is safe to run repeatedly.
+`db:rls` is in that chain unconditionally rather than left to be remembered
+when a migration adds a table. **A table with no policy is visible to every
+tenant**, the script is idempotent, and deciding each time is how the one that
+mattered gets skipped.
+
+`rm -rf .next` likewise: Tailwind bakes its palette into the CSS at build time,
+so a cached build keeps the old one and the change appears not to have deployed.
 
 ---
 
