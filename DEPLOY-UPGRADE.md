@@ -9,15 +9,25 @@ worth reading before you start rather than discovering at step 6.
 
 ## 0. What makes this one different
 
-**Twenty-eight migrations are pending.** The initial deployment ran
-`20260823201142_init` and possibly a few after it. Everything from the pharmacy
-billing work onward has only ever been applied to a development database.
+**Twenty-three migrations are pending.** Production is at
+`20260829055154`; the first new one is `20260830145120_add_refunds`, and
+everything from the refunds work onward has only ever been applied to a
+development database. (That figure is not a guess — the rehearsal reported
+exactly where `migrate deploy` picked up.)
 
-**Thirteen of those create tables carrying `tenantId`.** A new table has **no
-RLS policy until `npm run db:rls` applies one**, and a table with no policy is
-readable by every hospital. On a single-tenant deployment that is invisible; the
-day a second hospital exists it is a breach. `db:rls` is not optional here and
-it is not in the §11 command list.
+**Ten of those create tables carrying `tenantId`:** `add_refunds`,
+`subscriptions_and_signup`, `prescription_routing`, `tax`, `tax_components`,
+`ward_requests`, `observation_orders`, `diagnostics`, `lab_attachments`,
+`partner_lab_charges`. A new table has **no RLS policy until `npm run db:rls`
+applies one**, and a table with no policy is readable by every hospital. On a
+single-tenant deployment that is invisible; the day a second hospital exists it
+is a breach. `db:rls` is not optional here and it is not in the §11 command
+list.
+
+Two more need it for the *inverted* policy — `tenant_applications` and
+`platform_password_reset_tokens` — which is stronger still: those hold vendor
+records, and the second holds live links into accounts that can open a
+break-glass grant against any hospital.
 
 **Every migration in this repo is hand-written.** The Prisma schema engine
 cannot be downloaded on the machine they were authored on, so none of them was
@@ -38,6 +48,8 @@ sign-in screen. §3.
 
 ## 1. Back up, and prove the backup restores
 
+Run as **admin** (`sudo` throughout this section):
+
 ```bash
 sudo -u postgres pg_dump hms_db | gzip > ~/pre-upgrade-$(date +%F).sql.gz
 ls -lh ~/pre-upgrade-*.sql.gz        # a few hundred bytes means it failed
@@ -46,10 +58,27 @@ ls -lh ~/pre-upgrade-*.sql.gz        # a few hundred bytes means it failed
 Then prove it, because a backup you have never restored is a hypothesis:
 
 ```bash
-sudo -u postgres createdb hms_db_rehearsal
+sudo -u postgres createdb hms_db_rehearsal --owner=hms_owner
+sudo -u postgres psql -d hms_db_rehearsal -c \
+  'ALTER SCHEMA public OWNER TO hms_owner; GRANT ALL ON SCHEMA public TO hms_owner;'
 gunzip -c ~/pre-upgrade-$(date +%F).sql.gz | sudo -u postgres psql hms_db_rehearsal
 sudo -u postgres psql hms_db_rehearsal -c 'select count(*) from patients;'
 ```
+
+**`--owner=hms_owner` and the `ALTER SCHEMA` are both required**, and the second
+is the one that is easy to miss. `createdb` as `postgres` makes a database whose
+`public` schema belongs to `postgres`, and since Postgres 15 a non-owner has no
+`CREATE` there — so `migrate deploy` fails on the first `CREATE TABLE` with
+
+```
+Database error code: 42501
+ERROR: permission denied for schema public
+```
+
+which reads as a broken migration and is a permission on a database that was
+created wrong. Production does not have this problem: its `public` schema was
+set up with the owner role in §3 of `DEPLOY.md`. This is purely an artefact of
+making the copy.
 
 If that count matches production, you have both a backup and the database §2
 needs. **Get a copy off the box** — a backup on the VPS dies with the VPS.
@@ -61,19 +90,93 @@ needs. **Get a copy off the box** — a backup on the VPS dies with the VPS.
 This is the step that makes the rest safe. Everything here runs against
 `hms_db_rehearsal` and cannot touch production.
 
+Run as **admin**, which drops you into the **hms** shell:
+
 ```bash
 sudo -u hms -i
 cd /opt/hms/app && git pull
 cd backend && npm ci && npx prisma generate
 ```
 
-Point the CLI at the copy for one command only — do **not** edit `.env`:
+### Two users, and the commands are not interchangeable
+
+Every block below is labelled, because mixing them wastes real time:
+
+- **`admin`** — your own sudo-capable login. Anything with `sudo` in it,
+  including everything touching Postgres roles or systemd.
+- **`hms`** — the service account, entered with `sudo -u hms -i` from `admin`.
+  Owns `/opt/hms/app`, and runs `git`, `npm` and the Prisma CLI.
+
+`hms` has **no sudo rights and no password**. A `sudo` prompt while you are in
+that shell is asking for a password that does not exist — press Ctrl+C, `exit`
+back to `admin`, run it there, then `sudo -u hms -i` again.
+
+### 2a. Prove the credentials before anything else
+
+Run as **hms**:
 
 ```bash
-DATABASE_URL_ADMIN="postgresql://hms_owner:PASSWORD@127.0.0.1:5432/hms_db_rehearsal" \
-  node prisma/admin-cli.js migrate deploy
+cd /opt/hms/app/backend
+ADMIN_URL="$(grep -E '^DATABASE_URL_ADMIN=' .env | cut -d= -f2- | tr -d '"'"'"'"')"
+psql "$ADMIN_URL" -c 'select current_user, current_database();'
 ```
 
+If that fails with **P1000 / authentication failed**, stop here — nothing below
+will work. The owner role's password in `.env` does not match the one Postgres
+holds. Making them agree needs both users:
+
+```bash
+# as hms
+exit
+```
+```bash
+# as admin — changing a Postgres role needs sudo, which hms does not have
+sudo -u postgres psql -c "ALTER ROLE hms_owner WITH PASSWORD 'choose-one';"
+sudo -u postgres psql -c '\du'          # if the role name itself is wrong
+```
+```bash
+# as admin, returning to the service account
+sudo -u hms -i
+cd /opt/hms/app/backend
+# put the same value into DATABASE_URL_ADMIN in .env, then re-run 2a
+```
+
+Two causes that both present as a wrong password:
+
+- **The role is named something else** on this deployment. `\du` lists them; it
+  may be `hms_admin` or `postgres` if the VPS predates `DEPLOY.md` §3.
+- **A password containing `@ : / ?` is not percent-encoded** in the URL. `@`
+  must be `%40`, or the parser reads the rest of the password as a hostname.
+
+### 2b. Apply the migrations to the copy
+
+Derive the rehearsal URLs from `.env`, so there is **no password to type and
+no placeholder to paste by mistake**:
+
+```bash
+eval "$(node prisma/rehearse-env.js)"
+echo "$REHEARSE_ADMIN"        # sanity-check: it must end in hms_db_rehearsal
+```
+
+**Re-run that `eval` at the top of every block below.** Shell variables do not
+survive the `exit` back to `admin` that §2a may have needed, and they do not
+survive a second terminal or a coffee break. A command that runs with an empty
+`DATABASE_URL` fails with
+
+```
+Missing required environment variables: DATABASE_URL
+```
+
+which is `validateEnv` doing its job and saying nothing about the real mistake.
+The script is idempotent, reads `.env`, and refuses to target the production
+database name.
+
+Then, pointing at the copy for one command only — do **not** edit `.env`:
+
+```bash
+eval "$(node prisma/rehearse-env.js)"
+DATABASE_URL_ADMIN="$REHEARSE_ADMIN" node prisma/admin-cli.js migrate deploy
+```
 Read the output. It lists each migration as it applies. What to watch for:
 
 - **`20260904220000_diagnostics`** is the only one using
@@ -84,15 +187,42 @@ Read the output. It lists each migration as it applies. What to watch for:
   near production. A half-applied set is the worst state available, and it is
   the state production would be left in.
 
+**What a failure looks like, and what it leaves behind.** Prisma reports
+`P3018` and refuses to apply anything further:
+
+```
+Error: P3018
+A migration failed to apply. New migrations cannot be applied before the
+error is recovered from.
+Migration name: 20260830145120_add_refunds
+```
+
+The failed migration is now recorded in `_prisma_migrations` with an error, and
+`migrate deploy` will keep refusing until that row is dealt with. **On the
+rehearsal copy, do not deal with it** — drop the database and start again, which
+is the whole point of rehearsing on something disposable.
+
+If this ever happens **on production**, the recovery is two steps and the order
+matters. Fix the cause first, then tell Prisma the migration did not take:
+
+```bash
+# as hms, in backend/
+node prisma/admin-cli.js migrate resolve --rolled-back 20260830145120_add_refunds
+node prisma/admin-cli.js migrate deploy
+```
+
+`--rolled-back` is correct only if the migration genuinely left nothing behind.
+A migration that created three tables and failed on the fourth statement has
+*partially* applied, and marking it rolled-back then re-running it will fail
+again on the objects that already exist. In that case restore the dump — which
+is why §4 takes one immediately before the change.
+
 Then the two things `migrate deploy` does not do:
 
 ```bash
-DATABASE_URL_ADMIN="postgresql://hms_owner:PASSWORD@127.0.0.1:5432/hms_db_rehearsal" \
-DATABASE_URL="postgresql://hms_app:PASSWORD@127.0.0.1:5432/hms_db_rehearsal" \
-  npm run db:rls
-
-DATABASE_URL_ADMIN="postgresql://hms_owner:PASSWORD@127.0.0.1:5432/hms_db_rehearsal" \
-  npm run db:constraints
+eval "$(node prisma/rehearse-env.js)"
+DATABASE_URL_ADMIN="$REHEARSE_ADMIN" DATABASE_URL="$REHEARSE_APP" npm run db:rls
+DATABASE_URL_ADMIN="$REHEARSE_ADMIN" npm run db:constraints
 ```
 
 `db:rls` prints what it applied and **self-checks both directions** — that one
@@ -104,18 +234,22 @@ authenticate. If it reports a failure, do not proceed.
 Finally, boot the API against the copy and look at one screen:
 
 ```bash
-DATABASE_URL="postgresql://hms_app:PASSWORD@127.0.0.1:5432/hms_db_rehearsal" \
-DATABASE_URL_ADMIN="postgresql://hms_owner:PASSWORD@127.0.0.1:5432/hms_db_rehearsal" \
-PORT=3100 npm run build && \
-DATABASE_URL="postgresql://hms_app:PASSWORD@127.0.0.1:5432/hms_db_rehearsal" \
-PORT=3100 node dist/main
+eval "$(node prisma/rehearse-env.js)"
+npm run build
+DATABASE_URL="$REHEARSE_APP" DATABASE_URL_ADMIN="$REHEARSE_ADMIN" \
+  PORT=3100 node dist/main
 ```
+
+`npm run build` needs no database — it compiles. Only the run does.
 
 `curl localhost:3100/api/v1/health` should return `status: ok`. Sign in as a real
 user from the restored data and open a patient, a prescription and an invoice.
 Then stop it and drop the copy:
 
+Run as **admin**:
+
 ```bash
+exit                                    # leave the hms shell first
 sudo -u postgres dropdb hms_db_rehearsal
 ```
 
@@ -178,6 +312,8 @@ no message worth reading.
 
 Verify mail before trusting it, and before restarting anything:
 
+Run as **hms**:
+
 ```bash
 cd /opt/hms/app/backend && npm run mail:test -- you@example.com
 ```
@@ -194,13 +330,20 @@ for the user *and* in the log.
 Take the site down for this. It is a few minutes and it avoids a request
 arriving between the schema changing and the API restarting.
 
+As **admin** — stop the services and take the dump that the rollback depends on:
+
 ```bash
 sudo systemctl stop hms-api hms-web
 
 # A second dump, immediately before the change. The one from §1 is hours old by
 # now and those hours are real appointments.
 sudo -u postgres pg_dump hms_db | gzip > ~/pre-upgrade-final.sql.gz
+ls -lh ~/pre-upgrade-final.sql.gz     # confirm it is not a few hundred bytes
+```
 
+Then as **hms** — the build and the schema:
+
+```bash
 sudo -u hms -i
 cd /opt/hms/app && git pull
 
@@ -220,7 +363,11 @@ rm -rf .next                   # Tailwind bakes its palette at build time, and
                                # this release changes it. A stale build shows
                                # the wordmark in black.
 npm run build
+```
 
+Back as **admin** — only this account can start the services:
+
+```bash
 exit
 sudo systemctl start hms-api hms-web
 ```
@@ -234,6 +381,8 @@ healthy while one feature returns 500s naming a column.
 ---
 
 ## 5. Verify, in this order
+
+Run as **admin**:
 
 ```bash
 sudo journalctl -u hms-api -n 60 --no-pager
@@ -284,16 +433,37 @@ Migrations are forward-only; there are no down migrations, deliberately — an
 automated reversal of a hand-written migration is a second hand-written
 migration nobody has tested. The rollback is the dump.
 
+As **admin** — restore the data:
+
 ```bash
 sudo systemctl stop hms-api hms-web
 sudo -u postgres dropdb hms_db
 sudo -u postgres createdb hms_db --owner=hms_owner
 gunzip -c ~/pre-upgrade-final.sql.gz | sudo -u postgres psql hms_db
+```
 
+As **hms** — put the code back to the commit that matched that data:
+
+```bash
+sudo -u hms -i
 cd /opt/hms/app && git checkout <previous-tag-or-commit>
 cd backend && npm ci && npx prisma generate && npm run build
 cd ../web && npm ci && rm -rf .next && npm run build
+exit
+```
+
+As **admin**:
+
+```bash
 sudo systemctl start hms-api hms-web
+```
+
+**Tag before you upgrade**, so `<previous-tag-or-commit>` is something you can
+type under pressure rather than something you have to find in `git log` while
+the site is down:
+
+```bash
+git tag pre-upgrade-$(date +%F) && git rev-parse --short HEAD
 ```
 
 Everything written between the dump and the rollback is gone. That is why §4
