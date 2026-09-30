@@ -1882,7 +1882,7 @@ export class LabService {
    * ----------------------------------------------
    * `GET /lab/invoices?payer=institution` already answers "which institutional
    * invoices exist". It does not answer the question a laboratory actually has
-   * at the end of a month, which is *what do we send Meridian Clinic* — and
+   * at the end of a month, which is *what do we send St Mary's Clinic* — and
    * making somebody read forty rows and add up the ones with the right name in
    * `notes` is how that gets answered wrongly.
    *

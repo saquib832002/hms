@@ -82,6 +82,20 @@ export class UsersController {
     return this.users.resetPassword(id);
   }
 
+  /**
+   * End a lockout, leaving the password alone.
+   *
+   * Its own action rather than a flag on the reset, because the audit trail has
+   * to be able to tell them apart: `USER_PASSWORD_RESET` means somebody's
+   * credential was changed, and rolling a typo correction into that would make
+   * the rows that matter harder to find among the ones that do not.
+   */
+  @Post(':id/unlock')
+  @AuditAction('USER_UNLOCK')
+  unlock(@Param('id', ParseIntPipe) id: number) {
+    return this.users.unlock(id);
+  }
+
   // No DELETE. Audit rows reference users, and a deleted user turns every
   // historical entry into "unknown" — which is the opposite of an audit trail.
 }

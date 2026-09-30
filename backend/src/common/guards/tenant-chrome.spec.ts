@@ -53,6 +53,12 @@ const SIGNED_IN_CHROME = [
 const PRE_AUTH = {
   'web/app/login/page.tsx': 'No session yet — the hospital is what the user is about to choose.',
   'web/app/layout.tsx': 'The browser tab title, rendered before any session is resolved.',
+  'web/app/reset-password/page.tsx':
+    'Reached from an emailed link, by somebody who cannot sign in — there is no session to read a hospital from.',
+  'mobile/components/forgot-password-screen.tsx':
+    'Asking for a reset link, before any session exists. Names the product because that is what the link goes to.',
+  'mobile/components/signup-screen.tsx':
+    'Read by somebody who is not a customer yet, so there is no hospital of theirs to name.',
   'mobile/components/login-screen.tsx':
     'No session yet — this is where the hospital is chosen, not displayed.',
   'mobile/components/auth-gate.tsx': 'The idle lock screen, shown when the session is not usable.',

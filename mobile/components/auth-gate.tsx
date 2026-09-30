@@ -1,6 +1,7 @@
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 import { useAuth } from '@/lib/auth-context';
 import { theme } from '@/lib/theme';
+import { BRAND_FULL } from '@/lib/types';
 import { Button } from './ui';
 import LoginScreen from '@/components/login-screen';
 
@@ -39,7 +40,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       <View style={s.centre}>
         <Text style={s.lockTitle}>Locked</Text>
         <Text style={s.lockBody}>
-          Meridian HMS locked after 15 minutes of inactivity.
+          {BRAND_FULL} locked after 15 minutes of inactivity.
         </Text>
         <Button label="Unlock" onPress={() => void unlock()} style={s.lockButton} />
         <Button

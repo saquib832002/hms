@@ -753,7 +753,7 @@ const s = StyleSheet.create({
      weight — a full style here would reset the line height mid-sentence. */
   destHintStrong: { fontWeight: '600', color: theme.color.textMuted },
   overlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: theme.color.bg,
     // Above the screen's own content, below the tab bar — which is drawn by the
     // navigator outside this view entirely.

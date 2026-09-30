@@ -73,6 +73,14 @@ export class SignupController {
         contactPhone: dto.contactPhone?.trim() || null,
         timezone: dto.timezone?.trim() || null,
         currency: dto.currency?.trim().toUpperCase() || null,
+        /*
+         * Deduped here as well as by `@ArrayUnique`, because the array reaches
+         * `Tenant.modules` through the reviewer's picker and `setModules`
+         * dedupes on that path too — a set is what the column means, and two
+         * places that both assume the other cleaned it is how a duplicate
+         * arrives. Absent stays `[]`: "did not say", not "asked for nothing".
+         */
+        requestedModules: [...new Set(dto.requestedModules ?? [])],
         notes: dto.notes?.trim() || null,
         submittedFromIp: req.ip ?? null,
       },

@@ -751,11 +751,68 @@ model PlatformUser {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  grants               BreakGlassGrant[]   @relation("GrantHolder")
-  grantsCreated        BreakGlassGrant[]   @relation("GrantCreator")
+  /// When this account's password was last reset through the emailed link.
+  ///
+  /// Not cosmetic and not an audit crumb: `openGrant` refuses for a cooling-off
+  /// period afterwards. A vendor credential reaches every hospital on the
+  /// deployment, so the realistic attack on self-service reset is a compromised
+  /// mailbox followed immediately by a grant into somebody's patient data. A
+  /// password reset is rare and planned; break-glass minutes after one is not.
+  ///
+  /// Null on every account that predates this and on every account reset by
+  /// `platform:user`, which is correct — that path already requires database
+  /// access, so there is nothing weaker to compensate for.
+  passwordResetAt DateTime?
+
+  grants               BreakGlassGrant[]          @relation("GrantHolder")
+  grantsCreated        BreakGlassGrant[]          @relation("GrantCreator")
   applicationsReviewed TenantApplication[]
+  resetTokens          PlatformPasswordResetToken[]
 
   @@map("platform_users")
+}
+
+/// A single-use link letting vendor staff set a new console password.
+///
+/// ## Why this is a second table rather than reusing `PasswordResetToken`
+///
+/// That one has a foreign key to `users`, and a `PlatformUser` is deliberately
+/// not a `User` — separate table, separate login, separate token audience,
+/// `PlatformGuard` setting no `req.user`. Making one token table serve both
+/// would mean a nullable FK on each side and a row that is valid with neither
+/// set, which is exactly the shape that lets a hospital token be mistaken for a
+/// vendor one somewhere downstream.
+///
+/// ## Why it carries the platform policy, not the global one
+///
+/// `PLATFORM_MODELS`, so RLS is `USING (app_current_tenant() IS NULL)` —
+/// visible only when no hospital is in scope. `password_reset_tokens` is global
+/// (no policy at all) because it hangs off a hospital user and holds nothing a
+/// hospital could not see about itself. This one names accounts that can open a
+/// grant against *any* hospital, so it belongs with `platform_users` behind the
+/// inverted policy for the same reason that table does.
+///
+/// Consuming a link is unauthenticated, so no tenant is in scope and the
+/// inverted policy admits it — the same property login relies on.
+model PlatformPasswordResetToken {
+  id             Int          @id @default(autoincrement())
+  platformUser   PlatformUser @relation(fields: [platformUserId], references: [id], onDelete: Cascade)
+  platformUserId Int
+  /// sha256 of 32 random bytes. The raw value exists in the email and nowhere
+  /// else, so holding this table is not holding a set of working links.
+  tokenHash      String       @unique
+  expiresAt      DateTime
+  /// Set rather than deleted: a link presented twice is either a double click
+  /// or a replay, and a deleted row makes both look like one that never existed.
+  consumedAt     DateTime?
+  /// What was typed into the form, for a support call. Never used for the
+  /// lookup — the token identifies the request.
+  requestedFor   String
+  createdAt      DateTime     @default(now())
+
+  @@index([platformUserId])
+  @@index([expiresAt])
+  @@map("platform_password_reset_tokens")
 }
 
 /// Somebody asking to become a customer.
@@ -798,6 +855,22 @@ model TenantApplication {
   /// What the applicant asked for. Applied at approval, validated then.
   timezone String?
   currency String?
+
+  /// Which modules they said they wanted — a *request*, exactly like
+  /// `requestedSlug`, and advisory in the same way.
+  ///
+  /// The vendor still sets `Tenant.modules` at approval, because what a hospital
+  /// was **sold** is a commercial fact and a public form is not where it gets
+  /// decided. What this buys is that the reviewer's picker opens on the answer
+  /// the customer gave rather than on all five, so approving a pharmacy does not
+  /// silently hand them the wards.
+  ///
+  /// Empty means they did not say. Deliberately **not** defaulted to all five:
+  /// "they asked for everything" and "nobody asked" are different facts, and
+  /// collapsing them would make the reviewer's pre-fill a guess wearing the
+  /// clothes of an answer — the same distinction as blank-versus-zero on
+  /// `Medicine.sellingPrice` and `Doctor.consultationFee`.
+  requestedModules TenantModule[]
 
   status TenantApplicationStatus @default(PENDING)
 
@@ -911,6 +984,7 @@ model User {
   doctorProfile          Doctor?
   auditLogs              AuditLog[]
   refreshTokens          RefreshToken[]
+  passwordResetTokens    PasswordResetToken[]
   devices                Device[]
   dispensedPrescriptions Prescription[]             @relation("DispensedBy")
   recordedVitals         Vital[]                    @relation("VitalsRecordedBy")
@@ -1014,6 +1088,58 @@ model RefreshToken {
   @@index([userId])
   @@index([familyId])
   @@map("refresh_tokens")
+}
+
+/// A single-use link that lets somebody set a new password without knowing the
+/// old one.
+///
+/// ## Why the raw token is never stored
+///
+/// Only `tokenHash` — sha256 of a 32-byte random value, exactly as
+/// `RefreshToken` holds its own. A reset token is a bearer credential for a
+/// hospital account: anybody holding the table holds every live one, so storing
+/// them in the clear would make a database backup a set of working logins. The
+/// raw value exists in the email and nowhere else.
+///
+/// ## Why it carries no `tenantId`
+///
+/// Deliberately global, beside `RefreshToken` and `Device`, and this is the
+/// part worth re-reading before changing. Consuming a token happens on an
+/// unauthenticated request: there is no session, so `TenantInterceptor` opens
+/// no transaction and `app.tenant_id` is unset. A row under the generic policy
+/// would be invisible to exactly the request that needs it — the lookup would
+/// return nothing and every valid link would read as expired. The same shape as
+/// the login chicken-and-egg that took sign-in down once already.
+///
+/// It holds no patient-derived data either: a user id, a hash and two
+/// timestamps. The hospital it belongs to is reachable through `user`, which is
+/// where it should be read from anyway — the tenant comes from the user's row,
+/// never from the request.
+///
+/// ## Why `consumedAt` is a column rather than a delete
+///
+/// A used token has to stay findable. Presenting one twice is either somebody
+/// clicking a link again or somebody replaying a link they should not have, and
+/// deleting the row makes both look identical to a token that never existed.
+/// `RefreshToken` draws the same distinction with `revokedAt`.
+model PasswordResetToken {
+  id        Int       @id @default(autoincrement())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int
+  tokenHash String    @unique
+  expiresAt DateTime
+  consumedAt DateTime?
+  /// What was typed into the form. Kept so a support call can distinguish "the
+  /// link never arrived" from "it went to an address they no longer read", and
+  /// deliberately not used for the lookup — the token is what identifies the
+  /// request, and matching on an address as well would let a wrong one look
+  /// like an expired link.
+  requestedFor String
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("password_reset_tokens")
 }
 
 model Doctor {

@@ -1,9 +1,13 @@
 import type { Metadata } from 'next';
 import { AuthProvider } from '@/lib/auth-context';
+import { BRAND_FULL } from '@/lib/types';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Meridian HMS',
+  // The product, not the hospital. A tab title is rendered before any session
+  // exists, so there is no tenant to name — see `tenant-chrome.spec.ts`, which
+  // lists this file as a pre-auth exemption with that reason.
+  title: BRAND_FULL,
   description: 'Hospital Management System',
   // Internal operational tool — should never be indexed if it ever ends up
   // reachable from the public internet.

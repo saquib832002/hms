@@ -1,5 +1,5 @@
 import { router, Tabs } from 'expo-router';
-import { Platform, Pressable, StyleSheet, Text } from 'react-native';
+import { type ColorValue, Platform, Pressable, StyleSheet, Text } from 'react-native';
 import { useAuth } from '@/lib/auth-context';
 import { accentFor, fillFor, headerBgFor, theme } from '@/lib/theme';
 
@@ -85,9 +85,26 @@ export default function TabsLayout() {
   // and the active role stays legible from the bottom of the screen too.
   const accent = accentFor(user?.role);
 
+  /*
+   * `color` is a `ColorValue`, not a `string`, and that is the whole of the
+   * SDK 57 typecheck failure here — twenty-three call sites, one cause.
+   *
+   * React Navigation types `tabBarIcon` as receiving `{ focused, color:
+   * ColorValue, size: number }`. `ColorValue` is `string |
+   * OpaqueColorValue | ...`, where the opaque member is a platform-native
+   * colour handle (`PlatformColor`, `DynamicColorIOS`) that is deliberately not
+   * a string — it carries no readable value in JS at all.
+   *
+   * So the parameter is widened rather than the value cast. `as string` would
+   * have silenced all twenty-three errors and left a lie in place: the day
+   * anything in this app passes a platform colour for the active tint, the
+   * glyph would receive an object where it expects a string. `TextStyle.color`
+   * accepts `ColorValue` already, so passing it straight through is both
+   * correct and the smaller change.
+   */
   const icon =
     (glyph: string) =>
-    ({ color, focused }: { color: string; focused: boolean }) => (
+    ({ color, focused }: { color: ColorValue; focused: boolean }) => (
       <Text style={{ color, fontSize: focused ? 19 : 17 }}>{glyph}</Text>
     );
 

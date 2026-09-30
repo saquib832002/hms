@@ -9,6 +9,67 @@
 
 
 /**
+ * The product's name, split where its colour changes.
+ *
+ * WHY IT IS HERE AND NOT TYPED OUT ON EACH SCREEN
+ * -----------------------------------------------
+ * It was typed out on each screen — as `Meridian<span>HMS</span>` in two web
+ * files and `Meridian<Text>HMS</Text>` in one mobile file, plus four plain-text
+ * sentences and a browser tab title. Renaming it therefore meant finding eight
+ * places, and the one that gets missed is never the login screen somebody looks
+ * at daily; it is the idle lock screen, or the biometric prompt, or the sentence
+ * on the signup form. Same shape as the role list that ended up hand-written in
+ * four places with three of them wrong.
+ *
+ * So `types.ts` — the file already duplicated byte-for-byte into
+ * `mobile/lib/types.ts` with a drift test, which is exactly why `SIGNUP_BUNDLES`
+ * lives here too. The two clients cannot disagree about what the product is
+ * called or where the colour changes.
+ *
+ * WHY THREE PARTS RATHER THAN ONE STRING
+ * --------------------------------------
+ * The wordmark is three-tone: **One** in blue, **Care** in near-black, **HMS**
+ * in the brand red. Each client renders that with its own primitives —
+ * `<span>` against `<Text>` — so the *markup* cannot be shared, but the split
+ * points can, and must be: two clients disagreeing about where `One` ends
+ * would produce two different logos with the same name.
+ *
+ * To rename the product, change these three strings.
+ */
+export const BRAND_PARTS = ['One', 'Care', 'HMS'] as const;
+
+/**
+ * The short name, for prose.
+ *
+ * "Not a OneCare hospital yet?", "does not use OneCare yet", "the OneCare
+ * website". Deliberately *without* the `HMS`: those sentences are about the
+ * company a hospital is a customer of, and "Not a OneCare HMS hospital yet"
+ * reads as a typo. A product name and the noun for the product are different
+ * words and this codebase has to be able to say both.
+ *
+ * Built from the first two parts rather than being a fourth literal, so a
+ * rename cannot leave the prose saying the old name while the logo says the
+ * new one — which is the exact half-finished state the previous rebrand left
+ * in eight places.
+ */
+export const BRAND = `${BRAND_PARTS[0]}${BRAND_PARTS[1]}`;
+
+/**
+ * The whole wordmark as plain text, where colour cannot be carried.
+ *
+ * A browser tab title, an OS biometric prompt, the idle-lock sentence. These
+ * are the wordmark rather than prose — a tab reading just "OneCare" would be
+ * the only place the product is named without `HMS`.
+ *
+ * Assembled by hand rather than with `join`, because the spacing is
+ * **asymmetric on purpose**: `One` and `Care` are one word and `HMS` is a
+ * separate one, so it is `OneCare HMS` and never `One Care HMS`. A `join(' ')`
+ * over three parts would silently produce the second, and it would look
+ * plausible in a diff.
+ */
+export const BRAND_FULL = `${BRAND} ${BRAND_PARTS[2]}`;
+
+/**
  * A part of the product a hospital has been sold.
  *
  * Not a role: roles say what a *person* may do inside a hospital that has the
@@ -20,6 +81,86 @@
  * can still open results it already has.
  */
 export type TenantModule = 'CLINIC' | 'WARDS' | 'PHARMACY' | 'LABORATORY' | 'BILLING';
+
+/**
+ * What a stranger is asked on the signup form, in their own words.
+ *
+ * WHY BUNDLES RATHER THAN FIVE CHECKBOXES
+ * ---------------------------------------
+ * `TenantModule` is the vendor's vocabulary. "Wards" is obvious to anybody who
+ * has read this codebase and means nothing to a clinic owner deciding whether to
+ * try the product — and a public form is the one screen in this system read by
+ * somebody with no account, no training and no reason to persist. Five technical
+ * checkboxes ask them to model the product before they have seen it.
+ *
+ * So the applicant picks the shape of their business and the *set* is derived.
+ * The set is what travels and what is stored, because `Tenant.modules` is
+ * deliberately a set rather than a plan name — a bundle here is an input
+ * affordance, and must not become an enum the backend reasons about. The moment
+ * somebody sells a sixth combination, this list grows and nothing else moves.
+ *
+ * WHY IT LIVES IN `types.ts`
+ * --------------------------
+ * This file is already duplicated byte-for-byte into `mobile/lib/types.ts` with
+ * a drift test enforcing it, so the two clients cannot disagree about what "a
+ * pharmacy" includes — which they otherwise would, silently, and the person who
+ * met the difference would be an applicant on one device and a reviewer looking
+ * at a set that did not match the words they were shown. Putting it here buys
+ * that guarantee without inventing a second guard.
+ *
+ * BILLING is in every bundle that sells anything, and that is the one to
+ * re-read: the pharmacy and lab tills come with their own modules, so a
+ * standalone shop can take money without it — but a clinic that cannot invoice a
+ * consultation is not a product anybody asked for.
+ */
+export interface SignupBundle {
+  id: string;
+  /** What the applicant reads. Their noun, not ours. */
+  label: string;
+  /** One line, so the difference between two bundles is visible without asking. */
+  hint: string;
+  modules: TenantModule[];
+}
+
+export const SIGNUP_BUNDLES: SignupBundle[] = [
+  {
+    id: 'hospital',
+    label: 'A hospital — everything',
+    hint: 'Outpatients, inpatient wards, pharmacy, laboratory and billing.',
+    modules: ['CLINIC', 'WARDS', 'PHARMACY', 'LABORATORY', 'BILLING'],
+  },
+  {
+    id: 'clinic',
+    label: 'A clinic',
+    hint: 'Appointments, consultations, prescribing and billing. No inpatient beds.',
+    modules: ['CLINIC', 'BILLING'],
+  },
+  {
+    id: 'clinic-lab',
+    label: 'A clinic with a laboratory',
+    hint: 'As above, plus running your own tests.',
+    modules: ['CLINIC', 'LABORATORY', 'BILLING'],
+  },
+  {
+    id: 'clinic-pharmacy',
+    label: 'A clinic with a pharmacy',
+    hint: 'As a clinic, plus dispensing and stock at your own counter.',
+    modules: ['CLINIC', 'PHARMACY', 'BILLING'],
+  },
+  {
+    id: 'pharmacy',
+    label: 'A pharmacy only',
+    hint: 'Dispensing, stock, counter sales and the till. No doctors or appointments.',
+    modules: ['PHARMACY'],
+  },
+  {
+    id: 'laboratory',
+    label: 'A laboratory only',
+    hint: 'Test catalogue, worklist, results and the till. Work can come from other hospitals.',
+    modules: ['LABORATORY'],
+  },
+];
+
 
 export type UserRole =
   | 'ADMIN'

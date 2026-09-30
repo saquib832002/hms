@@ -5,6 +5,8 @@ import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RefreshDto } from './dto/refresh.dto';
 import { SwitchRoleDto } from './dto/switch-role.dto';
+import { ForgotPasswordDto, ResetPasswordDto } from './dto/password-reset.dto';
+import { PasswordResetService } from './password-reset.service';
 import { Public } from '../common/decorators/public.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { AuditAction } from '../common/decorators/audit.decorator';
@@ -18,6 +20,7 @@ export class AuthController {
   constructor(
     private readonly auth: AuthService,
     private readonly config: ConfigService,
+    private readonly reset: PasswordResetService,
   ) {}
 
   @Public()
@@ -49,6 +52,47 @@ export class AuthController {
     const { accessToken, refreshToken } = await this.auth.refresh(raw ?? '');
     this.setRefreshCookie(res, refreshToken);
     return { accessToken, refreshToken };
+  }
+
+  /**
+   * Ask for a link, and spend one. The sixth and seventh `@Public()` routes.
+   *
+   * WHY THEY ARE PUBLIC, WHICH IS NOT A TAUTOLOGY
+   * ---------------------------------------------
+   * `@Public()` means unauthenticated, and the list of routes carrying it is
+   * asserted as an exact set precisely so that adding one is a decision
+   * somebody made rather than a decorator that drifted in. These two earn it
+   * for the obvious reason — the person calling them cannot sign in — and they
+   * are the first `@Public()` routes that *write to `users`*, which is why
+   * everything about them is narrow: one address in, one identical sentence
+   * out, and a single-use token in between.
+   *
+   * THE THROTTLES ARE DIFFERENT NUMBERS FOR DIFFERENT REASONS
+   * ---------------------------------------------------------
+   * Asking is 3/min, tighter than login's 5, because the cost of the abuse is
+   * borne by somebody else: a script hammering this posts mail to a third
+   * party's inbox, and a handful an hour is already a nuisance.
+   *
+   * Spending is 10/min. It is not guessable — 32 random bytes — so the limit is
+   * not what stops an attack; it is there so that a broken client retrying in a
+   * loop cannot turn one person's mistake into load.
+   */
+  @Public()
+  @Post('forgot-password')
+  @HttpCode(202)
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  @AuditAction('PASSWORD_RESET_REQUEST')
+  forgotPassword(@Body() dto: ForgotPasswordDto, @Req() req: Request) {
+    return this.reset.request(dto.email, req.ip ?? null);
+  }
+
+  @Public()
+  @Post('reset-password')
+  @HttpCode(200)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @AuditAction('PASSWORD_RESET_CONSUME')
+  resetPassword(@Body() dto: ResetPasswordDto, @Req() req: Request) {
+    return this.reset.consume(dto.token, dto.newPassword, req.ip ?? null);
   }
 
   @Public()

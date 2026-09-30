@@ -337,7 +337,12 @@ describe('every role can use the mobile app', () => {
     // The prescription sheet draws inside the screen, not in a native window
     // over it.
     expect(SHEET).not.toMatch(/<Modal[\s>]/);
-    expect(SHEET).toContain('absoluteFillObject');
+    // `absoluteFill`, not `absoluteFillObject` — RN 0.85 removed the latter.
+    // Asserted on the name that exists rather than loosened to /absoluteFill/,
+    // which would have gone on passing against the removed API and let the
+    // sheet's backdrop collapse to nothing at runtime.
+    expect(SHEET).toContain('absoluteFill');
+    expect(SHEET).not.toContain('absoluteFillObject');
   });
 
   it('gives the pharmacist a queue and a stock tab, and a way to dispense', () => {

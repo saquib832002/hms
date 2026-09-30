@@ -622,7 +622,7 @@ const s = StyleSheet.create({
   dose: { paddingHorizontal: theme.space(2), paddingVertical: 2, borderRadius: theme.radius.sm },
   doseText: { fontSize: 11, fontVariant: ['tabular-nums'], color: theme.color.text },
   modalRoot: { flex: 1, justifyContent: 'flex-end' },
-  modalBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.35)' },
+  modalBackdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.35)' },
   modalCard: {
     backgroundColor: theme.color.surface,
     borderTopLeftRadius: 16,

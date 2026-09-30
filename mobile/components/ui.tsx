@@ -581,7 +581,7 @@ const s = StyleSheet.create({
   },
   rolePillText: { ...theme.font.caption },
   sheetRoot: { flex: 1, justifyContent: 'flex-end' },
-  sheetBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(17,26,20,0.45)' },
+  sheetBackdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(17,26,20,0.45)' },
   sheetCard: {
     backgroundColor: theme.color.surface,
     borderTopLeftRadius: theme.radius.lg,

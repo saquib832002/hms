@@ -458,8 +458,57 @@ export class UsersService {
     // A reset is also a "this account may be compromised" action, so existing
     // sessions go with it.
     await this.tokens.revokeAllForUser(id);
+    await this.consumeOutstandingResetLinks(id);
 
     return { id, temporaryPassword };
+  }
+
+  /**
+   * Clear a lockout without touching the password.
+   *
+   * Five wrong attempts locks an account for fifteen minutes, and until now the
+   * only way an administrator could end that early was `resetPassword` — which
+   * also invalidates a password the person very likely still remembers. So
+   * somebody who mistyped theirs five times before coffee was handed a
+   * temporary password, a forced change, and every session on their phone
+   * signed out, to fix a typo.
+   *
+   * The two are different acts and the difference is what the person knows.
+   * A reset says "you cannot get in because you do not know the password"; an
+   * unlock says "you do know it, and the wrong guesses are in the way". Only
+   * the first is a reason to change what the password is.
+   *
+   * Sessions are deliberately **not** revoked here, for the same reason the
+   * password is not: nothing about a mistyped password suggests an existing
+   * session is somebody else's, and signing a nurse out of a ward terminal to
+   * undo a typo is a cost with nothing on the other side of it. Where there
+   * *is* a reason to suspect the account, `resetPassword` is the action, and it
+   * still does both.
+   */
+  async unlock(id: number) {
+    const user = await this.prisma.user.findUnique({
+      where: { id },
+      select: { id: true, lockedUntil: true, failedLoginAttempts: true },
+    });
+    if (!user) throw new NotFoundException(`User ${id} not found`);
+
+    await this.prisma.user.update({
+      where: { id },
+      data: { failedLoginAttempts: 0, lockedUntil: null },
+    });
+
+    /*
+     * `wasLocked` is returned rather than refusing when the account was not
+     * locked. An administrator clicking Unlock on a row whose lock expired
+     * thirty seconds ago has done nothing wrong, and an error there would read
+     * as the screen being broken. It also lets the client say which of the two
+     * happened rather than claiming a lock was lifted that had already gone.
+     */
+    return {
+      id,
+      wasLocked: user.lockedUntil !== null && user.lockedUntil > new Date(),
+      clearedAttempts: user.failedLoginAttempts,
+    };
   }
 
   /**
@@ -494,6 +543,35 @@ export class UsersService {
     });
 
     await this.tokens.revokeAllForUser(actor.userId);
+    await this.consumeOutstandingResetLinks(actor.userId);
     return { changed: true };
+  }
+
+  /**
+   * Kill any live "forgot password" links for this person.
+   *
+   * Called whenever the password changes by another route, and it is not
+   * housekeeping. Somebody asks for a reset link, does not receive it or gives
+   * up, and gets their administrator to reset them instead — and the emailed
+   * link is still live for the rest of its half hour. Anybody who obtains that
+   * mailbox in the meantime takes the account straight back, past a reset that
+   * was performed precisely because something was wrong.
+   *
+   * `updateMany` on `consumedAt`, not a delete: a link presented after this has
+   * to be distinguishable in the log from one that never existed.
+   *
+   * Through the proxy, **not** `unscoped`, and that distinction is the one
+   * this repo has already paid for. Both callers run inside an authenticated
+   * request, which is holding a pool connection for its whole life; asking the
+   * pool for a second one there is the self-deadlock that presented as "switching
+   * to nurse takes more than two minutes". `passwordResetToken` is in
+   * `GLOBAL_MODELS`, so the proxy routes it through the transaction already
+   * open — same rows, same connection, because the table carries no policy.
+   */
+  private async consumeOutstandingResetLinks(userId: number) {
+    await this.prisma.passwordResetToken.updateMany({
+      where: { userId, consumedAt: null },
+      data: { consumedAt: new Date() },
+    });
   }
 }

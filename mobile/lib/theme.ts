@@ -72,6 +72,15 @@ export const ROLE_THEME: Record<UserRole, RoleTheme> = {
 
 const DEFAULT_ROLE: RoleTheme = ROLE_THEME.DOCTOR;
 
+/**
+ * The brand red: the medical cross in the icon, and the `HMS` in the wordmark.
+ *
+ * One constant for both, so they cannot drift apart by a digit. Kept in step
+ * with `BRAND_RED` in `scripts/make-icons.mjs` and `brand.hms` in
+ * `web/tailwind.config.ts` — `brand.spec.ts` asserts the last of those.
+ */
+const BRAND_RED = '#A4161A';
+
 export const theme = {
   color: {
     bg: neutral.bg,
@@ -100,7 +109,30 @@ export const theme = {
      * and this one is darker and less orange so the two never sit at the same
      * visual pitch.
      */
-    cross: '#A4161A',
+    cross: BRAND_RED,
+
+    /**
+     * The wordmark, one colour per part: `One` blue, `Care` near-black, `HMS`
+     * the brand red.
+     *
+     * Deliberately NOT the semantic tokens. `brandOne` is a blue this palette
+     * has no other use for — the phone's `primary` is the role-derived green,
+     * so pointing the wordmark at it would make the logo change colour with
+     * whichever role is signed in, which is absurd and would have shipped. And
+     * `brandHms` is not `danger`: see the note on `cross` above, which is the
+     * same red and the same argument.
+     *
+     * `brandHms` reads from `BRAND_RED` alongside `cross` so the mark and the
+     * type cannot drift apart by a digit. They are two different claims —
+     * `cross` is the medical symbol, this is the product's name set in type —
+     * so either could move without the other, and until then they agree.
+     *
+     * These three must equal `brand.one` / `brand.care` / `brand.hms` in
+     * `web/tailwind.config.ts`; `brand.spec.ts` asserts it.
+     */
+    brandOne: '#1E6FD9',
+    brandCare: '#14181D',
+    brandHms: BRAND_RED,
 
     primary: DEFAULT_ROLE.text,
     primaryDark: '#076B20',

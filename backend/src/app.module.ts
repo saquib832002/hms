@@ -10,6 +10,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { TenancyModule } from './common/tenancy/tenancy.module';
 import { AuthModule } from './auth/auth.module';
 import { AuditModule } from './audit/audit.module';
+import { MailModule } from './mail/mail.module';
 import { PatientsModule } from './patients/patients.module';
 import { DoctorsModule } from './doctors/doctors.module';
 import { AppointmentsModule } from './appointments/appointments.module';
@@ -52,6 +53,9 @@ import { RequestContextMiddleware } from './common/middleware/request-context.mi
     PrismaModule,
     TenancyModule,
     AuditModule,
+    // Before AuthModule, which consumes it. Global, so nothing else has to
+    // import it, and it is the only outbound channel here apart from push.
+    MailModule,
     AuthModule,
     PatientsModule,
     DoctorsModule,

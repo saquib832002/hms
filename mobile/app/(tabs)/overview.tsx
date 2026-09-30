@@ -723,7 +723,7 @@ const s = StyleSheet.create({
 
   // Fee sheet
   modalRoot: { flex: 1, justifyContent: 'flex-end' },
-  modalBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(17,26,20,0.45)' },
+  modalBackdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(17,26,20,0.45)' },
   modalCard: {
     backgroundColor: theme.color.surface,
     borderTopLeftRadius: theme.radius.lg,

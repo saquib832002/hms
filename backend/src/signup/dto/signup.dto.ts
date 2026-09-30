@@ -1,4 +1,15 @@
-import { IsEmail, IsOptional, IsString, Matches, MaxLength, MinLength } from 'class-validator';
+import {
+  ArrayUnique,
+  IsArray,
+  IsEmail,
+  IsEnum,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
+import { TenantModule } from '@prisma/client';
 
 /**
  * What somebody has to type to ask for an account.
@@ -53,6 +64,30 @@ export class SignupDto {
   @IsString()
   @Matches(/^[A-Za-z]{3}$/, { message: 'currency must be a three-letter ISO 4217 code' })
   currency?: string;
+
+  /**
+   * Which parts of the product they said they wanted. A **request**, and
+   * advisory exactly as `requestedSlug` is.
+   *
+   * The vendor still sets `Tenant.modules` at approval. What a hospital was sold
+   * is a commercial fact decided by a human reading the application, and a
+   * public endpoint must not be the thing that decides it — otherwise anybody
+   * on the internet is choosing their own entitlements and the approval step is
+   * theatre. What this buys is a reviewer's picker that opens on the customer's
+   * own answer instead of on all five.
+   *
+   * `@IsEnum` against the generated enum rather than a hand-typed list: adding a
+   * sixth module must not leave this quietly refusing it, which is what a string
+   * union copied into a DTO does.
+   *
+   * Absent and empty both mean "they did not say" — see the model comment for
+   * why that is deliberately distinct from asking for everything.
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @IsEnum(TenantModule, { each: true, message: 'requestedModules holds unknown modules' })
+  requestedModules?: TenantModule[];
 
   @IsOptional() @IsString() @MaxLength(2000) notes?: string;
 }

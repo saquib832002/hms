@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { FlatList, StyleSheet, Text, View } from 'react-native';
-import * as Notifications from 'expo-notifications';
 import { useRouter } from 'expo-router';
+import { loadNotifications } from '@/lib/push';
 import { theme } from '@/lib/theme';
 import { relativeAge } from '@/lib/format';
 import { AppHeader, Card, Screen } from '@/components/ui';
@@ -32,30 +32,54 @@ export default function AlertsScreen() {
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const router = useRouter();
 
+  /*
+   * `expo-notifications` is loaded through `loadNotifications` rather than
+   * imported at the top of this file, and that is not a style preference.
+   *
+   * In Expo Go on Android the module throws **on import**, and Expo Router
+   * statically requires every file under `app/` — so a top-level import here
+   * took the entire app down at launch with a red screen naming `ExpoRoot.js`,
+   * on a screen nobody had opened. See the comment on `loadNotifications`.
+   *
+   * It resolves to null where push is unavailable, and this screen then simply
+   * never receives anything — which is what the empty state already describes.
+   */
   useEffect(() => {
-    const received = Notifications.addNotificationReceivedListener((n) => {
-      const data = n.request.content.data as { kind?: string; appointmentId?: number };
-      setAlerts((prev) => [
-        {
-          id: n.request.identifier,
-          kind: data.kind ?? 'QUEUE_WAITING',
-          appointmentId: data.appointmentId,
-          receivedAt: new Date(),
-        },
-        ...prev,
-      ]);
-    });
+    let cancelled = false;
+    const subscriptions: { remove: () => void }[] = [];
 
-    const tapped = Notifications.addNotificationResponseReceivedListener(() => {
-      // Every notification kind currently resolves to the queue. The lock
-      // screen is passed by AuthGate first, so a tap on a locked phone lands
-      // on the unlock prompt rather than a patient record.
-      router.push('/(tabs)');
-    });
+    void (async () => {
+      const Notifications = await loadNotifications();
+      // `cancelled` matters: the await means the screen can unmount before the
+      // module resolves, and a listener registered after that would never be
+      // removed by the cleanup below — it has already run.
+      if (!Notifications || cancelled) return;
+
+      subscriptions.push(
+        Notifications.addNotificationReceivedListener((n) => {
+          const data = n.request.content.data as { kind?: string; appointmentId?: number };
+          setAlerts((prev) => [
+            {
+              id: n.request.identifier,
+              kind: data.kind ?? 'QUEUE_WAITING',
+              appointmentId: data.appointmentId,
+              receivedAt: new Date(),
+            },
+            ...prev,
+          ]);
+        }),
+        Notifications.addNotificationResponseReceivedListener(() => {
+          // Every notification kind currently resolves to the queue. The lock
+          // screen is passed by AuthGate first, so a tap on a locked phone lands
+          // on the unlock prompt rather than a patient record.
+          router.push('/(tabs)');
+        }),
+      );
+    })();
 
     return () => {
-      received.remove();
-      tapped.remove();
+      cancelled = true;
+      for (const s of subscriptions) s.remove();
     };
   }, [router]);
 

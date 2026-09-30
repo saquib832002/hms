@@ -506,7 +506,7 @@ describe('access matrix', () => {
     });
   });
 
-  it('exposes only login, refresh, logout, health and public signup', () => {
+  it('exposes only login, refresh, logout, health, public signup and password reset', () => {
     /*
      * The exact set, not a count — the value of this assertion is that adding a
      * fifth `@Public()` route has to be argued for here, in a diff somebody
@@ -519,12 +519,23 @@ describe('access matrix', () => {
      * binding was rebuilt, so nothing ever reported the omission. Three other
      * controllers were unchecked the same way; a test nobody can run asserts
      * nothing.
+     *
+     * `forgotPassword` and `resetPassword` are the sixth and seventh, and they
+     * are the first public routes that write to `users`. They earn it for the
+     * obvious reason — the caller cannot sign in — and everything about them is
+     * narrowed accordingly: one address in, one identical sentence out
+     * whatever the address is, and a single-use hashed token in between. If a
+     * future change makes either of them answer differently depending on
+     * whether an account exists, this list is the wrong place to notice; see
+     * `password-reset.spec.ts`, which asserts that directly.
      */
     const publicRoutes = ROUTES.filter((r) => r.isPublic).map((r) => `${r.controller}.${r.handler}`);
     expect(publicRoutes.sort()).toEqual([
+      'AuthController.forgotPassword',
       'AuthController.login',
       'AuthController.logout',
       'AuthController.refresh',
+      'AuthController.resetPassword',
       'HealthController.check',
       'SignupController.signup',
     ]);

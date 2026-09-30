@@ -189,8 +189,21 @@ export const TENANT_SCOPED_MODELS = new Set([
   'labAttachmentData',
 ]);
 
-/** Models deliberately outside tenancy — both hang off User. */
-export const GLOBAL_MODELS = new Set(['refreshToken', 'device', 'tenant']);
+/**
+ * Models deliberately outside tenancy. All three of the non-`tenant` ones hang
+ * off `User` and hold no patient-derived data.
+ *
+ * `passwordResetToken` is the one that could not be anything else: it is read
+ * on an unauthenticated request, where `app.tenant_id` is unset, so a row under
+ * the generic policy would be invisible to the only request that ever needs it.
+ * See the model's own note in `schema.prisma`.
+ */
+export const GLOBAL_MODELS = new Set([
+  'refreshToken',
+  'passwordResetToken',
+  'device',
+  'tenant',
+]);
 
 /**
  * The vendor's own tables. A third category, and it earns its place.
@@ -218,6 +231,17 @@ export const PLATFORM_MODELS = new Set([
   // not to any hospital — and one hospital must never see that another applied.
   // Same inverted policy as the two above.
   'tenantApplication',
+  /*
+   * Reset links for accounts that can open a grant against any hospital. It
+   * belongs here rather than in GLOBAL_MODELS beside `passwordResetToken`,
+   * and the difference is the blast radius: a hospital user's reset token is
+   * only about that hospital, and this one names the vendor's own staff.
+   *
+   * The inverted policy still admits the consume path, because that request is
+   * unauthenticated and therefore has no tenant in scope — the same property
+   * platform login already depends on.
+   */
+  'platformPasswordResetToken',
 ]);
 
 /** Write operations that must carry `tenantId` in their payload. */

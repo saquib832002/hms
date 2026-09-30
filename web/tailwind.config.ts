@@ -20,6 +20,35 @@ export default {
         success: { DEFAULT: '#1a7f47', soft: '#e6f4ec' },
         warning: { DEFAULT: '#b06f00', soft: '#fdf3e2' },
         danger: { DEFAULT: '#c0392b', soft: '#fdecea' },
+        /**
+         * The wordmark, one token per part, used by `Wordmark` and nothing else.
+         *
+         * WHY THESE ARE THEIR OWN TOKENS AND NOT `primary` / `text` / `danger`
+         * -------------------------------------------------------------------
+         * The paragraph at the top of this file is the reason: a colour here
+         * means exactly one thing. `one` happens to be the same blue as
+         * `primary` today, and pointing the wordmark at `primary` would mean
+         * retuning the button blue silently restyles the logo — two unrelated
+         * decisions welded together. The same argument is sharper for the red:
+         * `danger` means "this failed", and a brand mark sharing that token
+         * makes the logo read as a warning and a real warning stop standing
+         * out.
+         *
+         * `hms` is `#A4161A`, the same red as the medical cross in the app icon
+         * (`cross` in the mobile theme, `BRAND_RED` in `make-icons.mjs`),
+         * deliberately darker and less orange than `danger` so the two never
+         * sit at the same visual pitch.
+         *
+         * `brand.spec.ts` asserts all three against the mobile theme, because a
+         * wordmark that is one set of colours on a desktop and another on a
+         * phone is the drift nobody notices until somebody holds the two side
+         * by side — usually in front of a customer.
+         */
+        brand: {
+          one: '#1E6FD9',
+          care: '#14181D',
+          hms: '#A4161A',
+        },
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],

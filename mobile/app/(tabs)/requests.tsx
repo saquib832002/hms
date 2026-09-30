@@ -371,7 +371,7 @@ const s = StyleSheet.create({
   optionActive: { borderColor: theme.color.primary, backgroundColor: theme.color.primarySoft },
   optionText: { fontSize: 13, color: theme.color.text },
   modalRoot: { flex: 1, justifyContent: 'flex-end' },
-  modalBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.35)' },
+  modalBackdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.35)' },
   modalCard: {
     backgroundColor: theme.color.surface,
     borderTopLeftRadius: 16,

@@ -19,6 +19,7 @@ import {
 } from './api';
 import { isIdleExpired } from './secure-session';
 import { registerForPush, unregisterPush } from './push';
+import { BRAND_FULL } from './types';
 import type { AuthUser, UserRole } from './types';
 
 interface AuthState {
@@ -149,7 +150,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     const result = await LocalAuthentication.authenticateAsync({
-      promptMessage: 'Unlock Meridian HMS',
+      // The product, not the hospital: this string is handed to the OS before
+      // the session is usable, so there is no tenant to name yet.
+      promptMessage: `Unlock ${BRAND_FULL}`,
       cancelLabel: 'Sign out',
       disableDeviceFallback: false,
     });

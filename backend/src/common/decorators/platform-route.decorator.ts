@@ -13,9 +13,15 @@ export const IS_PLATFORM_ROUTE_KEY = 'isPlatformRoute';
  * than a hospital login, from an account no hospital holds.
  *
  * Reusing `@Public()` would work mechanically and read as a lie. The access
- * matrix asserts that exactly four routes are public, and that assertion is one
- * of the more valuable lines in the suite; folding a dozen vendor endpoints
- * into it would turn "these four are open to the world" into a sentence nobody
- * could trust. So this is its own key, with its own assertions.
+ * matrix asserts the *exact set* of public routes — seven of them: login,
+ * refresh, logout, health, public signup, and the two halves of password reset
+ * — and that assertion is one of the more valuable lines in the suite. Folding
+ * a dozen vendor endpoints into it would turn "these are open to the world"
+ * into a sentence nobody could trust. So this is its own key, with its own
+ * assertions.
+ *
+ * (This comment said "exactly four" for two phases after signup made it five.
+ * The spec was right and the prose was stale, which is the harmless direction
+ * of that failure and still worth not repeating — hence naming them.)
  */
 export const PlatformRoute = () => SetMetadata(IS_PLATFORM_ROUTE_KEY, true);

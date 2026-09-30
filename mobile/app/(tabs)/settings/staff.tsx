@@ -59,6 +59,35 @@ export default function StaffScreen() {
   const [staff, setStaff] = useState<StaffUser[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<StaffUser | null>(null);
+  const [unlocking, setUnlocking] = useState<number | null>(null);
+
+  /**
+   * End a lockout from the phone.
+   *
+   * The fourth mobile admin write, and it belongs beside the other three for
+   * the same reason: it is one tap that unblocks *somebody else's* work right
+   * now. A receptionist who mistyped their password five times is standing in
+   * front of a patient with a queue behind them, and the person who can fix it
+   * is the owner — who, in the clinics this product is aimed at, is holding a
+   * phone rather than sitting at the desk the lockout is blocking.
+   *
+   * Resetting a password stays on the web and that line has not moved: a
+   * temporary password has to be read out or written down, which is not a
+   * one-handed task. Nothing has to be conveyed here. It goes through the same
+   * `@Roles(ADMIN)` route as the web control and is audited identically.
+   */
+  async function unlock(user: StaffUser) {
+    setUnlocking(user.id);
+    setError(null);
+    try {
+      await api(`/users/${user.id}/unlock`, { method: 'POST' });
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not unlock that account');
+    } finally {
+      setUnlocking(null);
+    }
+  }
 
   const load = useCallback(async () => {
     setError(null);
@@ -109,6 +138,23 @@ export default function StaffScreen() {
                   </View>
                 )}
               </View>
+
+              {/* Locked out, and the way out of it. Rendered only while the
+                  lock is in force — a control whose usual outcome is nothing
+                  happening is one people stop trusting. The row is still
+                  pressable for roles; this button stops the press propagating
+                  so an unlock cannot open the roles sheet behind it. */}
+              {u.lockedUntil && new Date(u.lockedUntil) > new Date() && (
+                <View style={s.lockRow}>
+                  <Text style={s.lockText}>Locked out after five wrong passwords</Text>
+                  <Button
+                    label="Unlock"
+                    variant="secondary"
+                    busy={unlocking === u.id}
+                    onPress={() => void unlock(u)}
+                  />
+                </View>
+              )}
 
               <View style={s.badges}>
                 {u.roles.map((r) => (
@@ -378,6 +424,18 @@ const s = StyleSheet.create({
   },
   inactiveText: { ...theme.font.caption, color: theme.color.textMuted },
 
+  lockRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: theme.space(2),
+    marginTop: theme.space(2),
+    paddingTop: theme.space(2),
+    borderTopWidth: 1,
+    borderTopColor: theme.color.border,
+  },
+  lockText: { ...theme.font.caption, color: theme.color.warning, flex: 1 },
+
   badges: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.space(1), marginTop: theme.space(2) },
   badge: {
     borderRadius: theme.radius.full,
@@ -399,7 +457,7 @@ const s = StyleSheet.create({
   },
 
   modalRoot: { flex: 1, justifyContent: 'flex-end' },
-  modalBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(17,26,20,0.45)' },
+  modalBackdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(17,26,20,0.45)' },
   modalCard: {
     backgroundColor: theme.color.surface,
     borderTopLeftRadius: theme.radius.lg,

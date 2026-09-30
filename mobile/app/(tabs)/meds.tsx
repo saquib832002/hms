@@ -316,7 +316,7 @@ const s = StyleSheet.create({
   medicine: { ...theme.font.body, color: theme.color.text, marginTop: 2 },
   muted: { ...theme.font.small, color: theme.color.textMuted, marginTop: 2 },
   modalRoot: { flex: 1, justifyContent: 'flex-end' },
-  modalBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.25)' },
+  modalBackdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.25)' },
   modalCard: {
     backgroundColor: theme.color.surface,
     borderTopLeftRadius: 18,

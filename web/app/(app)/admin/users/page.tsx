@@ -103,6 +103,26 @@ export default function UsersPage() {
     }
   }
 
+  /**
+   * End a lockout, leaving the password alone.
+   *
+   * No confirmation dialog, unlike Reset password. A confirmation is for an act
+   * with a consequence somebody might not have intended — a reset signs the
+   * person out everywhere and invalidates a password they may still know. This
+   * clears five wrong guesses and nothing else, and it is undone by the person
+   * simply mistyping again. A dialog here would teach people to click through
+   * dialogs, which makes the one next to it worth less.
+   */
+  async function unlock(user: StaffUser) {
+    setError(null);
+    try {
+      await api(`/users/${user.id}/unlock`, { method: 'POST' });
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not unlock that account');
+    }
+  }
+
   if (error && !users) return <ErrorState message={error} onRetry={() => void load()} />;
 
   return (
@@ -211,6 +231,15 @@ export default function UsersPage() {
                         <Button size="sm" onClick={() => setEditingRoles(u)}>
                           Roles
                         </Button>
+                        {/* Only while the lock is actually in force. An Unlock
+                            button on every row is one whose commonest outcome
+                            is nothing happening, and a control that usually
+                            does nothing is one people stop believing. */}
+                        {u.lockedUntil && new Date(u.lockedUntil) > new Date() && (
+                          <Button size="sm" onClick={() => void unlock(u)}>
+                            Unlock
+                          </Button>
+                        )}
                         <Button size="sm" onClick={() => setResetting(u)}>
                           Reset password
                         </Button>

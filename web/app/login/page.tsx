@@ -2,9 +2,17 @@
 
 import { Suspense, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
+// `Link`, never `<a href>`: the access token is held in memory only, so a raw
+// anchor is a full document load that drops it. `client-nav.spec.ts` fails the
+// build on one. Harmless on the login screen, where there is no session yet —
+// and exactly the sort of local reasoning that put two of them on the pharmacy
+// screens, so the rule holds everywhere rather than where it currently bites.
+import Link from 'next/link';
 import { useAuth } from '@/lib/auth-context';
+import { api } from '@/lib/api';
 import { canReach, landingFor } from '@/lib/nav';
 import { Button, Input, Field } from '@/components/ui/primitives';
+import { Wordmark } from '@/components/ui/wordmark';
 import type { TenantModule, UserRole } from '@/lib/types';
 
 export default function LoginPage() {
@@ -89,6 +97,60 @@ function LoginForm() {
   const [hospital, setHospital] = useState('');
   const [failed, setFailed] = useState(false);
 
+  /**
+   * Whether this deployment can actually send a reset link.
+   *
+   * Asked before the link is offered, rather than assumed. Self-service reset
+   * needs a mail transport, and one is not guaranteed — a deployment without
+   * `MAIL_TRANSPORT` set has none. Offering "Forgot password?" there leads to a
+   * form that says a link is on its way and sends nothing, which is the failure
+   * this codebase has recorded over and over, arriving at the one screen where
+   * the person reading it is already stuck.
+   *
+   * Starts `null` — unknown — and the link renders on `true` only, so a health
+   * check that has not answered yet shows nothing rather than flashing a
+   * promise and withdrawing it.
+   */
+  const [resetAvailable, setResetAvailable] = useState<boolean | null>(null);
+  /** `smtp` | `log` | `none` — so the screen can say what will happen. */
+  const [resetDelivery, setResetDelivery] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    // Through the shared client, not a bare fetch: it carries the `/api/v1`
+    // prefix and the credentials mode in one place. `skipRefresh` because
+    // nobody is signed in — without it a 401 would send the client chasing a
+    // session that does not exist, on the screen whose whole job is not having
+    // one yet.
+    api<{ passwordResetAvailable?: boolean; passwordResetDelivery?: string }>('/health', {
+      skipRefresh: true,
+    })
+      .then((body) => {
+        if (cancelled) return;
+        setResetAvailable(body?.passwordResetAvailable === true);
+        setResetDelivery(body?.passwordResetDelivery ?? null);
+      })
+      /*
+       * Hide the link, and say why in the console.
+       *
+       * Not shown to the user — a failed health check on a sign-in screen is
+       * noise, and the sign-in attempt itself reports the real problem in a
+       * sentence that means something. But it must not be *silent* either: a
+       * missing link means "no mail transport configured" or "the capability
+       * check did not answer", and those are opposite problems that render
+       * identically. The console line is what tells them apart.
+       */
+      .catch((err) => {
+        if (cancelled) return;
+        // eslint-disable-next-line no-console
+        console.warn('Could not read password-reset capability; hiding the reset link.', err);
+        setResetAvailable(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     if (!loading && user) router.replace(nextForRole(next, user.role, user.hospital.modules));
   }, [user, loading, router, next]);
@@ -115,9 +177,7 @@ function LoginForm() {
     <div className="flex min-h-screen items-center justify-center bg-bg px-4">
       <div className="w-full max-w-[360px]">
         <div className="mb-5 text-center">
-          <div className="text-xl font-bold tracking-tight">
-            Meridian<span className="text-primary">HMS</span>
-          </div>
+          <Wordmark className="text-xl font-bold tracking-tight" />
           <p className="mt-1 text-sm text-text-muted">Staff sign in</p>
         </div>
 
@@ -157,7 +217,7 @@ function LoginForm() {
               <Input
                 value={hospital}
                 onChange={(e) => setHospital(e.target.value)}
-                placeholder="e.g. meridian-clinic"
+                placeholder="e.g. st-marys"
                 autoComplete="organization"
               />
             </Field>
@@ -175,7 +235,60 @@ function LoginForm() {
           <Button type="submit" variant="primary" className="w-full" disabled={submitting}>
             {submitting ? 'Signing in…' : 'Sign in'}
           </Button>
+
+          {/*
+            Inside the form and under the button, which is where people look for
+            it. Rendered only when the deployment can actually deliver — see
+            `resetAvailable`. Where it cannot, there is deliberately nothing
+            here rather than a disabled control explaining itself: the person
+            reading this screen cannot configure SMTP, and the two routes that
+            do work for them (their administrator, or the vendor) are a
+            conversation rather than a link.
+          */}
+          {resetAvailable === true && (
+            <p className="mt-3 text-center text-sm">
+              <Link href="/reset-password" className="text-text-muted underline">
+                Forgot your password?
+              </Link>
+              {/*
+                Said on the screen rather than left to be discovered. With the
+                `log` transport the flow works end to end and no message
+                leaves the building — the link is printed in the API log. A
+                control that behaves differently here from how it behaves in
+                production, with nothing admitting it, is how somebody comes to
+                believe mail works on this deployment.
+              */}
+              {resetDelivery === 'log' && (
+                <span className="mt-1 block text-xs text-warning">
+                  Development: the link is printed in the API log, not emailed.
+                </span>
+              )}
+            </p>
+          )}
         </form>
+
+        {/*
+         * The way in for somebody who is not a customer yet.
+         *
+         * `/signup` has existed since public signup was built and **nothing
+         * linked to it** — it was reachable only by typing the URL, which is the
+         * eighth instance in this project of a capability with no route in, and
+         * the one with the widest consequence: a hospital that wants to buy the
+         * product could not ask.
+         *
+         * It sits below the form rather than beside "Sign in", because every
+         * person who loads this screen on any ordinary day already has an
+         * account. The label says what happens next — an application a human
+         * reads, not an account — since "Register" on a login screen reads as
+         * self-service, and signing up here does not create a hospital or let
+         * anybody in. See `signup/page.tsx` and `signup.controller.ts`.
+         */}
+        <p className="mt-6 text-center text-sm text-text-muted">
+          New hospital?{' '}
+          <Link href="/signup" className="font-medium text-text underline">
+            Apply for an account
+          </Link>
+        </p>
 
         {process.env.NODE_ENV !== 'production' && (
           <div className="mt-4 rounded border border-dashed border-border-strong bg-surface p-3 text-xs text-text-muted">

@@ -43,6 +43,14 @@ interface Application {
   id: number;
   hospitalName: string;
   requestedSlug: string | null;
+  /**
+   * Which modules they asked for, empty when they skipped the question.
+   *
+   * Optional on the type as well as possibly empty, because a console build can
+   * outlive an API that predates the column — and `defaultModules` reads both
+   * the same way rather than crashing on `undefined.length`.
+   */
+  requestedModules?: TenantModule[];
   contactName: string;
   contactEmail: string;
   contactPhone: string | null;
@@ -101,6 +109,7 @@ export default function PlatformConsole() {
   const [error, setError] = useState<string | null>(null);
   const [credentials, setCredentials] = useState<Provisioned | null>(null);
   const [creating, setCreating] = useState(false);
+  const [changingPassword, setChangingPassword] = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
@@ -130,15 +139,23 @@ export default function PlatformConsole() {
           Onboarding and subscriptions. No patient data is reachable from here.
         </span>
         <button
+          onClick={() => setChangingPassword(true)}
+          className="ml-auto text-sm text-primary hover:underline"
+        >
+          Change password
+        </button>
+        <button
           onClick={() => {
             setPlatformToken(null);
             setSignedIn(false);
           }}
-          className="ml-auto text-sm text-primary hover:underline"
+          className="text-sm text-primary hover:underline"
         >
           Sign out
         </button>
       </header>
+
+      {changingPassword && <PlatformPassword onClose={() => setChangingPassword(false)} />}
 
       {/*
         The temporary password, shown once and behind a dismissal.
@@ -247,6 +264,89 @@ function PlatformLogin({ onSignedIn }: { onSignedIn: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  /**
+   * Recovery, in the two states it has.
+   *
+   * `?reset=<token>` means they followed the link from the email; otherwise
+   * `forgetting` is the request form. Both render *instead of* the sign-in
+   * form rather than beside it, because this screen is four controls wide and
+   * a third state crammed in is how somebody types their password into the
+   * wrong box.
+   */
+  const [forgetting, setForgetting] = useState(false);
+  const [resetAvailable, setResetAvailable] = useState<boolean | null>(null);
+  const [resetDelivery, setResetDelivery] = useState<string | null>(null);
+
+  /*
+   * Read once, from the URL, and removed from the address bar immediately.
+   *
+   * A live reset token sitting in `window.location` is one that ends up in
+   * browser history, in a screenshot of a support call, and in the `Referer`
+   * of anything this page later loads. It is single-use and short-lived, and
+   * neither of those is a reason to leave it on display.
+   */
+  const [resetToken, setResetToken] = useState<string | null>(null);
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const t = url.searchParams.get('reset');
+    if (!t) return;
+    setResetToken(t);
+    url.searchParams.delete('reset');
+    window.history.replaceState({}, '', url.toString());
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    /*
+     * `/platform/auth/capabilities` rather than the hospital `GET /health`,
+     * because the console may call nothing but `/platform` —
+     * `endpoint-coverage.spec.ts` fails the build on a vendor screen touching a
+     * hospital route, and that assertion is worth more than the one saved
+     * endpoint.
+     *
+     * On `platform/auth` rather than `platform`, because the guarded controller
+     * would refuse it: this is read by somebody who has no session, which is
+     * the whole point. That distinction cost a bug once already — the path here
+     * said `/platform/capabilities`, 404'd, and the catch below hid the link in
+     * a way indistinguishable from "no mail transport configured".
+     */
+    platformApi<{ passwordResetAvailable?: boolean; passwordResetDelivery?: string }>(
+      '/platform/auth/capabilities',
+    )
+      .then((body) => {
+        if (cancelled) return;
+        setResetAvailable(body?.passwordResetAvailable === true);
+        setResetDelivery(body?.passwordResetDelivery ?? null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        /*
+         * Hide the link, and say why in the console.
+         *
+         * The first version of this swallowed the error silently, and that was
+         * wrong in exactly the way this codebase keeps recording: the path was
+         * `/platform/capabilities` while the route is on the `platform/auth`
+         * controller, so it 404'd — and a 404 and "no mail transport
+         * configured" rendered as the identical missing link. Two opposite
+         * causes, one silent outcome, and no way to tell them apart from the
+         * screen.
+         *
+         * Hiding is still the right default, because an offer that leads
+         * nowhere is worse than no offer. What was missing is the sentence
+         * that makes it diagnosable in under a minute.
+         */
+        // eslint-disable-next-line no-console
+        console.warn(
+          '[platform] could not read password-reset capabilities; hiding the reset link.',
+          err,
+        );
+        setResetAvailable(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
@@ -266,6 +366,11 @@ function PlatformLogin({ onSignedIn }: { onSignedIn: () => void }) {
       setBusy(false);
     }
   }
+
+  if (resetToken) {
+    return <PlatformChooseNew token={resetToken} onDone={() => setResetToken(null)} />;
+  }
+  if (forgetting) return <PlatformForgot onBack={() => setForgetting(false)} />;
 
   return (
     <main className="mx-auto flex min-h-screen max-w-sm flex-col justify-center px-6">
@@ -295,6 +400,215 @@ function PlatformLogin({ onSignedIn }: { onSignedIn: () => void }) {
           className="w-full rounded-md bg-primary px-4 py-2 font-medium text-white disabled:opacity-50"
         >
           {busy ? 'Signing in…' : 'Sign in'}
+        </button>
+      </form>
+
+      {/*
+        Shown only where a link could actually reach somebody — the same rule
+        the hospital login follows. Where it cannot, there is nothing here
+        rather than a disabled control explaining itself: the recovery that
+        works on such a deployment is `npm run platform:user`, which needs a
+        shell, and telling an unauthenticated visitor about the mail
+        configuration buys them nothing.
+      */}
+      {resetAvailable === true && (
+        <p className="mt-4 text-center text-sm">
+          <button
+            type="button"
+            onClick={() => setForgetting(true)}
+            className="text-text-muted underline"
+          >
+            Forgot your password?
+          </button>
+          {resetDelivery === 'log' && (
+            <span className="mt-1 block text-xs text-warning">
+              Development: the link is printed in the API log, not emailed.
+            </span>
+          )}
+        </p>
+      )}
+    </main>
+  );
+}
+
+/**
+ * Ask for a console reset link.
+ *
+ * The response is identical for a real account, an unknown address and a
+ * deactivated one — so this screen cannot say more than the server does, and
+ * does not try. The list of people who can reach every hospital on a
+ * deployment is the worst list here to be able to confirm from outside.
+ */
+function PlatformForgot({ onBack }: { onBack: () => void }) {
+  const [email, setEmail] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  /** The server's own sentence, held rather than copied — it must not drift. */
+  const [sent, setSent] = useState<string | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await platformApi<{ message: string }>('/platform/auth/forgot-password', {
+        method: 'POST',
+        body: { email: email.trim().toLowerCase() },
+      });
+      setSent(res.message);
+    } catch (err) {
+      setError(
+        err instanceof PlatformApiError ? err.message : 'Could not send that just now. Try again.',
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <main className="mx-auto flex min-h-screen max-w-sm flex-col justify-center px-6">
+      <h1 className="text-xl font-semibold text-text">Forgot your console password?</h1>
+
+      {sent ? (
+        <>
+          <p className="mt-3 text-sm text-text-muted">{sent}</p>
+          {/*
+            Said before they meet it. Being refused a grant an hour later with
+            no warning reads as the console being broken, and somebody
+            debugging a refusal they were never told about is how a deliberate
+            control gets removed by the next reader.
+          */}
+          <p className="mt-3 text-xs text-text-subtle">
+            After a reset the console works normally, but opening break-glass access into a hospital
+            is refused for an hour. Every other console account is told that a reset was asked for —
+            this address can reach every hospital on the deployment, so it should not be possible for
+            only one person to know.
+          </p>
+        </>
+      ) : (
+        <form onSubmit={submit} className="mt-6 space-y-3">
+          <p className="text-sm text-text-muted">
+            Enter the address on your console account. This is not a hospital sign-in.
+          </p>
+          <input
+            type="email"
+            className="w-full rounded-md border border-border bg-surface px-3 py-2"
+            placeholder="you@yourcompany.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            autoFocus
+          />
+          {error && <p className="text-sm text-danger">{error}</p>}
+          <button
+            type="submit"
+            disabled={busy || !email.trim()}
+            className="w-full rounded-md bg-primary px-4 py-2 font-medium text-white disabled:opacity-50"
+          >
+            {busy ? 'Sending…' : 'Send the link'}
+          </button>
+        </form>
+      )}
+
+      <button onClick={onBack} className="mt-4 text-center text-sm text-primary hover:underline">
+        Back to sign in
+      </button>
+    </main>
+  );
+}
+
+/** They followed the link. */
+function PlatformChooseNew({ token, onDone }: { token: string; onDone: () => void }) {
+  const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<{ blockedFor: number | null } | null>(null);
+
+  /*
+   * Checked here as well as on the server, and this one is not redundant: the
+   * server has no second field to compare against, so a mistyped password
+   * would be accepted, the token spent, and the person locked out with a
+   * password they do not know. The only recovery from that is another link.
+   */
+  const mismatch = confirm.length > 0 && password !== confirm;
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await platformApi<{ breakGlassBlockedForMinutes: number | null }>(
+        '/platform/auth/reset-password',
+        { method: 'POST', body: { token, newPassword: password } },
+      );
+      setDone({ blockedFor: res.breakGlassBlockedForMinutes });
+    } catch (err) {
+      // The server names which rule failed — too short, no digit, link expired.
+      setError(err instanceof PlatformApiError ? err.message : 'Could not set that password');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (done) {
+    return (
+      <main className="mx-auto flex min-h-screen max-w-sm flex-col justify-center px-6">
+        <h1 className="text-xl font-semibold text-text">Password changed</h1>
+        <p className="mt-2 text-sm text-text-muted">Sign in with the new one.</p>
+        {done.blockedFor !== null && (
+          <p className="mt-3 rounded-md border border-warning bg-warning-soft px-3 py-2 text-xs text-text">
+            Break-glass access into a hospital is refused for the next {done.blockedFor} minutes.
+            Everything else in the console works. If something is urgent, a colleague can open the
+            grant.
+          </p>
+        )}
+        <button
+          onClick={onDone}
+          className="mt-4 w-full rounded-md bg-primary px-4 py-2 font-medium text-white"
+        >
+          Sign in
+        </button>
+      </main>
+    );
+  }
+
+  return (
+    <main className="mx-auto flex min-h-screen max-w-sm flex-col justify-center px-6">
+      <h1 className="text-xl font-semibold text-text">Choose a new console password</h1>
+      <p className="mt-1 text-sm text-text-muted">
+        At least 12 characters, with an upper-case letter, a lower-case letter and a digit.
+      </p>
+      <form onSubmit={submit} className="mt-6 space-y-3">
+        <input
+          type="password"
+          className="w-full rounded-md border border-border bg-surface px-3 py-2"
+          placeholder="New password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          autoFocus
+        />
+        <input
+          type="password"
+          className="w-full rounded-md border border-border bg-surface px-3 py-2"
+          placeholder="Type it again"
+          value={confirm}
+          onChange={(e) => setConfirm(e.target.value)}
+        />
+        {mismatch && <p className="text-sm text-danger">Those do not match.</p>}
+        {error && (
+          <p className="text-sm text-danger">
+            {error}{' '}
+            <button type="button" onClick={onDone} className="underline">
+              Ask for a new link
+            </button>
+          </p>
+        )}
+        <button
+          type="submit"
+          disabled={busy || password.length < 12 || mismatch || !confirm}
+          className="w-full rounded-md bg-primary px-4 py-2 font-medium text-white disabled:opacity-50"
+        >
+          {busy ? 'Saving…' : 'Set password'}
         </button>
       </form>
     </main>
@@ -361,8 +675,31 @@ function Applications({
   const [rejecting, setRejecting] = useState<number | null>(null);
   const [reason, setReason] = useState('');
   // Keyed by application, so opening a second one does not inherit the first's
-  // choice. Absent means the default — everything.
+  // choice. Absent means "the reviewer has not touched it", and the fallback is
+  // then what the applicant asked for — see `defaultModules`.
   const [modules, setModules] = useState<Record<number, TenantModule[]>>({});
+
+  /**
+   * What the picker opens on: their answer if they gave one, otherwise all five.
+   *
+   * It used to be all five unconditionally, which quietly handed a pharmacy the
+   * wards and the clinic — the reviewer had to notice the mismatch and correct
+   * it by hand on every application, and a default nobody adjusted is the
+   * commonest way a hospital ends up with a menu of screens it never bought.
+   *
+   * Still fully editable, and that is the point rather than a caveat: **the
+   * vendor decides what was sold.** The applicant's answer is a request, like
+   * the slug, and this is a pre-fill rather than an instruction — somebody who
+   * asked for everything and is being sold a pilot gets the pilot.
+   *
+   * An empty array falls back to all five deliberately. "Did not say" must not
+   * silently become "wants nothing", which would provision a hospital with no
+   * screens at all — legal in the model, and a bad first hour for a customer
+   * whose application simply skipped an optional question.
+   */
+  function defaultModules(a: Application): TenantModule[] {
+    return a.requestedModules?.length ? a.requestedModules : ALL_MODULES;
+  }
 
   if (!rows) return <p className="text-sm text-text-muted">Loading…</p>;
   if (rows.length === 0) return <p className="text-sm text-text-muted">No requests yet.</p>;
@@ -372,7 +709,7 @@ function Applications({
     try {
       const result = await platformApi<Provisioned>(`/platform/applications/${a.id}/approve`, {
         method: 'POST',
-        body: { modules: modules[a.id] ?? ALL_MODULES },
+        body: { modules: modules[a.id] ?? defaultModules(a) },
       });
       onDone(result);
     } catch (e) {
@@ -433,6 +770,19 @@ function Applications({
                 <dd className="font-mono text-xs">{a.requestedSlug}</dd>
               </>
             )}
+            {/*
+              * What they said they run, as *their* answer rather than as the
+              * picker's state — the two diverge the moment the reviewer edits
+              * it, and which is which is exactly what somebody needs to see
+              * before approving. Absent when they skipped the question, because
+              * "Asked for: everything" would put words in their mouth.
+              */}
+            {a.requestedModules?.length ? (
+              <>
+                <dt className="text-text-subtle">Asked for</dt>
+                <dd>{a.requestedModules.map((m) => MODULE_LABEL[m]).join(' · ')}</dd>
+              </>
+            ) : null}
             {a.notes && (
               <>
                 <dt className="text-text-subtle">Notes</dt>
@@ -449,7 +799,7 @@ function Applications({
 
           {a.status === 'PENDING' && (
             <ModulePicker
-              chosen={modules[a.id] ?? ALL_MODULES}
+              chosen={modules[a.id] ?? defaultModules(a)}
               onChange={(next) => setModules((m) => ({ ...m, [a.id]: next }))}
             />
           )}
@@ -544,7 +894,7 @@ function Tenants({
 }
 
 /** Which drawer is open under a hospital's row. */
-type Panel = 'subscription' | 'modules';
+type Panel = 'subscription' | 'modules' | 'access';
 
 function TenantRow({
   tenant,
@@ -631,8 +981,25 @@ function TenantRow({
           >
             {panel === 'modules' ? 'Cancel' : 'Modules'}
           </button>
+          {/* Deliberately last and deliberately not styled as a primary
+              action. Opening a grant is the one thing here that reaches
+              *inside* a hospital, and it should read as the exception it is. */}
+          <button
+            onClick={() => onOpen('access')}
+            className="ml-3 text-xs text-primary hover:underline"
+          >
+            {panel === 'access' ? 'Cancel' : 'Access'}
+          </button>
         </td>
       </tr>
+
+      {panel === 'access' && (
+        <tr className="border-t border-border bg-bg">
+          <td colSpan={7} className="px-3 py-3">
+            <AccessPanel tenant={tenant} onError={onError} />
+          </td>
+        </tr>
+      )}
 
       {panel === 'modules' && (
         <tr className="border-t border-border bg-bg">
@@ -704,6 +1071,360 @@ function TenantRow({
         </tr>
       )}
     </>
+  );
+}
+
+/**
+ * A vendor account changing its own password.
+ *
+ * This was the only credential in the product that could not be changed from
+ * inside it — `npm run platform:user` upserts, so rotating one meant shell
+ * access to the server, which means in practice it never happened. It is also
+ * the most powerful password on the deployment: it can open a break-glass grant
+ * against any hospital.
+ *
+ * There is deliberately no "forgot password" beside it, and there should not
+ * be: a reset link emailed to a vendor address is a way into every hospital on
+ * the deployment guarded by one mailbox. Recovery here stays a person with
+ * database access.
+ */
+function PlatformPassword({ onClose }: { onClose: () => void }) {
+  const [currentPassword, setCurrent] = useState('');
+  const [newPassword, setNext] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await platformApi('/platform/password', {
+        method: 'POST',
+        body: { currentPassword, newPassword },
+      });
+      setDone(true);
+    } catch (err) {
+      // The server names which rule failed — too short, no digit, same as the
+      // current one. Showing a generic "could not change" instead would leave
+      // somebody guessing at a rule the response already told us.
+      setError(err instanceof Error ? err.message : 'Could not change the password');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mb-6 max-w-md rounded-md border border-border bg-surface px-4 py-3">
+      {done ? (
+        <>
+          <p className="text-sm text-text">Password changed.</p>
+          <p className="mt-1 text-xs text-text-muted">
+            Your current session keeps working — platform sign-in issues a short-lived token and no
+            refresh token, so there is nothing to sign out of.
+          </p>
+          <button onClick={onClose} className="mt-2 text-sm text-primary hover:underline">
+            Close
+          </button>
+        </>
+      ) : (
+        <form onSubmit={submit}>
+          <h2 className="text-sm font-semibold text-text">Change your console password</h2>
+          <label className="mt-2 block text-xs">
+            <span className="mb-1 block text-text-subtle">Current password</span>
+            <input
+              type="password"
+              className="w-full rounded-md border border-border bg-surface px-2 py-1.5 text-sm"
+              value={currentPassword}
+              onChange={(e) => setCurrent(e.target.value)}
+              autoComplete="current-password"
+            />
+          </label>
+          <label className="mt-2 block text-xs">
+            <span className="mb-1 block text-text-subtle">
+              New password (12+ characters, with upper, lower and a digit)
+            </span>
+            <input
+              type="password"
+              className="w-full rounded-md border border-border bg-surface px-2 py-1.5 text-sm"
+              value={newPassword}
+              onChange={(e) => setNext(e.target.value)}
+              autoComplete="new-password"
+            />
+          </label>
+
+          {error && (
+            <p role="alert" className="mt-2 text-xs text-danger">
+              {error}
+            </p>
+          )}
+
+          <div className="mt-3 flex gap-2">
+            <button
+              type="submit"
+              disabled={busy || !currentPassword || newPassword.length < 12}
+              className="rounded-md bg-primary px-3 py-1.5 text-sm text-white disabled:opacity-50"
+            >
+              {busy ? 'Changing…' : 'Change password'}
+            </button>
+            <button type="button" onClick={onClose} className="text-sm text-primary hover:underline">
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}
+
+/* ── break-glass, and the one write it buys ──────────────────────────────── */
+
+type Administrator = {
+  id: number;
+  email: string;
+  fullName: string;
+  isActive: boolean;
+  lastLoginAt: string | null;
+  lockedUntil: string | null;
+  mustChangePassword: boolean;
+};
+
+type Grant = { id: number; minutesRemaining: number };
+
+/**
+ * Getting a hospital back in when its only administrator is locked out.
+ *
+ * WHY THIS SCREEN EXISTS AT ALL
+ * -----------------------------
+ * Break-glass has been modelled since the platform API was written and had **no
+ * console** — it was curl-only, and "curl-only" is how a capability quietly
+ * stops being one. The reset underneath it would have been the same: a route
+ * nobody could reach, which is the shape this project has reopened eight times.
+ *
+ * WHAT A GRANT ACTUALLY BUYS
+ * --------------------------
+ * Aggregates, configuration, and — now — resetting an administrator's password.
+ * Not a patient row; there is no route that returns one. The panel says so,
+ * because a vendor engineer who believes they are looking at clinical data will
+ * behave differently from one who knows they are not.
+ *
+ * WHY THE REASON IS TYPED BEFORE ANYTHING IS SEEN
+ * ----------------------------------------------
+ * It is written into the *hospital's* audit log, and it is the sentence
+ * somebody there reads when they ask why the vendor was in their system. A
+ * reason collected afterwards is one written to justify what already happened.
+ */
+function AccessPanel({ tenant, onError }: { tenant: Tenant; onError: (m: string) => void }) {
+  const [reason, setReason] = useState('');
+  const [ticketRef, setTicketRef] = useState('');
+  const [grant, setGrant] = useState<Grant | null>(null);
+  const [admins, setAdmins] = useState<Administrator[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [resetting, setResetting] = useState<number | null>(null);
+  /** Shown once, and never fetched again — only the hash is kept. */
+  const [issued, setIssued] = useState<{ email: string; password: string; isActive: boolean } | null>(
+    null,
+  );
+
+  async function loadAdmins() {
+    const res = await platformApi<{ administrators: Administrator[]; grant: Grant }>(
+      `/platform/tenants/${tenant.id}/administrators`,
+    );
+    setAdmins(res.administrators);
+    setGrant(res.grant);
+  }
+
+  async function openGrant() {
+    setBusy(true);
+    try {
+      await platformApi('/platform/break-glass', {
+        method: 'POST',
+        body: {
+          tenantId: tenant.id,
+          reason: reason.trim(),
+          ticketRef: ticketRef.trim() || undefined,
+        },
+      });
+      await loadAdmins();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Could not open access');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reset(a: Administrator) {
+    setResetting(a.id);
+    try {
+      const res = await platformApi<{
+        email: string;
+        temporaryPassword: string;
+        isActive: boolean;
+      }>(`/platform/tenants/${tenant.id}/users/${a.id}/reset-password`, { method: 'POST' });
+      setIssued({ email: res.email, password: res.temporaryPassword, isActive: res.isActive });
+      await loadAdmins();
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Could not reset that password');
+    } finally {
+      setResetting(null);
+    }
+  }
+
+  async function revoke() {
+    if (!grant) return;
+    setBusy(true);
+    try {
+      await platformApi(`/platform/break-glass/${grant.id}`, { method: 'DELETE' });
+      setGrant(null);
+      setAdmins(null);
+      setIssued(null);
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Could not revoke that grant');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!grant) {
+    return (
+      <div className="max-w-2xl">
+        <p className="text-xs text-text-muted">
+          Reaching inside {tenant.name} needs a reason, and it expires on its own. Everything you do
+          under it is written into <strong>their</strong> audit log, not ours — so they can answer
+          &ldquo;who from the vendor was in our system, when, and why&rdquo; from their own records.
+        </p>
+        <p className="mt-1 text-xs text-text-subtle">
+          It buys aggregates, clinic settings, and resetting an administrator&rsquo;s password. There
+          is no route that returns a patient record.
+        </p>
+
+        <label className="mt-3 block text-xs">
+          <span className="mb-1 block text-text-subtle">
+            Why (at least 12 characters — they will read this)
+          </span>
+          <textarea
+            className="w-full rounded-md border border-border bg-surface px-2 py-1.5 text-sm"
+            rows={2}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="Owner cannot sign in, confirmed identity by phone with Dr Rao"
+          />
+        </label>
+
+        <label className="mt-2 block text-xs">
+          <span className="mb-1 block text-text-subtle">Ticket reference (optional)</span>
+          <input
+            className="w-full rounded-md border border-border bg-surface px-2 py-1.5 text-sm"
+            value={ticketRef}
+            onChange={(e) => setTicketRef(e.target.value)}
+          />
+        </label>
+
+        <button
+          onClick={() => void openGrant()}
+          disabled={busy || reason.trim().length < 12}
+          className="mt-3 rounded-md bg-primary px-3 py-1.5 text-sm text-white disabled:opacity-50"
+        >
+          {busy ? 'Opening…' : 'Open access'}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-3xl">
+      <div className="flex items-center gap-3 text-xs">
+        <span className="rounded-full bg-warning-soft px-2 py-0.5 font-semibold text-warning">
+          Access open · {grant.minutesRemaining}m left
+        </span>
+        <button onClick={() => void revoke()} disabled={busy} className="text-primary hover:underline">
+          Close it now
+        </button>
+      </div>
+
+      {issued && (
+        /*
+          Held on screen until dismissed rather than shown in a toast. The
+          password exists in exactly one place for exactly as long as this is
+          open — there is no second reading, so a notification that fades is the
+          wrong shape for it. Same reasoning as the provisioning credential.
+        */
+        <div className="mt-3 rounded-md border border-primary bg-primary-soft px-3 py-2">
+          <p className="text-xs text-text-muted">Read this out now. It is not shown again.</p>
+          <p className="mt-1 font-mono text-sm">{issued.email}</p>
+          <p className="font-mono text-lg font-semibold">{issued.password}</p>
+          <p className="mt-1 text-xs text-text-muted">
+            They will be asked to choose a new one before anything else loads. Every session they
+            had has been signed out.
+          </p>
+          {!issued.isActive && (
+            <p className="mt-1 text-xs font-semibold text-danger">
+              This account is deactivated, so it still cannot sign in. Another administrator has to
+              reactivate it first.
+            </p>
+          )}
+          <button
+            onClick={() => setIssued(null)}
+            className="mt-2 text-xs text-primary hover:underline"
+          >
+            Done
+          </button>
+        </div>
+      )}
+
+      <p className="mt-3 text-xs text-text-subtle">
+        Administrators only. Everybody else at this hospital is reset by their own administrator,
+        from Admin → Users.
+      </p>
+
+      {admins?.length === 0 && (
+        /*
+          Provisioning creates a hospital and its first administrator in one
+          transaction, so this should be impossible — which is exactly why it is
+          worth rendering rather than leaving as an empty list somebody reads as
+          "still loading".
+        */
+        <p className="mt-2 text-xs text-danger">
+          This hospital has no account holding ADMIN. Nobody can administer it; it needs one created
+          directly in the database.
+        </p>
+      )}
+
+      <div className="mt-2 overflow-hidden rounded-md border border-border">
+        <table className="w-full text-sm">
+          <tbody>
+            {(admins ?? []).map((a) => (
+              <tr key={a.id} className="border-t border-border first:border-t-0">
+                <td className="px-3 py-2">
+                  <div className="font-medium">{a.fullName}</div>
+                  <div className="font-mono text-xs text-text-muted">{a.email}</div>
+                </td>
+                <td className="px-3 py-2 text-xs text-text-muted">
+                  {a.lastLoginAt ? `last in ${a.lastLoginAt.slice(0, 10)}` : 'never signed in'}
+                  {!a.isActive && <span className="ml-2 text-danger">deactivated</span>}
+                  {a.mustChangePassword && (
+                    <span className="ml-2 text-primary">password pending</span>
+                  )}
+                  {a.lockedUntil && new Date(a.lockedUntil) > new Date() && (
+                    <span className="ml-2 text-warning">locked out</span>
+                  )}
+                </td>
+                <td className="px-3 py-2 text-right">
+                  <button
+                    onClick={() => void reset(a)}
+                    disabled={resetting !== null}
+                    className="rounded-md border border-border px-2 py-1 text-xs hover:bg-bg disabled:opacity-50"
+                  >
+                    {resetting === a.id ? 'Resetting…' : 'Reset password'}
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 

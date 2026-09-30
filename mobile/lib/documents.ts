@@ -1,4 +1,21 @@
-import * as FileSystem from 'expo-file-system';
+/*
+ * `expo-file-system/legacy`, deliberately, and on borrowed time.
+ *
+ * SDK 54 replaced this package's default export with an object-oriented
+ * `File`/`Directory`/`Paths` API and moved the one used here — `cacheDirectory`,
+ * `downloadAsync`, `deleteAsync` — to `/legacy`. Importing `expo-file-system`
+ * plain would still resolve and would hand back a module with none of these
+ * functions on it, which fails at the moment a doctor presses print rather than
+ * at build time.
+ *
+ * The legacy path survives in SDK 57 (Expo said it would go in 55 and it did
+ * not), so this is a deferral rather than a fix. The migration that matters is
+ * `downloadAsync(url, target, { headers })`, which is the only thing in this
+ * file that is not a one-line rename — the authenticated download is the whole
+ * point of this module, so it is worth doing deliberately rather than as part of
+ * an SDK bump.
+ */
+import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import { apiOrigin, session } from './api';
 

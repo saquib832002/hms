@@ -61,7 +61,18 @@ const INTENTIONALLY_UNCALLED: Record<string, string> = {
    */
   'POST /lab/referrals/:id/result':
     'Invoked by LabService.verify when a referred order is authorised, so a referred report passes the same two-step gate as a local one.',
-  'GET /health': 'Infrastructure probe, not a client feature.',
+  /*
+   * `GET /health` was exempted here as "an infrastructure probe, not a client
+   * feature", and that stopped being true when it gained
+   * `passwordResetAvailable`. Both login screens now ask it before offering
+   * "Forgot your password?", because a link into a flow with no mail transport
+   * is the failure this repo keeps reopening — and the worst place to repeat it
+   * is the screen somebody reaches when they are already locked out.
+   *
+   * The exemption is deleted rather than reworded, so the guard fails if either
+   * caller disappears. That is the behaviour this list exists for: it has to
+   * shrink on its own or it rots into claims nobody rechecks.
+   */
   'GET /admissions/:id': 'Ward board carries the admission inline; no client needs to fetch one alone yet.',
   'GET /doctors/:id': 'Clients use the directory list; nothing needs a single doctor yet.',
   // 'GET /appointments/:id' was exempted here on the argument that reschedule
@@ -551,9 +562,43 @@ describe('endpoint coverage', () => {
     'GET /pharmacy/history': 'A reconciliation list.',
     'GET /prescriptions/:p/print': 'A phone has no printer.',
     'POST /users/:p/reset-password': 'The temporary password has to be read out or written down.',
+    /*
+     * The *ask* is on both clients — `POST /auth/forgot-password` is called
+     * from the phone's sign-in screen too, because a nurse who is locked out is
+     * holding a phone and sending her to find a desktop to type her own email
+     * address into is the "sign for doses on the mobile app" dead end pointing
+     * the other way.
+     *
+     * Spending the token is genuinely web-only and cannot be otherwise without
+     * costing something real. The link has to be ONE canonical URL that works
+     * in any mail client on any device; a deep link into an app the recipient
+     * may not have installed is not that. Giving the phone a second way to
+     * spend a token — pasting it into a box — would mean two paths to the most
+     * security-sensitive write in the product, and the second exists only to
+     * avoid a browser that is already open on the same screen.
+     *
+     * Stated as a decision rather than left in PARITY_GAPS, because there is
+     * no missing screen here: following the link on the phone opens the phone's
+     * browser and the flow completes.
+     */
+    'POST /auth/reset-password':
+      'The reset link is one canonical web URL; following it on a phone opens the browser, which completes the flow.',
     'POST /users': 'Creating an account means conveying a temporary password — not one-handed.',
-    'POST /public/signup':
-      'Signing up is done by somebody who is not yet a customer and has no reason to have installed a staff app. The mobile client exists for people who already have an account at a hospital that already exists.',
+    // `POST /public/signup` was here, reasoning that "signing up is done by
+    // somebody who is not yet a customer and has no reason to have installed a
+    // staff app". Fourth false reason found in this list, and the same shape as
+    // the three before it: a plausible story about where work happens standing
+    // in for the fact that nobody built the other half.
+    //
+    // The app is published on a public store. A clinic owner who finds it,
+    // installs it and opens it is exactly the customer this product describes —
+    // a small practice whose owner has a phone and may not have a desktop — and
+    // what they met was a sign-in form with no way in and nothing naming one.
+    // Worse, the *web* signup page had existed since public signup shipped and
+    // nothing linked to it either, so on both clients the only route in was
+    // typing a URL nobody had been given.
+    //
+    // Both clients call it now, so it needs no entry at all.
     'POST /pharmacy-partners':
       'Agreeing to send prescriptions to another company is a business decision taken once, at a desk, after the two have spoken. The doctor picks from the result; the admin sets it up.',
     'DELETE /pharmacy-partners/:p': 'As above — ending a partnership is not a bedside action.',

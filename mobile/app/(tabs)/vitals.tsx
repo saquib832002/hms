@@ -623,7 +623,7 @@ const s = StyleSheet.create({
     backgroundColor: theme.color.bg,
   },
   modalRoot: { flex: 1, justifyContent: 'flex-end' },
-  modalBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.35)' },
+  modalBackdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.35)' },
   modalCard: {
     backgroundColor: theme.color.surface,
     borderTopLeftRadius: 16,

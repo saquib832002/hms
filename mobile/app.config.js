@@ -41,21 +41,21 @@ const ENVIRONMENTS = {
     name: 'My Hospital (dev)',
     packageId: 'com.sawera.myhospital.dev',
     apiOrigin: null,
-    scheme: 'meridianhms-dev',
+    scheme: 'onecare-dev',
     iconSuffix: '-development',
   },
   staging: {
     name: 'My Hospital (staging)',
     packageId: 'com.sawera.myhospital.staging',
     apiOrigin: process.env.API_ORIGIN ?? 'https://staging.example.com',
-    scheme: 'meridianhms-staging',
+    scheme: 'onecare-staging',
     iconSuffix: '-staging',
   },
   production: {
     name: 'My Hospital',
     packageId: 'com.sawera.myhospital',
     apiOrigin: process.env.API_ORIGIN ?? 'https://hms.sawera.info',
-    scheme: 'meridianhms',
+    scheme: 'onecare',
     iconSuffix: '',
   },
 };
@@ -117,32 +117,33 @@ const VERSION_CODE = Number(process.env.ANDROID_VERSION_CODE ?? 1);
  */
 const ANDROID_SDK = Number(process.env.ANDROID_TARGET_SDK ?? 36);
 
-/**
- * React Native's new architecture — on by default, and switchable off from the
- * command line because on Windows it is what makes the build fail.
+/*
+ * THERE IS NO LONGER AN `ANDROID_NEW_ARCH` LEVER, AND THAT IS NOT AN OVERSIGHT
+ * ---------------------------------------------------------------------------
+ * This file used to expose `ANDROID_NEW_ARCH=false`, which turned off React
+ * Native's new architecture and with it the C++ codegen whose object paths
+ * overflow Windows' 260-character limit. It was the escape hatch that produced
+ * the first installable build of this app.
  *
- *   $env:ANDROID_NEW_ARCH = "false"
+ * It cannot work any more. **RN 0.82 ignores `newArchEnabled=false`** — the
+ * legacy architecture is gone rather than deprecated — and Expo SDK 55 removed
+ * `newArchEnabled` from the app config schema altogether. SDK 57 is RN 0.86, so
+ * the flag is not merely ineffective here, it is not a key this config accepts.
  *
- * The new architecture generates C++ for every native module, and CMake names
- * each object file by embedding the whole source path *inside* the build path.
- * The result reaches about 400 characters in this repository, and Windows
- * refuses anything past 260 unless long paths are enabled — reported by ninja
- * as *"Filename longer than 260 characters"* against a generated file nobody
- * wrote, after Kotlin has compiled and the JS bundle has been built.
+ * The lever was deleted rather than left in place reading `!== 'false'` against
+ * a value nothing consumes. A knob that no longer does anything is the exact
+ * failure this project keeps reopening: it reads as a decision somebody made,
+ * somebody sets it during a bad afternoon, and the build fails identically
+ * while they believe they have changed something.
  *
- * **Moving the project does not fix it.** The arithmetic was checked: even a
- * `subst` drive at `X:\mobile` still comes to 311. The path is dominated by
- * `react-native-safe-area-context`'s own codegen directories, which no choice
- * of clone location can shorten. Either Windows allows long paths, or the C++
- * is not generated at all — and turning the new architecture off is the
- * second of those.
- *
- * It is a real trade rather than a free escape. The old bridge is what every
- * released React Native app ran on until recently and RN 0.79 fully supports
- * it, so it is safe; it is also being retired, so this is a way to get an
- * installable build today rather than somewhere to stay.
+ * So the codegen is unconditional, and **the path length is now a hard
+ * constraint rather than a preference**. It is why this working copy lives at
+ * `C:\hms` — 255 characters against the limit, five to spare. A native module
+ * with longer codegen directories than
+ * `react-native-safe-area-context`'s puts it back over, and the remedy will be
+ * a shorter root, not a flag. `patch-signing.js` measures it before Gradle
+ * starts; DEPLOY-ANDROID.md section 3c has the arithmetic.
  */
-const NEW_ARCH = process.env.ANDROID_NEW_ARCH !== 'false';
 
 const config = ENVIRONMENTS[ENV];
 
@@ -177,7 +178,6 @@ module.exports = {
     orientation: 'portrait',
     scheme: config.scheme,
     userInterfaceStyle: 'light',
-    newArchEnabled: NEW_ARCH,
 
     /*
      * Square, full-bleed, no transparency. Both stores mask the corners
@@ -187,16 +187,12 @@ module.exports = {
     icon: `./assets/icon${config.iconSuffix}.png`,
 
     /*
-     * The mark is a third of the canvas rather than the whole of it, because
-     * `contain` fits this image to the screen's width. The background is the
-     * same colour as the image's own field, so the letterboxing does not show
-     * as a band above and below the artwork.
+     * The splash screen is configured by the `expo-splash-screen` plugin below
+     * rather than by a top-level `splash` key. That key is **not in SDK 57's
+     * config schema at all** — `splash` now means the PWA splash under `web` —
+     * so leaving it here would not be a deprecation warning, it would be a
+     * field Expo silently ignores while the app ships with no splash artwork.
      */
-    splash: {
-      image: `./assets/splash${config.iconSuffix}.png`,
-      resizeMode: 'contain',
-      backgroundColor: BRAND_FIELD,
-    },
 
     ios: {
       supportsTablet: false,
@@ -212,20 +208,21 @@ module.exports = {
       permissions: ['USE_BIOMETRIC', 'USE_FINGERPRINT'],
 
       /*
-       * Declared rather than inherited. At `targetSdkVersion` 36 Android draws
-       * app content under the status and navigation bars and **gives no way to
-       * opt out** — so leaving this unset does not keep the old behaviour, it
-       * only means Expo's plugin does not configure the transparent system bars
-       * that make the new one look deliberate.
+       * `edgeToEdgeEnabled` used to be declared here and is **gone from the SDK
+       * 57 schema** — removed in SDK 55, because edge-to-edge became mandatory
+       * and always-on when targeting Android 16. There is nothing to opt into
+       * any more; the prebuild template writes `edgeToEdgeEnabled=true` into
+       * `android/gradle.properties` itself.
        *
-       * The app already survives it: `AppHeader` wraps itself in a
-       * `SafeAreaView edges={['top']}`, and the tab bar takes its bottom inset
-       * from react-navigation. What neither of those can prove is how it looks,
-       * and a header sitting under the clock is the kind of fault this project
-       * has twice found only by rendering something and looking at it. First
+       * Which means the behaviour is unchanged and the obligation is unchanged:
+       * Android draws app content under the status and navigation bars. The app
+       * is built for it — `AppHeader` wraps itself in a `SafeAreaView
+       * edges={['top']}` and the tab bar takes its bottom inset from the
+       * navigator — and neither of those can prove how it *looks*. A header
+       * sitting under the clock is the kind of fault this project has twice
+       * found only by rendering something and looking at it. Still the first
        * thing to check on a real handset.
        */
-      edgeToEdgeEnabled: true,
       /*
        * `backgroundColor` must equal the field the foreground was drawn
        * against. The heartbeat through the cross is a cut in that colour, not a
@@ -264,25 +261,53 @@ module.exports = {
       ],
 
       /*
+       * The splash screen, which was a top-level `splash` key until SDK 57
+       * removed it from the schema.
+       *
+       * The options are the same three and mean the same things. The mark is a
+       * third of the canvas rather than the whole of it, because `contain` fits
+       * this image to the screen's width; `backgroundColor` is the image's own
+       * field colour so the letterboxing does not show as a band above and
+       * below the artwork.
+       */
+      [
+        'expo-splash-screen',
+        {
+          image: `./assets/splash${config.iconSuffix}.png`,
+          resizeMode: 'contain',
+          backgroundColor: BRAND_FIELD,
+        },
+      ],
+
+      /*
        * The Android build settings a generated project cannot be asked for
        * afterwards — these have to be in place *before* `expo prebuild` writes
        * `android/`, because that is the moment the Gradle files are produced.
        *
        * `targetSdkVersion` is not a preference. Since 31 August 2026 Play
-       * rejects any upload targeting lower than 36, and SDK 53 defaults to 35
-       * — so without this line the AAB builds, uploads, and is refused by the
-       * store. There is no matching `compileSdkVersion`, for the reason given
-       * where `ANDROID_SDK` is declared: raising *that* is what broke the
-       * build, and it buys nothing.
+       * rejects any upload targeting lower than 36. SDK 57 already defaults to
+       * 36, so this line is belt-and-braces rather than load-bearing as it was
+       * on SDK 53 — it is kept because it also keeps the `ANDROID_TARGET_SDK`
+       * lever, and because a default that moves under us is exactly the kind of
+       * thing discovered by an upload being refused. There is no matching
+       * `compileSdkVersion`, for the reason given where `ANDROID_SDK` is
+       * declared: raising *that* is what broke the build, and it buys nothing.
        *
        * `useLegacyPackaging: false` loads native libraries straight out of the
        * APK, which is what Android 15's 16 KB memory pages require. The old
        * behaviour extracted them at install time and fails on those devices.
        *
-       * Proguard and resource shrinking are on because this is a release build
-       * of an app that carries patient data — a smaller download is the lesser
-       * reason. Watch the first shrunk build for anything reached reflectively:
-       * that is where shrinking breaks things, and it breaks them at runtime.
+       * Minification and resource shrinking are on because this is a release
+       * build of an app that carries patient data — a smaller download is the
+       * lesser reason. Watch the first shrunk build for anything reached
+       * reflectively: that is where shrinking breaks things, and it breaks them
+       * at runtime.
+       *
+       * The option is `enableMinifyInReleaseBuilds` and used to be
+       * `enableProguardInReleaseBuilds`, renamed in SDK 54 and **absent from
+       * the SDK 57 reference**. Worth naming because expo-build-properties does
+       * not reject an unknown key loudly: the old name would have left
+       * minification quietly off in a build that reads as configured for it.
        */
       [
         'expo-build-properties',
@@ -290,7 +315,7 @@ module.exports = {
           android: {
             targetSdkVersion: ANDROID_SDK,
             useLegacyPackaging: false,
-            enableProguardInReleaseBuilds: true,
+            enableMinifyInReleaseBuilds: true,
             enableShrinkResourcesInReleaseBuilds: true,
           },
         },

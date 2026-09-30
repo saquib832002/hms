@@ -19,7 +19,7 @@ import { hash, verify } from '@node-rs/argon2';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { planProvision } from './provisioning';
-import { generateTemporaryPassword } from '../users/account-rules';
+import { checkPasswordStrength, generateTemporaryPassword } from '../users/account-rules';
 
 import { randomBytes } from 'crypto';
 import { canWrite, daysRemaining } from '../common/subscription/subscription';
@@ -27,6 +27,7 @@ import { ClinicSettingsService } from '../common/tenancy/clinic-settings.service
 import { PLATFORM_AUDIENCE, PlatformPrincipal } from './platform-auth';
 import {
   expiryFrom,
+  grantCooldownMinutes,
   grantState,
   isGrantActive,
   minutesRemaining,
@@ -141,6 +142,10 @@ export class PlatformService {
         contactPhone: r.contactPhone,
         timezone: r.timezone,
         currency: r.currency,
+        // What they said they run. The reviewer's module picker opens on this
+        // rather than on all five, so approving a pharmacy does not silently
+        // hand it the wards — advisory, and still theirs to change.
+        requestedModules: r.requestedModules,
         notes: r.notes,
         status: r.status,
         tenantId: r.tenantId,
@@ -611,6 +616,48 @@ export class PlatformService {
   ) {
     const { reason, minutes } = validateGrantRequest(input);
 
+    /*
+     * A grant is refused for a cooling-off period after a *self-service*
+     * password reset, and this is the control that makes emailed recovery
+     * defensible for a vendor account rather than merely convenient.
+     *
+     * The realistic attack on that feature is a compromised mailbox followed
+     * immediately by a grant into somebody's patient data. A password reset is
+     * rare and planned; break-glass minutes after one is not. Everything else
+     * in the console keeps working — tenants, applications, subscriptions,
+     * modules — because none of that reaches inside a hospital.
+     *
+     * Keyed on `passwordResetAt`, which only the emailed path sets.
+     * `platform:user` leaves it null, correctly: that route already requires
+     * the database's owner credentials, so there is no weaker thing to
+     * compensate for and an engineer who reset their own password at a shell
+     * should not then be locked out of the reason they did it.
+     *
+     * The refusal names the time and the way round it, because a control
+     * somebody meets without warning reads as a bug and gets removed by the
+     * next person who reads the code.
+     */
+    const cooldownMinutes =
+      this.config.get<number>('passwordReset.platformGrantCooldownMinutes') ?? 60;
+
+    if (cooldownMinutes > 0) {
+      const me = await this.prisma.unscoped.platformUser.findUnique({
+        where: { id: actor.platformUserId },
+        select: { passwordResetAt: true },
+      });
+
+      // The decision itself lives in `break-glass.ts` so a test can call it
+      // with arguments — the first guard for this was a string match and
+      // passed with the condition disabled. See `grantCooldownMinutes`.
+      const wait = grantCooldownMinutes(me?.passwordResetAt, cooldownMinutes);
+      if (wait > 0) {
+        throw new ForbiddenException(
+          `Break-glass is unavailable for ${wait} more minute${wait === 1 ? '' : 's'} after a password reset. ` +
+            'The rest of the console works. If this is urgent, ask a colleague to open the grant.',
+        );
+      }
+    }
+
     const tenant = await this.prisma.unscoped.tenant.findUnique({
       where: { id: input.tenantId },
       select: { id: true, name: true },
@@ -765,6 +812,291 @@ export class PlatformService {
   }
 
   /**
+   * A vendor account changing its own password.
+   *
+   * WHY THIS WAS MISSING AND WHY IT MATTERS
+   * ---------------------------------------
+   * `create-platform-user.js` upserts, so it has always doubled as a reset —
+   * and it was the *only* way a vendor password could ever change. That makes
+   * the single most powerful credential on the deployment one that nobody can
+   * rotate without shell access to the server, which means in practice it never
+   * gets rotated. A password that cannot be changed routinely is one that stays
+   * the same after the laptop it was typed on is lost.
+   *
+   * WHY THERE IS STILL NO "FORGOT PASSWORD" HERE
+   * --------------------------------------------
+   * Deliberate, and the CLI comment has said so since it was written. A reset
+   * link emailed to a vendor address is a way into every hospital on the
+   * deployment, guarded by one mailbox. The recovery path for vendor staff
+   * stays somebody with database access — which is a person, not a token.
+   *
+   * WHY NOTHING IS REVOKED AFTERWARDS
+   * ---------------------------------
+   * There is nothing to revoke. Platform sign-in issues a 30-minute access
+   * token and no refresh token, so there is no session to end: an old token
+   * expires within the half hour and cannot be renewed. Stated rather than
+   * left as an omission, because the hospital-side `changeOwnPassword` revokes
+   * and the difference between them looks like a mistake until you know why.
+   */
+  async changeOwnPlatformPassword(
+    actor: PlatformPrincipal,
+    currentPassword: string,
+    newPassword: string,
+  ) {
+    const account = await this.prisma.unscoped.platformUser.findUnique({
+      where: { id: actor.platformUserId },
+    });
+    if (!account) throw new UnauthorizedException('Account not found');
+
+    const ok = await verify(account.passwordHash, currentPassword).catch(() => false);
+    if (!ok) throw new UnauthorizedException('Current password is incorrect');
+
+    if (newPassword === currentPassword) {
+      throw new BadRequestException('The new password must be different');
+    }
+
+    /*
+     * The same rule hospital staff are held to, imported rather than restated.
+     * A second copy would be the one nobody re-reads, and this is the account
+     * that should not be held to the weaker of two standards.
+     */
+    const weakness = checkPasswordStrength(newPassword);
+    if (weakness) throw new BadRequestException(weakness);
+
+    await this.prisma.unscoped.platformUser.update({
+      where: { id: account.id },
+      data: { passwordHash: await hash(newPassword) },
+    });
+
+    /*
+     * No audit row, and that is a gap rather than a decision I am comfortable
+     * with. Every audit row in this system carries a `tenantId` or an explicit
+     * null meaning "an anonymous event at no hospital", and this belongs to
+     * neither — it is a vendor-internal act that concerns no hospital, so
+     * writing it against one would put a misleading row into their records.
+     * A vendor-side log is the right home and does not exist; see CLAUDE.md.
+     */
+    return { changed: true };
+  }
+
+  /* ── recovering a hospital that has locked itself out ────────────────────── */
+
+  /**
+   * Who at this hospital holds ADMIN, behind a grant.
+   *
+   * WHY THIS IS NOT "the staff list"
+   * --------------------------------
+   * Only accounts holding ADMIN, and that is the whole design rather than a
+   * default that could be widened. Everybody else in a hospital already has a
+   * route back in: their administrator resets them from Admin → Users, which
+   * has worked since Phase 1. The only person with no route is the
+   * administrator themselves, and in the clinics this product is aimed at
+   * there is frequently exactly one of them — the owner-doctor. When they
+   * forget their password the hospital is locked out of the product
+   * permanently, and the only exit was a database console.
+   *
+   * So the vendor gets the smallest list that closes that: the people nobody
+   * else can reset. A general staff directory would hand the vendor the names,
+   * addresses and sign-in times of every nurse and receptionist in every
+   * hospital on the deployment, to solve a problem about administrators.
+   *
+   * Read inside the hospital's own tenant transaction, so it goes through RLS
+   * rather than around it — the same way `diagnostics` counts rows.
+   */
+  async administrators(actor: PlatformPrincipal, tenantId: number) {
+    const grant = await this.requireActiveGrant(actor, tenantId, {
+      method: 'GET',
+      path: '/api/v1/platform/tenants/:id/administrators',
+    });
+
+    const tenant = await this.prisma.unscoped.tenant.findUnique({
+      where: { id: tenantId },
+      select: { id: true, name: true, slug: true },
+    });
+    if (!tenant) throw new NotFoundException('Hospital not found');
+
+    /*
+     * `roleAssignments: { some: { role: ADMIN } }`, not `role: ADMIN`.
+     * `User.role` is the *default* — where somebody lands at sign-in — and an
+     * owner-doctor who defaults to DOCTOR still administers the hospital.
+     * Keying on the default would hide exactly the person this exists for.
+     * Same distinction the last-admin check already draws.
+     */
+    const admins = await this.prisma.forTenant(tenantId, () =>
+      this.prisma.user.findMany({
+        where: { roleAssignments: { some: { role: UserRole.ADMIN } } },
+        select: {
+          id: true,
+          email: true,
+          fullName: true,
+          isActive: true,
+          lastLoginAt: true,
+          lockedUntil: true,
+          mustChangePassword: true,
+        },
+        orderBy: { id: 'asc' },
+      }),
+    );
+
+    this.audit.record({
+      tenantId,
+      userId: null,
+      actorEmail: actor.email,
+      actorRole: null,
+      action: 'PLATFORM_ADMINISTRATORS_VIEWED',
+      method: 'GET',
+      path: '/api/v1/platform/tenants/:id/administrators',
+      targetType: 'Tenant',
+      targetId: tenantId,
+      outcome: AuditOutcome.SUCCESS,
+      statusCode: 200,
+    });
+
+    return {
+      tenant,
+      administrators: admins,
+      grant: { id: grant.id, minutesRemaining: minutesRemaining(grant) },
+      note: 'Accounts holding ADMIN only. Everybody else is reset by their own administrator.',
+    };
+  }
+
+  /**
+   * Reset a hospital administrator's password, behind a grant.
+   *
+   * The only write the platform API makes into a hospital's `users` table, and
+   * it is deliberately the narrowest one that closes the hole: a new temporary
+   * password, `mustChangePassword` set, the lockout cleared, every session
+   * revoked. It cannot change an address, a role, an activation state or
+   * anything else about the account.
+   *
+   * WHY THE VENDOR NEVER LEARNS THE PASSWORD THAT WAS THERE
+   * ------------------------------------------------------
+   * Because nobody does — it is only ever stored as an Argon2 hash. What the
+   * vendor does gain is a credential that signs in as a hospital administrator
+   * until the customer changes it, and that is a real transfer of power, not a
+   * technicality. Three things bound it:
+   *
+   *  - **A grant**, so it is time-boxed to at most eight hours and carries a
+   *    written reason somebody typed before doing this.
+   *  - **`mustChangePassword`**, so the first thing the customer does is
+   *    replace it. The window in which the vendor's copy works is the walk from
+   *    the telephone call to the sign-in screen.
+   *  - **The hospital's own audit log**, below. They can answer "did somebody
+   *    at the vendor reset our administrator, when, and why" from their own
+   *    records rather than by asking the vendor for theirs.
+   *
+   * WHY IT REFUSES ANYBODY WHO IS NOT AN ADMINISTRATOR
+   * -------------------------------------------------
+   * Not because resetting a nurse would be more dangerous — it would be less —
+   * but because their administrator can already do it, so a vendor route that
+   * could would be a capability with no case behind it. A power with no
+   * justification is one that gets used for something else eventually. The
+   * refusal names the reason so a support engineer is not left guessing.
+   */
+  async resetTenantUserPassword(
+    actor: PlatformPrincipal,
+    tenantId: number,
+    userId: number,
+  ) {
+    const path = '/api/v1/platform/tenants/:id/users/:userId/reset-password';
+    const grant = await this.requireActiveGrant(actor, tenantId, { method: 'POST', path });
+
+    const target = await this.prisma.forTenant(tenantId, () =>
+      this.prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          id: true,
+          email: true,
+          fullName: true,
+          isActive: true,
+          roleAssignments: { select: { role: true } },
+        },
+      }),
+    );
+
+    /*
+     * `forTenant` means a user at another hospital reads as absent rather than
+     * as forbidden, which is the policy doing its job — the same 404 somebody
+     * would get for an id that does not exist. Nothing here tells the caller
+     * which of the two it was.
+     */
+    if (!target) throw new NotFoundException('No such user at this hospital');
+
+    if (!target.roleAssignments.some((r) => r.role === UserRole.ADMIN)) {
+      throw new ForbiddenException(
+        'This route resets hospital administrators only. Anybody else is reset by their own administrator, from Admin → Users.',
+      );
+    }
+
+    const temporaryPassword = generateTemporaryPassword((n) => randomBytes(n));
+    const passwordHash = await hash(temporaryPassword);
+
+    await this.prisma.forTenant(tenantId, () =>
+      this.prisma.user.update({
+        where: { id: userId },
+        data: {
+          passwordHash,
+          mustChangePassword: true,
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+        },
+      }),
+    );
+
+    /*
+     * `refresh_tokens` carries no tenantId and no policy, and this runs on the
+     * platform API where `TenantInterceptor` opens no transaction — so it goes
+     * through `unscoped`, which is one of the uses `connection-budget.spec.ts`
+     * names. Revoked for the reason every other reset revokes: a reset is also
+     * a "this account may be compromised" action, and leaving a live session
+     * behind changes the lock while leaving a key in the door.
+     */
+    const { count: revokedSessions } = await this.prisma.unscoped.refreshToken.updateMany({
+      where: { userId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+
+    /*
+     * Into the *hospital's* log, not a vendor-side one, and `actorRole` stays
+     * null so a vendor action can never be mistaken for one of their own
+     * administrators. Its own action name rather than a generic platform write:
+     * "somebody outside this hospital changed an administrator's credential" is
+     * the single most consequential row the vendor can produce, and it must be
+     * findable without unpicking a catch-all.
+     */
+    this.audit.record({
+      tenantId,
+      userId: null,
+      actorEmail: actor.email,
+      actorRole: null,
+      action: 'PLATFORM_TENANT_ADMIN_PASSWORD_RESET',
+      method: 'POST',
+      path,
+      targetType: 'User',
+      targetId: userId,
+      outcome: AuditOutcome.SUCCESS,
+      statusCode: 200,
+    });
+
+    return {
+      userId: target.id,
+      email: target.email,
+      fullName: target.fullName,
+      /** Shown once. Only the hash is kept, so there is no second reading. */
+      temporaryPassword,
+      revokedSessions,
+      /*
+       * Surfaced rather than refused. A deactivated administrator cannot sign
+       * in whatever their password is, and the console has to be able to say so
+       * — otherwise the vendor reads out a working password to somebody who is
+       * then refused, and both parties conclude the reset failed.
+       */
+      isActive: target.isActive,
+      grant: { id: grant.id, minutesRemaining: minutesRemaining(grant) },
+    };
+  }
+
+  /**
    * Every request under break-glass re-checks the grant.
    *
    * Not once at grant time: a revoked grant must stop working immediately, and
@@ -772,7 +1104,22 @@ export class PlatformService {
    * audited too — an attempt to use a dead grant is exactly the row a hospital
    * would want to see.
    */
-  private async requireActiveGrant(actor: PlatformPrincipal, tenantId: number) {
+  private async requireActiveGrant(
+    actor: PlatformPrincipal,
+    tenantId: number,
+    /*
+     * Which route was refused. It used to be hard-coded to the diagnostics GET,
+     * which was true while diagnostics was the only caller and became a lie the
+     * moment a second one arrived — a denied password reset would have been
+     * written into the hospital's log as a denied diagnostics read. The whole
+     * value of these rows is that a hospital can ask what the vendor reached
+     * for, and an answer that names the wrong thing is worse than none.
+     */
+    context: { method: string; path: string } = {
+      method: 'GET',
+      path: '/api/v1/platform/tenants/:id/diagnostics',
+    },
+  ) {
     const grant = await this.prisma.unscoped.breakGlassGrant.findFirst({
       where: { platformUserId: actor.platformUserId, tenantId },
       orderBy: { createdAt: 'desc' },
@@ -785,8 +1132,8 @@ export class PlatformService {
         actorEmail: actor.email,
         actorRole: null,
         action: 'PLATFORM_ACCESS_DENIED_NO_GRANT',
-        method: 'GET',
-        path: '/api/v1/platform/tenants/:id/diagnostics',
+        method: context.method,
+        path: context.path,
         targetType: 'Tenant',
         targetId: tenantId,
         outcome: AuditOutcome.FAILURE,
