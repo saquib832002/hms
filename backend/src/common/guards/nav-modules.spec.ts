@@ -186,6 +186,19 @@ const DEGRADES_INTERNALLY: Record<string, string> = {
     'Clinic settings is the floor. The tax block and its /tax-rates fetch hide without BILLING.',
 };
 
+/*
+ * `/admin` is deliberately NOT in that list, and the staleness check above is
+ * what established that rather than a judgement call.
+ *
+ * Its new "Where the money came from" card does hide per module — pharmacy
+ * without PHARMACY, laboratory without LABORATORY, the clinic never — but it
+ * calls nothing gated to do it. `GET /admin/dashboard` carries no
+ * `@RequiresModule` and returns all three streams unconditionally, so the
+ * narrowing is entirely client-side over `hospital.modules`. An entry here
+ * would have been a claim about API coverage that is not true of this screen,
+ * and the list exists to shrink rather than to collect reassurance.
+ */
+
 describe('a nav item declares what its screen calls', () => {
   it('finds the nav table and the controllers', () => {
     // Vacuous-pass guard. An empty parse would make every assertion below true

@@ -44,6 +44,17 @@ import {
 
 const read = (f: string) => readFileSync(path.join(__dirname, f), 'utf8');
 const LAB = read('lab.service.ts');
+/*
+ * The period arithmetic moved out of `LabService` when the admin dashboard
+ * needed the identical resolution — eighty-five lines of timezone boundary
+ * handling copied into a second service is the failure this project has
+ * recorded four times. The assertions below follow it rather than being
+ * loosened: they were about the arithmetic, not about where it lived.
+ */
+const RESOLVE_PERIOD = readFileSync(
+  path.join(__dirname, '../common/utils/resolve-period.ts'),
+  'utf8',
+);
 const DOCUMENTS = readFileSync(
   path.join(__dirname, '../documents/documents.service.ts'),
   'utf8',
@@ -110,10 +121,13 @@ describe('a month key is a hospital-local period, not an instant', () => {
     // Not `new Date(...)`, which is UTC and moves a clinic's boundary. Both
     // ends of a range go through `hospitalDayRange`, and a month still goes
     // through `hospitalMonthRange`.
-    const body = strip(methodBody(LAB, 'private async statementPeriod('));
-    expect(body).toMatch(/zonedTimeToUtc\(from, tz\)/);
-    expect(body).toMatch(/zonedTimeToUtc\(nextDay\(to\), tz\)/);
-    expect(body).toMatch(/hospitalMonthRange\(anchor, tz\)/);
+    const body = strip(methodBody(RESOLVE_PERIOD, 'export function resolvePeriod('));
+    expect(body).toMatch(/zonedTimeToUtc\(from, timeZone\)/);
+    expect(body).toMatch(/zonedTimeToUtc\(nextDay\(to\), timeZone\)/);
+    expect(body).toMatch(/hospitalMonthRange\(anchor, timeZone\)/);
+
+    // And LabService must not have grown its own copy back.
+    expect(strip(LAB)).not.toMatch(/zonedTimeToUtc\(/);
   });
 });
 
@@ -147,9 +161,12 @@ describe('a period is a range of hospital-local days', () => {
      * `zonedTimeToUtc`, which is exact at every offset. This asserts the
      * tempting version stayed deleted.
      */
+    expect(strip(RESOLVE_PERIOD)).not.toMatch(/dayAnchor/);
+    expect(strip(RESOLVE_PERIOD)).toMatch(/const start = zonedTimeToUtc\(from, timeZone\)/);
+    expect(strip(RESOLVE_PERIOD)).toMatch(/const end = zonedTimeToUtc\(nextDay\(to\), timeZone\)/);
+    // Nowhere else either — a day anchor reintroduced in the admin service
+    // would be as wrong there as it was here.
     expect(strip(LAB)).not.toMatch(/dayAnchor/);
-    expect(strip(LAB)).toMatch(/const start = zonedTimeToUtc\(from, tz\)/);
-    expect(strip(LAB)).toMatch(/const end = zonedTimeToUtc\(nextDay\(to\), tz\)/);
   });
 
   it('steps to the next day across every kind of boundary', () => {
@@ -248,14 +265,14 @@ describe('both ends of a range travel together', () => {
      * "From there until today" and "the start of that month" are both plausible
      * and neither was chosen by the person about to send a bill.
      */
-    const body = strip(methodBody(LAB, 'private async statementPeriod('));
+    const body = strip(methodBody(RESOLVE_PERIOD, 'export function resolvePeriod('));
     expect(body).toMatch(/!period\.from \|\| !period\.to[\s\S]{0,160}BadRequestException/);
   });
 
   it('refuses a period that ends before it starts', () => {
     // Named rather than silently swapped: somebody who typed the dates the
     // wrong way round should see that, not a statement they did not ask for.
-    expect(strip(methodBody(LAB, 'private async statementPeriod('))).toMatch(
+    expect(strip(methodBody(RESOLVE_PERIOD, 'export function resolvePeriod('))).toMatch(
       /end <= start[\s\S]{0,160}BadRequestException/,
     );
   });
@@ -263,8 +280,8 @@ describe('both ends of a range travel together', () => {
   it('sends the resolved boundaries back, even for a month', () => {
     // One shape for a client to hold and to send when it asks for the printed
     // page — a month comes back as its first and last day like anything else.
-    const body = strip(methodBody(LAB, 'private async statementPeriod('));
-    expect(body).toMatch(/from: formatDateKey\(hospitalDate\(start, tz\)\)/);
+    const body = strip(methodBody(RESOLVE_PERIOD, 'export function resolvePeriod('));
+    expect(body).toMatch(/from: formatDateKey\(hospitalDate\(start, timeZone\)\)/);
     expect(body).toMatch(/from: formatDateKey\(from\)/);
   });
 });

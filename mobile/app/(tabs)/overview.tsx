@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Modal,
   Pressable,
@@ -15,15 +15,20 @@ import { useLiveData } from '@/lib/use-live-data';
 import { theme } from '@/lib/theme';
 import { relativeAge } from '@/lib/format';
 import { AppHeader, Button, Card, ErrorBanner, Field, Screen } from '@/components/ui';
-import type {
-  AdminDashboard,
-  DoctorReport,
-  DoctorReportRow,
-  FinanceReport,
-  TenantModule,
+import {
+  REVENUE_STREAM_LABEL,
+  REVENUE_STREAM_MODULE,
+  type AdminDashboard,
+  type DoctorReport,
+  type DoctorReportRow,
+  type FinanceReport,
+  type ReferralsOut,
+  type RevenueReport,
+  type TenantModule,
 } from '@/lib/types';
 import { useAuth } from '@/lib/auth-context';
 import { useMoney } from '@/lib/use-money';
+import { PeriodPicker, periodQuery, type Period } from '@/components/period-picker';
 
 /**
  * Administrator overview — read-only aggregates.
@@ -75,6 +80,25 @@ export default function OverviewScreen() {
   const [dashboard, setDashboard] = useState<AdminDashboard | null>(null);
   const [finance, setFinance] = useState<FinanceReport | null>(null);
   const [doctors, setDoctors] = useState<DoctorReport | null>(null);
+  const [revenue, setRevenue] = useState<RevenueReport | null>(null);
+  /** What the server last resolved, so month stepping is relative to it rather
+   *  than to the device's idea of now. */
+  const dashboardPeriodFrom = useRef<string | null>(null);
+  /*
+   * ONE PERIOD FOR THE WHOLE SCREEN. `null` is "this month", resolved on the
+   * server — the one case where the device's clock is never consulted.
+   */
+  const [period, setPeriod] = useState<Period | null>(null);
+
+  /** Step a whole calendar month from whatever the server last resolved. */
+  function stepMonth(delta: number) {
+    const base = dashboardPeriodFrom.current;
+    const m = /^(\d{4})-(\d{2})/.exec(base ?? '');
+    const today = new Date();
+    const year = m ? Number(m[1]) : today.getFullYear();
+    const month = m ? Number(m[2]) - 1 : today.getMonth();
+    setPeriod(monthPeriod(year, month + delta));
+  }
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [fetchedAt, setFetchedAt] = useState<Date | null>(null);
@@ -97,15 +121,28 @@ export default function OverviewScreen() {
    * server, or the reverse, loses a card rather than the tab.
    */
   const load = useCallback(async () => {
-    // Six months rather than twelve: a phone shows six bars legibly and the
-    // web app is where a full year gets read properly.
-    const [d, f, doc] = await Promise.allSettled([
-      api<AdminDashboard>('/admin/dashboard'),
+    /*
+     * The period goes to both period-driven calls with the *same* query string,
+     * so the tiles and the stream card can never describe different spans. It
+     * used to live inside the revenue card alone, which is how "tests ordered
+     * today" came to sit above a card showing August.
+     *
+     * Six months rather than twelve on the trend: a phone shows six bars
+     * legibly and the web app is where a full year gets read properly.
+     */
+    const query = periodQuery(period);
+    const [d, r, f, doc] = await Promise.allSettled([
+      api<AdminDashboard>(`/admin/dashboard${query}`),
+      api<RevenueReport>(`/admin/reports/revenue${query}`),
       api<FinanceReport>('/admin/reports/finance?months=6'),
       api<DoctorReport>('/admin/reports/doctors'),
     ]);
 
-    if (d.status === 'fulfilled') setDashboard(d.value);
+    if (d.status === 'fulfilled') {
+      setDashboard(d.value);
+      dashboardPeriodFrom.current = d.value.period.from;
+    }
+    if (r.status === 'fulfilled') setRevenue(r.value);
     if (f.status === 'fulfilled') setFinance(f.value);
     if (doc.status === 'fulfilled') setDoctors(doc.value);
     setFetchedAt(new Date());
@@ -118,6 +155,7 @@ export default function OverviewScreen() {
      */
     const failed = [
       d.status === 'rejected' ? 'overview' : null,
+      r.status === 'rejected' ? 'revenue' : null,
       f.status === 'rejected' ? 'takings' : null,
       doc.status === 'rejected' ? 'doctors' : null,
     ].filter(Boolean);
@@ -127,9 +165,9 @@ export default function OverviewScreen() {
         ? null
         : `Could not load ${failed.join(', ')}. The server may need restarting after an update.`,
     );
-  }, []);
+  }, [period]);
 
-  // Refetches on focus and every 15s. These are the day's running totals.
+  // Refetches on focus and every 15s, and whenever the period changes.
   useLiveData(load);
 
   return (
@@ -153,47 +191,111 @@ export default function OverviewScreen() {
           />
         }
       >
+        {/*
+          THE ONE PERIOD CONTROL, at the top and above everything it drives.
+          Reported by the product owner: it sat inside the revenue card, so the
+          tiles reported today and the card reported August with nothing saying
+          so.
+
+          Month arrows rather than a dropdown, because a phone has room for one
+          control and "the month before the one I am looking at" is the move
+          somebody actually makes. The label is the *server's* resolution, so a
+          device a day out from its hospital shows a correctable difference.
+        */}
+        <View style={s.monthRow}>
+          <Pressable onPress={() => stepMonth(-1)} style={s.stepper} hitSlop={8}>
+            <Text style={s.stepperText}>‹</Text>
+          </Pressable>
+          <Text style={s.monthLabel}>{dashboard?.period.label ?? '…'}</Text>
+          <Pressable onPress={() => stepMonth(1)} style={s.stepper} hitSlop={8}>
+            <Text style={s.stepperText}>›</Text>
+          </Pressable>
+          <Pressable onPress={() => setPeriod(todayPeriod())} style={s.chip} hitSlop={8}>
+            <Text style={s.chipText}>Today</Text>
+          </Pressable>
+        </View>
+        <PeriodPicker value={period} onChange={setPeriod} />
+
         {dashboard && (
           <>
-            <Text style={s.group}>Today</Text>
+            <Text style={s.group}>{dashboard.period.label}</Text>
             <View style={s.row}>
-              {clinic && <Metric label="Appointments" value={dashboard.appointments.today} />}
+              {clinic && (
+                <Metric label="Appointments" value={dashboard.overPeriod.activity.appointments} />
+              )}
               {clinic && (
                 <Metric
-                  label="Completed"
-                  value={dashboard.appointments.completedToday}
+                  label="Patients seen"
+                  value={dashboard.overPeriod.activity.patientsSeen}
                   tone={theme.color.success}
                 />
               )}
+              {clinic && (
+                <Metric label="Registered" value={dashboard.overPeriod.activity.registered} />
+              )}
               {/* What left the shelf, and whether any of it was uncharged —
                   the two questions a shop owner opens this screen with. */}
-              {pharmacy && <Metric label="Dispensed" value={dashboard.pharmacy.dispensesToday} />}
+              {pharmacy && (
+                <Metric label="Dispensed" value={dashboard.overPeriod.pharmacy.dispenses} />
+              )}
               {pharmacy && (
                 <Metric
                   label="Unpriced"
-                  value={dashboard.pharmacy.unpricedSalesToday}
+                  value={dashboard.overPeriod.pharmacy.unpricedSales}
                   tone={
-                    dashboard.pharmacy.unpricedSalesToday > 0 ? theme.color.warning : undefined
-                  }
-                />
-              )}
-              {laboratory && (
-                <Metric label="Tests ordered" value={dashboard.laboratory.ordersToday} />
-              )}
-              {/* Resulted but not authorised: finished from the bench and
-                  invisible to the doctor who asked. */}
-              {laboratory && (
-                <Metric
-                  label="To authorise"
-                  value={dashboard.laboratory.awaitingAuthorisation}
-                  tone={
-                    dashboard.laboratory.awaitingAuthorisation > 0
+                    dashboard.overPeriod.pharmacy.unpricedSales > 0
                       ? theme.color.warning
                       : undefined
                   }
                 />
               )}
+              {laboratory && (
+                <Metric
+                  label="Tests ordered"
+                  value={dashboard.overPeriod.laboratory.ordersPlaced}
+                />
+              )}
             </View>
+
+            {/*
+              Who saw whom. Asked for by the product owner — "how many patients
+              a doctor has seen and how much total collection from those
+              patients."
+
+              Counts only. The named drill-down is the consultation ledger on
+              the web, which carries its own audit action precisely so "who
+              looked up our patient list, and when" stays answerable.
+            */}
+            {clinic && dashboard.overPeriod.activity.byDoctor.length > 0 && (
+              <>
+                <Text style={s.group}>Who saw whom</Text>
+                {dashboard.overPeriod.activity.byDoctor.map((d) => (
+                  <Card key={d.doctorId}>
+                    <View style={s.line}>
+                      <Text style={s.lineLabel}>{d.name}</Text>
+                      <Text style={s.lineValue}>{fmt(d.collected)}</Text>
+                    </View>
+                    <Text style={s.muted}>
+                      {d.patientsSeen} patients · {d.consultations} consultations
+                      {d.noShows > 0 ? ` · ${d.noShows} no-show` : ''}
+                    </Text>
+                    {/* Billed beside collected, because payment is never
+                        required first and the gap between them is real. */}
+                    {d.billed !== d.collected && (
+                      <Text style={s.muted}>{fmt(d.billed)} billed</Text>
+                    )}
+                  </Card>
+                ))}
+              </>
+            )}
+
+            <ReferralsOutCard
+              out={dashboard.overPeriod.referralsOut}
+              fmt={fmt}
+              pharmacy={pharmacy}
+              laboratory={laboratory}
+            />
+
 
             {/* Takings, counted from payments actually received — not from
                 invoices raised, which is a different number that looks the
@@ -255,32 +357,40 @@ export default function OverviewScreen() {
             <Card>
               <Text style={s.muted}>Outstanding</Text>
               {/* The hospital's own currency, not a hard-coded £. */}
-              <Text style={s.big}>{fmt(dashboard.finance.outstanding)}</Text>
+              <Text style={s.big}>{fmt(dashboard.rightNow.finance.outstanding)}</Text>
               <Text style={s.muted}>
-                {dashboard.finance.openInvoices} open
+                {dashboard.rightNow.finance.openInvoices} open
                 {finance && finance.aging.totalOverdue !== '0.00'
                   ? ` · ${fmt(finance.aging.totalOverdue)} overdue`
                   : ''}
               </Text>
             </Card>
+
+            <RevenueStreams report={revenue} has={has} fmt={fmt} />
             </>
             )}
 
             {wards && (
             <>
-            <Text style={s.group}>Occupancy</Text>
+            {/*
+              RIGHT NOW. Its own heading saying the dates above do not apply —
+              occupancy is how many beds are full at this moment, and a queue
+              depth is a backlog or it has been cleared. Silently ignoring the
+              period is the reported bug; faking an average would be worse.
+            */}
+            <Text style={s.group}>Right now — whatever period is selected</Text>
             <Card>
               <Text
                 style={[
                   s.big,
-                  dashboard.occupancy.percent > 90 ? { color: theme.color.danger } : null,
+                  dashboard.rightNow.occupancy.percent > 90 ? { color: theme.color.danger } : null,
                 ]}
               >
-                {dashboard.occupancy.percent}%
+                {dashboard.rightNow.occupancy.percent}%
               </Text>
               <Text style={s.muted}>
-                {dashboard.occupancy.occupied} of {dashboard.occupancy.beds} beds ·{' '}
-                {dashboard.occupancy.available} free
+                {dashboard.rightNow.occupancy.occupied} of {dashboard.rightNow.occupancy.beds} beds ·{' '}
+                {dashboard.rightNow.occupancy.available} free
               </Text>
             </Card>
             </>
@@ -290,16 +400,16 @@ export default function OverviewScreen() {
 
             <Text style={s.group}>Staff and access</Text>
             <View style={s.row}>
-              <Metric label="Active" value={dashboard.staff.active} />
+              <Metric label="Active" value={dashboard.rightNow.staff.active} />
               <Metric
                 label="Locked out"
-                value={dashboard.staff.lockedOut}
-                tone={dashboard.staff.lockedOut > 0 ? theme.color.warning : undefined}
+                value={dashboard.rightNow.staff.lockedOut}
+                tone={dashboard.rightNow.staff.lockedOut > 0 ? theme.color.warning : undefined}
               />
               <Metric
                 label="Denied 24h"
-                value={dashboard.security.deniedRequestsLastDay}
-                tone={dashboard.security.deniedRequestsLastDay > 20 ? theme.color.danger : undefined}
+                value={dashboard.rightNow.security.deniedRequestsLastDay}
+                tone={dashboard.rightNow.security.deniedRequestsLastDay > 20 ? theme.color.danger : undefined}
               />
             </View>
 
@@ -623,7 +733,261 @@ function Metric({ label, value, tone }: { label: string; value: number; tone?: s
   );
 }
 
+/**
+ * Where the money came from: every business this hospital runs, plus the total,
+ * over a period the reader chooses.
+ *
+ * The same figures as the web card, and that is the standing rule rather than a
+ * choice — a figure that exists on one client and not the other is the shape
+ * that put reception's billing on the phone and nowhere else for six phases.
+ *
+ * The *layout* is curated and the data is not. A seven-column table does not
+ * fit a phone, so each stream is a block of labelled pairs. An owner asking
+ * what the clinic took is exactly the person holding a phone, and in a small
+ * practice they are often the doctor as well.
+ */
+/**
+ * Where prescriptions and tests went.
+ *
+ * Asked for by the product owner — *"if a doctor prescribes to an outside
+ * pharmacy, we should track those separately from our clinic. What different
+ * pharmacies outside my hospital has that prescription gone to. Same for the
+ * tests."*
+ *
+ * Counts and partner names only, never a drug or a test name. A test name is
+ * frequently the clinical question itself, and this card is read by whoever
+ * reconciles bills — the rule `labSummaryDescription` already follows.
+ */
+function ReferralsOutCard({
+  out,
+  fmt,
+  pharmacy,
+  laboratory,
+}: {
+  out: ReferralsOut;
+  fmt: (a: string) => string;
+  pharmacy: boolean;
+  laboratory: boolean;
+}) {
+  const left =
+    out.prescriptions.external +
+    out.prescriptions.partner +
+    out.labOrders.external +
+    out.labOrders.partner;
+  // A clinic that fills everything itself has nothing to track, and an empty
+  // card is furniture.
+  if (left === 0) return null;
+
+  const rows: { title: string; b: typeof out.prescriptions }[] = [
+    ...(pharmacy ? [{ title: 'Prescriptions', b: out.prescriptions }] : []),
+    ...(laboratory ? [{ title: 'Test requests', b: out.labOrders }] : []),
+  ];
+
+  return (
+    <>
+      <Text style={s.group}>What left the hospital</Text>
+      {rows.map(({ title, b }) => (
+        <Card key={title}>
+          <View style={s.line}>
+            <Text style={s.lineLabel}>{title}</Text>
+            <Text style={s.lineValue}>{b.total}</Text>
+          </View>
+          <Text style={s.muted}>{b.inHouse} filled here</Text>
+          {b.partners.map((partner) => (
+            <Text key={partner.tenantId} style={s.muted}>
+              {partner.count} → {partner.label}
+            </Text>
+          ))}
+          {/*
+           * Its own line rather than an unnamed partner: the patient took it
+           * away to fill wherever they chose, there is nobody to name, and a
+           * line reading "Partner: (unknown)" sends somebody looking for a
+           * partnership that was never meant to exist.
+           */}
+          {b.external > 0 && (
+            <Text style={s.muted}>{b.external} taken elsewhere by the patient</Text>
+          )}
+        </Card>
+      ))}
+
+      {out.owedToPartners.map((partner) => (
+        <Card key={partner.tenantId}>
+          <View style={s.line}>
+            <Text style={s.lineLabel}>{partner.label}</Text>
+            <Text style={s.lineValue}>{fmt(partner.charged)}</Text>
+          </View>
+          <Text style={s.muted}>
+            {partner.charges} charges ·{' '}
+            {partner.unsettled === '0.00' ? 'settled' : `${fmt(partner.unsettled)} unsettled`}
+          </Text>
+        </Card>
+      ))}
+
+      <Card>
+        <Text style={s.muted}>
+          {fmt(out.referredBilling.charged)} billed to patients for referred work
+        </Text>
+        {/*
+         * Kept apart, deliberately. Under PATIENT_PAYS no line is raised on
+         * purpose; an unpriced one is a real loss. Merging them would make
+         * every "went out uncharged" figure report the first forever.
+         */}
+        {out.referredBilling.payableElsewhere > 0 && (
+          <Text style={s.muted}>
+            {out.referredBilling.payableElsewhere} the patient pays the lab directly
+          </Text>
+        )}
+        {out.referredBilling.unpriced > 0 && (
+          <Text style={[s.muted, { color: theme.color.warning }]}>
+            {out.referredBilling.unpriced} ours to charge and unpriced
+          </Text>
+        )}
+      </Card>
+    </>
+  );
+}
+
+function RevenueStreams({
+  report,
+  has,
+  fmt,
+}: {
+  report: RevenueReport | null;
+  has: (m: TenantModule) => boolean;
+  fmt: (amount: string) => string;
+}) {
+  /*
+   * No period of its own and no fetch of its own. The screen holds one period
+   * and hands the resolved report down — two controls on one screen would be
+   * two answers to "which dates", and the reader would believe whichever they
+   * looked at first.
+   */
+  const visible = (report?.streams ?? []).filter((r) => {
+    if (r.stream === 'ALL') return true;
+    const module = REVENUE_STREAM_MODULE[r.stream];
+    return module === null || has(module);
+  });
+
+  return (
+    <>
+      <Text style={s.group}>Where the money came from</Text>
+      {!report ? (
+        <Card>
+          <Text style={s.muted}>Loading…</Text>
+        </Card>
+      ) : (
+        visible.map((row) => {
+          const f = row.period;
+          const total = row.stream === 'ALL';
+          return (
+            <Card key={row.stream}>
+              <View style={s.line}>
+                <Text style={[s.lineLabel, total ? s.streamTotal : null]}>
+                  {REVENUE_STREAM_LABEL[row.stream]}
+                </Text>
+                <Text
+                  style={[
+                    s.lineValue,
+                    total ? s.streamTotal : null,
+                    { color: Number(f.net) < 0 ? theme.color.danger : theme.color.success },
+                  ]}
+                >
+                  {fmt(f.net)}
+                </Text>
+              </View>
+              <Text style={s.muted}>
+                {fmt(f.billed)} billed · {fmt(f.collected)} in
+                {f.refunded === '0.00' ? '' : ` · ${fmt(f.refunded)} back`}
+                {f.tax === '0.00' ? '' : ` · ${fmt(f.tax)} tax`}
+              </Text>
+              {row.outstandingInPeriod !== '0.00' && (
+                <Text style={s.muted}>
+                  {fmt(row.outstandingInPeriod)} of that still unpaid, across{' '}
+                  {row.openInvoicesInPeriod}
+                </Text>
+              )}
+              {/*
+               * All-time, and said to be all-time. This was folded into the
+               * period figures, where it showed a months-old balance beside
+               * today's with nothing explaining why — reported by the product
+               * owner as exactly that confusion.
+               *
+               * An unsettled counter sale is an unreconciled till rather than a
+               * debtor to chase, which is why the wording differs by stream.
+               */}
+              {row.outstandingAllTime !== '0.00' && (
+                <Text style={s.muted}>
+                  {fmt(row.outstandingAllTime)} owed in total, any period
+                  {row.chaseable ? ' — to chase' : ' — at the counter'}
+                </Text>
+              )}
+            </Card>
+          );
+        })
+      )}
+    </>
+  );
+}
+
+/** `2026-09-01` for a `Date`, in the device's own calendar. */
+function dateKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
+    d.getDate(),
+  ).padStart(2, '0')}`;
+}
+
+/**
+ * Today as a one-day period. Consults the device clock, like the picker's own
+ * rolling preset — and the server echoes back what it resolved, which is what
+ * the label prints.
+ */
+function todayPeriod(): Period {
+  const now = new Date();
+  return { from: dateKey(now), to: dateKey(now) };
+}
+
+/**
+ * A whole calendar month, as its first and last day.
+ *
+ * `month` may be out of range — `stepMonth` passes 12 or -1 — and `Date`
+ * normalises that into the next or previous year, which is the behaviour
+ * wanted rather than something to guard against. `new Date(y, m + 1, 0)` is the
+ * last day of month `m`, so February and leap years need no table.
+ */
+function monthPeriod(year: number, month: number): Period {
+  const first = new Date(year, month, 1);
+  const last = new Date(year, month + 1, 0);
+  return { from: dateKey(first), to: dateKey(last) };
+}
+
 const s = StyleSheet.create({
+  monthRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 4,
+    paddingHorizontal: 12,
+  },
+  monthLabel: { ...theme.font.body, color: theme.color.text, flex: 1, fontWeight: '600' },
+  stepper: {
+    paddingHorizontal: 10,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: theme.color.border,
+    backgroundColor: theme.color.surface,
+  },
+  stepperText: { ...theme.font.body, color: theme.color.text },
+  chip: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+    backgroundColor: theme.color.surface,
+    borderWidth: 1,
+    borderColor: theme.color.border,
+  },
+  chipText: { ...theme.font.small, color: theme.color.textMuted },
+  streamTotal: { fontWeight: '700' },
   muted: { ...theme.font.small, color: theme.color.textMuted },
   body: { padding: theme.space(3), paddingBottom: theme.space(6) },
   group: {

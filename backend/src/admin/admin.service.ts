@@ -20,6 +20,7 @@ import {
 } from '../common/utils/hospital-time';
 import { fromMinor, sumMinor, toMinor, toMoneyString } from '../billing/money';
 import { buildAgingReport } from '../billing/aging';
+import { AGEABLE_INVOICE_KINDS } from '../billing/invoice-response';
 import {
   ACTIVITY_ACTIONS,
   collectedSince,
@@ -33,6 +34,14 @@ import {
   toLedgerRow,
   type ReportablePayment,
 } from './reports';
+import { decimalToMinor, revenueByStream, streamNamed } from './revenue-streams';
+import { resolvePeriod, type PeriodQuery } from '../common/utils/resolve-period';
+import { patientActivity } from './patient-activity';
+import {
+  breakdownByDestination,
+  owedToPartners,
+  referredBilling,
+} from './referrals-out';
 import { ClinicSettingsService } from '../common/tenancy/clinic-settings.service';
 import {
   ALLOWED_SLOT_MINUTES,
@@ -142,234 +151,476 @@ export class AdminService {
     return (await this.clinic.current()).timezone;
   }
 
-  async dashboard() {
+  /**
+   * Per-stream money over one period, from rows fetched once.
+   *
+   * ONE FETCH, TWO CALLERS, AND THE `OR` IS DOING REAL WORK
+   * ------------------------------------------------------
+   * `billed`, `tax`, `collected` and `refunded` are about the period.
+   * `outstandingAllTime` is not — an unpaid sale from last week is still money
+   * owed today — so every open invoice has to be in hand whenever it was
+   * raised. Fetching only the period would silently drop old debt from the owed
+   * figure; fetching every invoice ever would pull years of settled rows and
+   * their items to add nothing.
+   *
+   * `items.taxAmount` because there is no tax column on the invoice. Taking a
+   * percentage of the total here instead would produce a number that disagrees
+   * with the one printed on the bill.
+   */
+  private async revenueFor(period: { start: Date; end: Date }) {
+    const [invoices, payments, refunds] = await Promise.all([
+      this.prisma.invoice.findMany({
+        where: {
+          voidedAt: null,
+          status: { notIn: [InvoiceStatus.CANCELLED] },
+          OR: [{ issuedAt: { gte: period.start, lt: period.end } }, { status: { not: InvoiceStatus.PAID } }],
+        },
+        select: {
+          kind: true,
+          totalAmount: true,
+          amountPaid: true,
+          creditedAmount: true,
+          status: true,
+          issuedAt: true,
+          items: { select: { taxAmount: true } },
+        },
+      }),
+      this.prisma.payment.findMany({
+        where: { receivedAt: { gte: period.start, lt: period.end } },
+        select: { amount: true, receivedAt: true, invoice: { select: { kind: true } } },
+      }),
+      /*
+       * Refunds, because money given back is not money taken. This figure once
+       * summed payments alone, so a 500 payment refunded in full still read as
+       * 500 collected while the billing screen's signed ledger showed nothing.
+       * Two screens disagreeing about the same day destroys trust in both.
+       */
+      this.prisma.refund.findMany({
+        where: { refundedAt: { gte: period.start, lt: period.end } },
+        select: { amount: true, refundedAt: true, invoice: { select: { kind: true } } },
+      }),
+    ]);
+
+    return revenueByStream(
+      invoices.map((i) => ({
+        kind: i.kind,
+        issuedAt: i.issuedAt,
+        totalMinor: decimalToMinor(i.totalAmount),
+        paidMinor: decimalToMinor(i.amountPaid),
+        creditedMinor: decimalToMinor(i.creditedAmount),
+        taxMinor: sumMinor(i.items.map((it) => decimalToMinor(it.taxAmount))),
+        isSettled: i.status === InvoiceStatus.PAID,
+      })),
+      payments.map((p) => ({
+        kind: p.invoice?.kind ?? InvoiceKind.HOSPITAL,
+        amountMinor: minorOf(p.amount),
+        at: p.receivedAt,
+      })),
+      refunds.map((r) => ({
+        kind: r.invoice?.kind ?? InvoiceKind.HOSPITAL,
+        amountMinor: minorOf(r.amount),
+        at: r.refundedAt,
+      })),
+      period,
+    );
+  }
+
+  /**
+   * What each business billed and collected over a period the reader chose.
+   *
+   * Asked for by the product owner, in two parts. First: the unpaid figure was
+   * showing a months-old balance with *Today* selected, and *"the customer may
+   * get confused, where is it coming from"* — so `outstandingInPeriod` is of
+   * what was billed in the period, and the all-time figure is beside it and
+   * labelled. Second: *"instead of this month, could the customer select a date
+   * range, or a month and year"* — so the period is a parameter rather than
+   * three fixed windows, and August is reachable in October.
+   *
+   * Its own endpoint rather than parameters on `/admin/dashboard`, because
+   * changing a date must not refetch appointments, occupancy, bed counts, staff
+   * and audit figures. A period control that re-renders the whole screen is one
+   * people learn not to touch.
+   *
+   * The resolved boundaries and label travel back, so the screen prints what
+   * the server actually used rather than what the device's clock thinks it
+   * asked for — those differ by a day for anybody not sitting in their own
+   * clinic.
+   */
+  async revenueReport(period?: PeriodQuery) {
+    const timezone = await this.tz();
+    const resolved = resolvePeriod(timezone, period);
+
+    return {
+      generatedAt: new Date(),
+      timezone,
+      period: {
+        from: resolved.from,
+        to: resolved.to,
+        label: resolved.label,
+        wholeMonth: resolved.wholeMonth,
+      },
+      streams: await this.revenueFor(resolved),
+    };
+  }
+
+  /**
+   * The whole dashboard, over a period the reader chose.
+   *
+   * ONE PERIOD, AND IT DRIVES EVERYTHING THAT CAN MOVE
+   * --------------------------------------------------
+   * Reported by the product owner: the period control was applied to the
+   * revenue streams only, so *"zero tests ordered today"* and *"kept today"*
+   * sat above a card showing August, each answering a different question with
+   * nothing saying so. *"It should be showing data for all the sections, even
+   * top sections."* Correct, and the same fault as the unpaid column one
+   * change earlier — a figure that does not move with the period, next to ones
+   * that do, with nothing naming the exception.
+   *
+   * THE RESPONSE IS SPLIT, BECAUSE NOT EVERY FIGURE HAS A PERIOD VERSION
+   * -------------------------------------------------------------------
+   * `overPeriod` moves with the dates. `rightNow` cannot: bed occupancy is how
+   * many beds are full *at this moment*, and "occupancy for last month" would
+   * have to mean an average or a peak, which is a different figure wearing the
+   * same label. Same for staff counts, the lab queue depths and unpriced
+   * medicines — a backlog has no historical version, it is a backlog or it is
+   * not.
+   *
+   * Making those silently ignore the period is the reported bug. Making them
+   * *appear* to honour it by substituting an average would be worse: a
+   * plausible number answering a question nobody asked, which is the error the
+   * finance report was rewritten to fix. So they are separated, named, and both
+   * clients head that section with the fact that the period does not apply.
+   *
+   * EVERY KEY THAT SAID `Today` WAS RENAMED
+   * ---------------------------------------
+   * `dispensesToday`, `ordersToday`, `unpricedSalesToday`,
+   * `collectedLastSevenDays` — a key named for a window it no longer covers is
+   * a false name, and this project has recorded four of those as the cause of a
+   * real incident. They are now `dispenses`, `ordersPlaced` and so on, inside
+   * `overPeriod`, where the period is stated once.
+   */
+  async dashboard(period?: PeriodQuery) {
     const now = new Date();
-    const { start: todayStart, end: todayEnd } = hospitalDayRange(now, await this.tz());
-    const weekAgo = new Date(now.getTime() - 7 * 86_400_000);
+    const timezone = await this.tz();
+    const resolved = resolvePeriod(timezone, period);
     const dayAgo = new Date(now.getTime() - 86_400_000);
+    const window = { start: resolved.start, end: resolved.end };
 
     const [
-      appointmentsToday,
-      appointmentsWeek,
-      completedToday,
-      noShowsWeek,
+      appointments,
+      registered,
+      doctors,
       beds,
       occupied,
       activeStaff,
       lockedAccounts,
       pendingPasswordChanges,
       auditFailures,
-      invoices,
-      lowStockCount,
-      doctorCount,
+      medicineCount,
       doctorsWithoutFee,
       medicinesWithoutPrice,
     ] = await Promise.all([
-      this.prisma.appointment.count({ where: { scheduledAt: { gte: todayStart, lt: todayEnd } } }),
-      this.prisma.appointment.count({ where: { scheduledAt: { gte: weekAgo } } }),
-      this.prisma.appointment.count({
-        where: {
-          scheduledAt: { gte: todayStart, lt: todayEnd },
-          status: AppointmentStatus.COMPLETED,
+      /*
+       * Appointments falling inside the period, with just enough of the
+       * invoice to answer "did it turn into money".
+       *
+       * `select` rather than `include`, and the selection is deliberately
+       * narrow: `appointment: true` on a finance report is how a `patientId`
+       * becomes valid, unremarkable data in a place it has no business being.
+       * `reason` is the field one careless line away — typed by reception and
+       * routinely "chest pain" — and `patient-activity.spec.ts` asserts the
+       * word never appears in the module that consumes this.
+       */
+      this.prisma.appointment.findMany({
+        where: { scheduledAt: { gte: window.start, lt: window.end } },
+        select: {
+          doctorId: true,
+          patientId: true,
+          status: true,
+          invoice: { select: { totalAmount: true, amountPaid: true } },
         },
       }),
-      this.prisma.appointment.count({
-        where: { scheduledAt: { gte: weekAgo }, status: AppointmentStatus.NO_SHOW },
+      /*
+       * Registrations in the period, excluding referral-origin records. Those
+       * are patients a partner laboratory sent work for — `Patient.isReferralOrigin`
+       * marks them and patient search already excludes them, so counting them
+       * as this clinic's new patients would inflate the one figure an owner
+       * reads as growth.
+       */
+      this.prisma.patient.count({
+        where: { createdAt: { gte: window.start, lt: window.end }, isReferralOrigin: false },
       }),
+      this.prisma.doctor.findMany({ select: { id: true, fullName: true } }),
       this.prisma.bed.count({ where: { isActive: true } }),
       this.prisma.admission.count({ where: { status: AdmissionStatus.ADMITTED } }),
       this.prisma.user.count({ where: { isActive: true } }),
       this.prisma.user.count({ where: { lockedUntil: { gt: now } } }),
       this.prisma.user.count({ where: { mustChangePassword: true, isActive: true } }),
-      // The security signal worth surfacing daily: denied requests. A spike is
-      // either a misconfigured client or someone probing.
+      /*
+       * Denied requests, over a fixed 24 hours and deliberately **not** the
+       * chosen period. It is a "is something probing us right now" signal, and
+       * a spike is only a spike against a recent baseline — "412 denials in
+       * August" tells an administrator nothing they can act on today.
+       */
       this.prisma.auditLog.count({
         where: { outcome: AuditOutcome.FAILURE, createdAt: { gte: dayAgo } },
       }),
-      this.prisma.invoice.findMany({
-        where: { voidedAt: null, status: { notIn: [InvoiceStatus.CANCELLED] } },
-        select: { totalAmount: true, amountPaid: true, status: true, issuedAt: true },
-      }),
       this.prisma.medicine.count({ where: { isActive: true } }),
-      this.prisma.doctor.count(),
-      // Surfaced on the dashboard because it breaks reception's checkout, not
-      // because it is untidy: a doctor with no fee cannot be billed for, and the
-      // first symptom is a receptionist stuck in front of a patient.
+      // Surfaced because it breaks reception's checkout, not because it is
+      // untidy: a doctor with no fee cannot be billed for, and the first
+      // symptom is a receptionist stuck in front of a patient.
       this.prisma.doctor.count({ where: { consultationFee: null } }),
       // The same failure one shelf over: an unpriced medicine is dispensed,
-      // leaves stock, and is charged nothing. Nobody notices until a month of
-      // sales turns out to be missing, so it is surfaced rather than waited for.
+      // leaves stock, and is charged nothing.
       this.prisma.medicine.count({ where: { isActive: true, sellingPrice: null } }),
     ]);
 
-    const outstandingMinor = sumMinor(
-      invoices
-        .filter((i) => i.status !== InvoiceStatus.PAID)
-        .map((i) => toMinor(toMoneyString(i.totalAmount)) - toMinor(toMoneyString(i.amountPaid))),
-    );
-    /*
-     * Collected in the last seven days, counted from payments actually received.
-     *
-     * This used to sum `amountPaid` over invoices *issued* in the window, which
-     * is a different and wrong question. It missed every payment made against an
-     * older invoice — the normal case for anything not settled at the desk — and
-     * counted the full paid-to-date of a new invoice even where part of it
-     * arrived later. Both errors are silent: the number looks plausible, moves
-     * when takings move, and is simply not the figure it is labelled as.
-     */
-    const [recentPayments, recentRefunds] = await Promise.all([
-      this.prisma.payment.findMany({
-        where: { receivedAt: { gte: weekAgo } },
-        select: { amount: true },
-      }),
-      /*
-       * Refunds, because money given back is not money taken.
-       *
-       * This figure previously summed payments alone, so a £500 payment
-       * refunded in full still read as £500 collected — while the billing
-       * screen, which shows a signed ledger, showed nothing. Two screens
-       * disagreeing about the same day is worse than either being wrong on its
-       * own, because it destroys trust in both. Reported from use.
-       */
-      this.prisma.refund.findMany({
-        where: { refundedAt: { gte: weekAgo } },
-        select: { amount: true },
-      }),
-    ]);
-
-    const collectedWeekMinor = sumMinor(recentPayments.map((p) => minorOf(p.amount)));
-    const refundedWeekMinor = sumMinor(recentRefunds.map((r) => minorOf(r.amount)));
-
-    /*
-     * What this hospital's own trade looks like, for the parts of the product
-     * it actually bought.
-     *
-     * Reported from use: a pharmacy-only tenant's owner opened the dashboard and
-     * read appointments, bed occupancy and a doctor count, all zero, and nothing
-     * at all about the shop they run. Zeroes for a module you were never sold
-     * are not a quiet default — they read as a broken system, and they push the
-     * one figure that matters off the screen entirely.
-     *
-     * Counted here rather than fetched from `/pharmacy/dashboard` and
-     * `/lab/worklist` by the client, so the admin screen stays one request and
-     * an administrator needs no pharmacy or laboratory role to see their own
-     * hospital's totals.
-     *
-     * Counts and money only. No patient, no medicine name, no test name — the
-     * rule that `access-matrix.spec.ts` enforces as "admin gets no clinical
-     * READ endpoint at all" applies here as much as anywhere, and a test name
-     * is the sharpest leak in the system.
-     */
     const [
-      dispensesToday,
-      reversalsToday,
-      unpricedSalesToday,
-      labOrdersToday,
+      dispenses,
+      reversals,
+      unpricedSales,
+      labOrdersPlaced,
       labAwaitingCollection,
       labOnTheBench,
       labAwaitingAuthorisation,
+      prescriptionsOut,
+      labOrdersOut,
+      pharmacyPartners,
+      labPartners,
+      partnerCharges,
+      referredLines,
     ] = await Promise.all([
       this.prisma.dispenseEvent.count({
-        where: { dispensedAt: { gte: todayStart, lt: todayEnd }, reversedAt: null },
+        where: { dispensedAt: { gte: window.start, lt: window.end }, reversedAt: null },
       }),
       this.prisma.dispenseEvent.count({
-        where: { reversedAt: { gte: todayStart, lt: todayEnd } },
+        where: { reversedAt: { gte: window.start, lt: window.end } },
       }),
       /*
        * A handover with no price still leaves the shelf. This is the number
-       * nothing else surfaces daily, and it is how a month of unbilled stock
-       * happens — the same argument that puts unpriced doctors on this screen.
+       * nothing else surfaces, and it is how a month of unbilled stock happens.
        */
       this.prisma.dispenseEvent.count({
         where: {
-          dispensedAt: { gte: todayStart, lt: todayEnd },
+          dispensedAt: { gte: window.start, lt: window.end },
           reversedAt: null,
           invoiceId: null,
         },
       }),
-      this.prisma.labOrder.count({ where: { orderedAt: { gte: todayStart, lt: todayEnd } } }),
-      // Ordered and not yet collected: the queue that blocks everything after
-      // it, and the one a patient is physically waiting in.
+      this.prisma.labOrder.count({
+        where: { orderedAt: { gte: window.start, lt: window.end } },
+      }),
+      /*
+       * The three queue depths below are `rightNow` figures and take no period.
+       * "Awaiting collection in August" is not a thing: a queue is a queue or it
+       * has been cleared.
+       */
       this.prisma.labOrder.count({ where: { status: LabOrderStatus.ORDERED } }),
       this.prisma.labOrder.count({
         where: { status: { in: [LabOrderStatus.COLLECTED, LabOrderStatus.IN_PROGRESS] } },
       }),
-      /*
-       * Resulted but not verified. Values on a bench are not a report and the
-       * ordering doctor cannot see them, so a backlog here is invisible work
-       * that looks finished from the lab's side and missing from the ward's.
-       */
       this.prisma.labOrder.count({ where: { status: LabOrderStatus.RESULTED } }),
+      /*
+       * Where the work went. Both models have carried `destination` and
+       * `routedToTenantId` since routing shipped and nothing ever reported
+       * them — asked for by the product owner: *"what different pharmacies
+       * outside my hospital has that prescription gone to. Same for the
+       * tests."*
+       *
+       * Two columns each and nothing else. No `medicineName`, no `testName`,
+       * no patient — `referrals-out.spec.ts` asserts on the absence, because a
+       * test that only checked the counts were right would still pass if a
+       * drug name arrived beside them.
+       */
+      this.prisma.prescription.findMany({
+        where: { issuedAt: { gte: window.start, lt: window.end } },
+        select: { destination: true, routedToTenantId: true },
+      }),
+      this.prisma.labOrder.findMany({
+        where: { orderedAt: { gte: window.start, lt: window.end } },
+        select: { destination: true, routedToTenantId: true },
+      }),
+      /*
+       * The partner labels, from *this* hospital's own partnership rows — so
+       * naming a partner needs no cross-tenant read and no policy exception.
+       * Not filtered on `isActive`: removal is a soft delete precisely so
+       * "where did this go" stays answerable, and a removed partner still has
+       * the prescriptions already routed to it.
+       */
+      this.prisma.pharmacyPartner.findMany({
+        select: { partnerTenantId: true, label: true },
+      }),
+      this.prisma.labPartner.findMany({
+        select: { partnerTenantId: true, label: true },
+      }),
+      /*
+       * What the partner laboratories charged us. A notice rather than accounts
+       * payable — no part-payments, no credit notes, no aging — so this totals
+       * notices and says which are still open.
+       */
+      this.prisma.partnerLabCharge.findMany({
+        where: { incurredAt: { gte: window.start, lt: window.end } },
+        select: {
+          partnerTenantId: true,
+          partnerName: true,
+          amount: true,
+          settledAt: true,
+        },
+      }),
+      /*
+       * Referred test lines, to answer what we billed the patient for work we
+       * sent elsewhere. `payableExternally` is why this is not just "unpriced":
+       * under PATIENT_PAYS no line is raised on purpose, and merging the two
+       * would make every "went out uncharged" figure report it forever.
+       */
+      this.prisma.labOrderItem.findMany({
+        where: {
+          order: {
+            orderedAt: { gte: window.start, lt: window.end },
+            destination: { not: 'IN_HOUSE' },
+          },
+        },
+        select: { unitPrice: true, payableExternally: true },
+      }),
     ]);
+
+    /*
+     * Both the money block here and `GET /admin/reports/revenue` go through
+     * `revenueFor`, so the dashboard and the card below it cannot disagree —
+     * they are read by the same person in the same minute and they already did
+     * disagree once, when this method summed every payment with no `kind`
+     * filter while the finance report split them correctly.
+     */
+    const revenue = await this.revenueFor(window);
+    const hospitalRevenue = streamNamed(revenue, 'HOSPITAL');
+
+    const activity = patientActivity(
+      appointments.map((a) => ({
+        doctorId: a.doctorId,
+        patientId: a.patientId,
+        status: a.status,
+        billedMinor: a.invoice ? decimalToMinor(a.invoice.totalAmount) : 0,
+        collectedMinor: a.invoice ? decimalToMinor(a.invoice.amountPaid) : 0,
+      })),
+      doctors.map((d) => ({ id: d.id, name: d.fullName })),
+      registered,
+    );
 
     return {
       generatedAt: now,
-      timezone: await this.tz(),
-      appointments: {
-        today: appointmentsToday,
-        completedToday,
-        lastSevenDays: appointmentsWeek,
-        noShowsLastSevenDays: noShowsWeek,
-        // A blunt but useful operational number: how much clinic time is wasted.
-        noShowRate: appointmentsWeek > 0 ? Math.round((noShowsWeek / appointmentsWeek) * 100) : 0,
+      timezone,
+      /** What the server actually resolved. Print this, never the local guess. */
+      period: {
+        from: resolved.from,
+        to: resolved.to,
+        label: resolved.label,
+        wholeMonth: resolved.wholeMonth,
       },
-      occupancy: {
-        beds,
-        occupied,
-        available: beds - occupied,
-        percent: beds > 0 ? Math.round((occupied / beds) * 100) : 0,
-      },
-      finance: {
-        outstanding: fromMinor(outstandingMinor),
-        /*
-         * Gross in, gross out, net derived — all three, never one that hides
-         * the others.
-         *
-         * `net` is what a screen should lead with, because it is the figure
-         * that agrees with the payments ledger billing staff read. The two
-         * gross figures stay because reconciliation against a bank statement
-         * needs them: a day that took 5,000 and refunded 500 is not the same
-         * day as one that took 4,500, and only the gross pair can tell them
-         * apart.
-         */
-        collectedLastSevenDays: fromMinor(collectedWeekMinor),
-        refundedLastSevenDays: fromMinor(refundedWeekMinor),
-        netLastSevenDays: fromMinor(collectedWeekMinor - refundedWeekMinor),
-        openInvoices: invoices.filter((i) => i.status !== InvoiceStatus.PAID).length,
-      },
-      staff: {
-        active: activeStaff,
-        lockedOut: lockedAccounts,
-        awaitingPasswordChange: pendingPasswordChanges,
-        doctors: doctorCount,
-        doctorsWithoutFee,
-      },
-      security: {
-        deniedRequestsLastDay: auditFailures,
-      },
-      catalogue: {
-        medicines: lowStockCount,
-        /** Active medicines nobody has priced. Blank is not zero. */
-        withoutPrice: medicinesWithoutPrice,
-      },
+
       /*
-       * Always returned, rendered only where the module is. Computing them
-       * unconditionally is a handful of counts and keeps this endpoint's shape
-       * fixed — a response whose keys change with the plan is one every caller
-       * has to guard, and the client already knows which modules it has.
+       * ── EVERYTHING BELOW MOVES WITH THE PERIOD ────────────────────────────
        */
-      pharmacy: {
-        dispensesToday,
-        reversalsToday,
-        /** Went out of the shop with nothing to charge for it. */
-        unpricedSalesToday,
+      overPeriod: {
+        /**
+         * Patients, appointments, and a row per doctor.
+         *
+         * `patientsSeen` is a distinct count and deliberately not the sum of
+         * the doctor rows: one patient seen by two doctors is one patient here
+         * and one in each row, and a hospital total larger than its own patient
+         * list is a figure nobody can explain. The named drill-down is
+         * `GET /admin/reports/consultations`, which both clients link the counts
+         * to — it carries `ADMIN_CONSULTATION_LEDGER` as its own audit action so
+         * "who looked up our patient list, and when" stays answerable.
+         */
+        activity,
+        /** The clinic's own books only. The pharmacy's and lab's are in `/reports/revenue`. */
+        /*
+         * The clinic's own books over the period. Read straight off the stream
+         * rather than through a helper: the helper existed to build four keys
+         * named for a rolling week, and those names went when the period became
+         * the reader's choice.
+         */
+        finance: hospitalRevenue.period,
+        pharmacy: {
+          dispenses,
+          reversals,
+          /** Went out of the shop with nothing to charge for it. */
+          unpricedSales,
+        },
+        laboratory: { ordersPlaced: labOrdersPlaced },
+        /**
+         * Where prescriptions and test requests went.
+         *
+         * `external` is its own row rather than an unnamed partner: it means
+         * the patient took it away to fill wherever they chose, there is
+         * nobody to name, and it is usually the figure an owner has never seen.
+         */
+        referralsOut: {
+          prescriptions: breakdownByDestination(prescriptionsOut, pharmacyPartners),
+          labOrders: breakdownByDestination(labOrdersOut, labPartners),
+          /** What the partner laboratories invoiced us for, per partner. */
+          owedToPartners: owedToPartners(
+            partnerCharges.map((c) => ({
+              partnerTenantId: c.partnerTenantId,
+              partnerName: c.partnerName,
+              amountMinor: decimalToMinor(c.amount),
+              settled: c.settledAt !== null,
+            })),
+          ),
+          /** What we charged the patient for referred work, and what we did not. */
+          referredBilling: referredBilling(
+            referredLines.map((l) => ({
+              unitPriceMinor: l.unitPrice === null ? null : decimalToMinor(l.unitPrice),
+              payableExternally: l.payableExternally,
+            })),
+          ),
+        },
       },
-      laboratory: {
-        ordersToday: labOrdersToday,
-        awaitingCollection: labAwaitingCollection,
-        onTheBench: labOnTheBench,
-        /** Resulted, not authorised — invisible to the doctor who asked. */
-        awaitingAuthorisation: labAwaitingAuthorisation,
+
+      /*
+       * ── AND EVERYTHING BELOW IGNORES IT ───────────────────────────────────
+       *
+       * Point-in-time figures. Not an oversight and not a period version
+       * waiting to be written: occupancy is how many beds are full now, and a
+       * queue depth is a backlog or it is not. Both clients head this section
+       * with the fact that the dates above do not apply to it.
+       */
+      rightNow: {
+        occupancy: {
+          beds,
+          occupied,
+          available: beds - occupied,
+          percent: beds > 0 ? Math.round((occupied / beds) * 100) : 0,
+        },
+        /**
+         * Everything owed, whenever it was billed — the figure a clinic decides
+         * whether to chase on. The period's own unpaid total is in
+         * `/reports/revenue`, per stream.
+         */
+        finance: {
+          outstanding: hospitalRevenue.outstandingAllTime,
+          openInvoices: hospitalRevenue.openInvoicesAllTime,
+        },
+        staff: {
+          active: activeStaff,
+          lockedOut: lockedAccounts,
+          awaitingPasswordChange: pendingPasswordChanges,
+          doctors: doctors.length,
+          doctorsWithoutFee,
+        },
+        /** A fixed 24 hours, because a spike only means anything against now. */
+        security: { deniedRequestsLastDay: auditFailures },
+        catalogue: {
+          medicines: medicineCount,
+          /** Active medicines nobody has priced. Blank is not zero. */
+          withoutPrice: medicinesWithoutPrice,
+        },
+        laboratory: {
+          awaitingCollection: labAwaitingCollection,
+          onTheBench: labOnTheBench,
+          /** Resulted, not authorised — invisible to the doctor who asked. */
+          awaitingAuthorisation: labAwaitingAuthorisation,
+        },
       },
     };
   }
@@ -482,7 +733,14 @@ export class AdminService {
       }),
       this.prisma.invoice.findMany({
         where: { voidedAt: null, status: { notIn: [InvoiceStatus.CANCELLED] } },
-        select: { id: true, kind: true, dueDate: true, totalAmount: true, amountPaid: true },
+        select: {
+          id: true,
+          kind: true,
+          dueDate: true,
+          totalAmount: true,
+          amountPaid: true,
+          creditedAmount: true,
+        },
       }),
     ]);
 
@@ -570,13 +828,34 @@ export class AdminService {
        * receivable to chase at 30, 60 and 90 days. Mixing them makes the aging
        * report read as though the clinic is owed money it never expected.
        */
+      /*
+       * Built from `AGEABLE_INVOICE_KINDS`, not a hand-rolled HOSPITAL filter.
+       *
+       * This filtered to HOSPITAL alone while `/billing` aging used that shared
+       * list — HOSPITAL **and** LAB — so the owner's screen and the billing
+       * clerk's screen disagreed about which debts exist, and the ones missing
+       * here were laboratory charges raised against named patients exactly as a
+       * consultation is. Two screens disagreeing about money is worse than
+       * either being wrong alone.
+       *
+       * The pharmacy stays out, which is what that list already decides: a
+       * counter sale is paid at the counter or it does not happen, and an
+       * unsettled one is an unreconciled till rather than somebody to chase at
+       * 30, 60 and 90 days.
+       *
+       * Credits are subtracted, so a credit note does not leave a phantom
+       * bucket — the same arithmetic `revenueByStream` uses for outstanding.
+       */
       aging: buildAgingReport(
         invoices
-          .filter((i) => i.kind === InvoiceKind.HOSPITAL)
+          .filter((i) => (AGEABLE_INVOICE_KINDS as readonly string[]).includes(i.kind))
           .map((i) => ({
             id: i.id,
             dueDate: i.dueDate,
-            outstandingMinor: minorOf(i.totalAmount) - minorOf(i.amountPaid),
+            outstandingMinor: Math.max(
+              0,
+              minorOf(i.totalAmount) - minorOf(i.creditedAmount) - minorOf(i.amountPaid),
+            ),
           })),
         now,
       ),

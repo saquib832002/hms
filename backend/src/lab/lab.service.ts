@@ -19,28 +19,24 @@ import {
   ReferralBilling,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  resolvePeriod,
+  type PeriodQuery,
+  type ResolvedPeriod,
+} from '../common/utils/resolve-period';
 import { ClinicSettingsService } from '../common/tenancy/clinic-settings.service';
 import { TaxContextService } from '../billing/tax-context.service';
 import { AuthUser } from '../common/types/auth-user';
 import { hospitalCharges } from './referral-billing';
 import { formatAccession, isValidAccession, normaliseAccession } from './accession';
-import {
-  formatDateKey,
-  groupBy,
-  monthAnchor,
-  monthLabel,
-  nextDay,
-  parseDateKey,
-  parseMonthKey,
-  periodLabel,
-} from './lab-statement';
+/*
+ * Only `groupBy` is still needed here. The date-key and month helpers moved
+ * with `statementPeriod` into `common/utils/resolve-period.ts`; leaving them
+ * imported would read as "this file still does period arithmetic", which is
+ * exactly the impression that lets a second copy grow back.
+ */
+import { groupBy } from './lab-statement';
 import { matchReferralItems, sourceItemIdByLocalId } from './referral-item-match';
-import {
-  hospitalDate,
-  hospitalMonthKey,
-  hospitalMonthRange,
-  zonedTimeToUtc,
-} from '../common/utils/hospital-time';
 import { partnerLabels, routingTrail } from '../common/routing/routing-trail';
 import { currentTenantId } from '../common/tenancy/tenant-context';
 import { NOT_TREATING, resolveTreatingScope } from '../common/clinical/treating-scope';
@@ -1788,91 +1784,20 @@ export class LabService {
    * boundaries go through `hospitalDayRange` for that reason, and the anchors
    * are noon rather than midnight so the day asked for is the day resolved.
    */
-  private async statementPeriod(period?: { month?: string; from?: string; to?: string }) {
+  private async statementPeriod(period?: PeriodQuery): Promise<ResolvedPeriod> {
     const settings = await this.clinic.current();
-    const tz = settings.timezone;
-
-    if (period?.from || period?.to) {
-      /*
-       * Both or neither. One end of a range is not a range, and guessing the
-       * other — "from there until today", "the start of that month" — is a
-       * boundary the caller did not choose on a document about money.
-       */
-      if (!period.from || !period.to) {
-        throw new BadRequestException('A period needs both a start and an end date');
-      }
-
-      const from = parseDateKey(period.from);
-      const to = parseDateKey(period.to);
-      if (!from || !to) {
-        throw new BadRequestException(
-          `${period.from} to ${period.to} is not a period. Dates look like 2026-09-01`,
-        );
-      }
-
-      /*
-       * Constructed, never anchored. `zonedTimeToUtc` turns a wall-clock date
-       * in the hospital's zone into the instant that day began; the end is the
-       * start of the day *after* the last one, so the range is [start, end)
-       * like every other range in this system and a referral accessioned at
-       * 23:59 on the final day is inside it.
-       *
-       * The mirror of `monthAnchor` — noon UTC on the day — is wrong here and
-       * its own test caught it: at UTC+14 noon on the 15th is already the 16th.
-       * A month has thirty days of slack; a single day has none.
-       */
-      const start = zonedTimeToUtc(from, tz);
-      const end = zonedTimeToUtc(nextDay(to), tz);
-
-      if (end <= start) {
-        // Named rather than silently swapped: somebody who typed the dates the
-        // wrong way round should see that, not a statement they did not ask for.
-        throw new BadRequestException('The period ends before it starts');
-      }
-
-      /*
-       * A whole calendar month asked for as a range still reads as a month.
-       * Somebody picking 1–30 September from the date fields means September,
-       * and a page headed *1–30 September 2026* invites the reader to wonder
-       * what happened to the 31st.
-       */
-      const monthRange = hospitalMonthRange(start, tz);
-      const wholeMonth =
-        start.getTime() === monthRange.start.getTime() &&
-        end.getTime() === monthRange.end.getTime();
-
-      return {
-        start,
-        end,
-        from: formatDateKey(from),
-        to: formatDateKey(to),
-        label: periodLabel(from, to, wholeMonth),
-      };
-    }
-
-    const key = period?.month ? parseMonthKey(period.month) : null;
-    if (period?.month && !key) {
-      throw new BadRequestException(`${period.month} is not a month. They look like 2026-09`);
-    }
-
-    const anchor = key ? monthAnchor(key) : new Date();
-    const { start, end } = hospitalMonthRange(anchor, tz);
-    const resolved = key ?? parseMonthKey(hospitalMonthKey(anchor, tz))!;
-
     /*
-     * The resolved boundaries travel back as dates even for a month, so a
-     * client has one shape to hold and to send when it asks for the printed
-     * page. `end` is exclusive here and the last *day* is what a person means,
-     * so it steps back one millisecond before being named.
+     * The arithmetic lives in `common/utils/resolve-period.ts` and is shared
+     * with the admin dashboard's revenue card, which asks the same question.
+     *
+     * It was eighty-five lines here while statements were the only thing with a
+     * period. Copying them into a second service would not have produced a
+     * visible formatting difference — it would have produced two screens
+     * quoting different totals for the same named period, which is the failure
+     * mode this project has recorded four times and solved the same way each
+     * time.
      */
-    const lastDay = new Date(end.getTime() - 1);
-    return {
-      start,
-      end,
-      from: formatDateKey(hospitalDate(start, tz)),
-      to: formatDateKey(hospitalDate(lastDay, tz)),
-      label: monthLabel(resolved),
-    };
+    return resolvePeriod(settings.timezone, period);
   }
 
   /**

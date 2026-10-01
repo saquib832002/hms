@@ -31,10 +31,23 @@ class LedgerDto {
 export class AdminController {
   constructor(private readonly admin: AdminService) {}
 
+  /**
+   * The dashboard, over a period.
+   *
+   * The three params are raw strings validated inside `resolvePeriod`, which is
+   * where the lab statement and the revenue report validate their identical
+   * trio. A DTO with `@Matches` would be a second place to keep the date
+   * format, and parsing them as `Date` is the thing that moves a boundary east
+   * of Greenwich — the fault `lab-statement.spec.ts` was written after.
+   */
   @Get('dashboard')
   @AuditAction('ADMIN_DASHBOARD')
-  dashboard() {
-    return this.admin.dashboard();
+  dashboard(
+    @Query('month') month?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.admin.dashboard({ month, from, to });
   }
 
   @Get('reports/activity')
@@ -83,6 +96,29 @@ export class AdminController {
   @AuditAction('ADMIN_FINANCE_REPORT')
   finance(@Query() query: MonthsDto) {
     return this.admin.financeReport(query.months ?? 12);
+  }
+
+  /**
+   * What each business billed and collected over a period the reader chose.
+   *
+   * Its own action rather than folding into `ADMIN_FINANCE_REPORT`, for the
+   * reason stated above: an owner asking "who looked at our revenue, and when"
+   * cannot be answered once every admin read shares one name.
+   *
+   * The three params are raw strings and are validated inside `resolvePeriod`,
+   * which is where the lab statement endpoint validates its identical trio.
+   * A DTO with `@Matches` would be a second place to keep the date format, and
+   * parsing them as `Date` is the thing that moves a boundary east of
+   * Greenwich — the fault `lab-statement.spec.ts` was written after.
+   */
+  @Get('reports/revenue')
+  @AuditAction('ADMIN_REVENUE_REPORT')
+  revenue(
+    @Query('month') month?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.admin.revenueReport({ month, from, to });
   }
 
   @Get('reports/doctors')

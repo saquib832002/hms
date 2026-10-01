@@ -1845,6 +1845,305 @@ deliberately not required before a consultation, so the gap between them is real
 — and reporting only what was charged is how a clinic mistakes invoices raised
 for money in the bank.
 
+### Three businesses take money, and the dashboard was adding them up as one
+
+A hospital here may run up to three things that bill: the clinic, the pharmacy
+and the laboratory. `Invoice.kind` says which. Asked for by the product owner —
+*"if that tenant has the laboratory bills as well as the pharmacy bills, could
+you have their section on the administrator dashboard so we have a complete
+picture of where the amounts are flowing"* — and the picture was not merely
+missing. It was wrong.
+
+**`GET /admin/dashboard` summed every payment and refund in the window with no
+`kind` filter.** So `collectedLastSevenDays`, `netLastSevenDays` and
+`outstanding` silently folded the shop's counter trade and the lab's charges
+into the clinic's figures. `financeReport` had always split them correctly, and
+this file claimed the rule held — *"pharmacy takings are reported beside the
+hospital's, never inside them"* — with a comment thirty lines above the
+offending query saying so too. A stated rule with no test is a rule that
+drifts, and this one never held for the dashboard for a day.
+
+Two more faults in the same expression, both of the shape this project keeps
+recording. `outstanding` was `total - amountPaid`, ignoring `creditedAmount`, so
+a credit note left a balance nobody was chasing on an owner's screen forever —
+the arithmetic the send-out worklist and the pharmacy till were both written to
+avoid. And it summed *signed* differences rather than flooring per invoice, so
+one overpaid invoice cancelled a real debt on another and the hospital looked
+square.
+
+**`revenue-streams.ts` is one implementation and both callers use it.** The
+dashboard and the finance report are read by the same person in the same minute,
+and they had already disagreed in exactly this way. Two screens disagreeing
+about one day is worse than either being wrong alone, because it makes both
+unusable and the person who has to explain it is a finance clerk who did nothing
+wrong. Same reasoning as `resolveAuditTarget`, `resolveTreatingScope` and
+`course-quantity.ts`.
+
+**`ALL` is computed over the union, not by adding the three rows.** A fourth
+`InvoiceKind` would otherwise fall out of the total while every individual
+figure still looked right — the failure mode that is hardest to see because
+nothing on screen is obviously wrong.
+
+**Every stream is returned even at zero**, and which ones to draw is the
+client's question, answered from `hospital.modules`. A response whose keys
+change with the plan is one every caller has to guard, and *"the pharmacy took
+nothing today"* and *"the pharmacy row is missing"* look identical on screen
+while only one of them means the till balances — the same argument as the
+payment-method split.
+
+**`chaseable` is a field because "owed" means two different things.** An
+unsettled pharmacy invoice is an unreconciled till, not a debtor: a counter sale
+is paid at the counter or it does not happen, it frequently has no patient to
+chase, and it is deliberately absent from `AGEABLE_INVOICE_KINDS`. Both clients
+label it differently rather than totting all three up under one heading, because
+the alternative is somebody chasing a walk-in who left with their paracetamol a
+fortnight ago. `revenue-streams.spec.ts` compares the flag against
+`AGEABLE_INVOICE_KINDS` rather than keeping a second list, which is what the
+aging bug below was.
+
+**The admin aging was filtered by hand and disagreed with billing's.**
+`admin.service.ts` aged `kind === HOSPITAL` while `/billing` used
+`AGEABLE_INVOICE_KINDS`, which is HOSPITAL **and** LAB. So the owner's screen
+and the billing clerk's screen disagreed about which debts exist, and the ones
+missing from the owner's were laboratory charges raised against named patients
+exactly as a consultation is.
+
+**`finance.*` kept its key names and changed its values**, so a client that has
+not been redeployed keeps working and starts telling the truth. Expect those
+tiles to **drop** on any tenant that sells medicines or runs tests; the `ALL`
+row is the figure that replaces them.
+
+**Two of the guards over this were vacuous and were caught by being broken.**
+The first matched `/InvoiceKind\.HOSPITAL/` in the dashboard method and **passed
+with the bug restored**, because the identifier also appears in an unrelated
+`?? InvoiceKind.HOSPITAL` fallback two statements away; the decision moved into
+`financeBlock`, a pure function a test can hand a pharmacy row to. The second
+matched `AGEABLE_INVOICE_KINDS` against the whole file and **passed with the
+fault reintroduced**, because the explanatory comment I had written directly
+above the fix mentions the identifier by name — so it strips comments first, the
+same lesson `nav-modules.spec.ts` learned. Sixth and seventh time in this repo.
+A guard nobody has watched fail asserts nothing.
+
+**`/admin` is deliberately not in `DEGRADES_INTERNALLY`**, and the staleness
+check in `nav-modules.spec.ts` is what established that rather than a judgement
+call: the card hides per module, but `GET /admin/dashboard` carries no
+`@RequiresModule` and returns all three streams unconditionally, so the
+narrowing is entirely client-side. An entry there would have been a claim about
+API coverage that is not true of this screen.
+
+Layout is curated and the data is not. The web gets a table; the phone gets a
+block per stream, because eight columns do not fit and an owner asking what the
+clinic took is exactly the person holding a phone — in a small practice, often
+the doctor as well.
+
+#### One figure on that row did not move with the period, and it was the owed one
+
+This shipped with three fixed windows — today, a rolling seven days, the
+hospital's month — and an `outstanding` that was **not windowed at all**,
+documented here as deliberate on the grounds that an unpaid sale from last week
+is still money owed today.
+
+That grounds is correct and the placement was wrong. Reported by the product
+owner: with *Today* selected, the unpaid column showed a balance from months
+earlier, and *"the customer may get confused, where is it coming from"*. Every
+other number on that row moved with the period and this one did not, so the row
+read as one period's figures while not being that — and nothing on screen said
+which was the exception.
+
+**Both figures, in separate columns, each saying what it is.**
+`outstandingInPeriod` is of what the stream billed *in the period*, which is the
+honest reading of the column it sits in: of what we charged then, this much has
+not arrived. A period that billed nothing shows nothing owed, which is correct
+rather than empty. `outstandingAllTime` is beside it and labelled *all time*,
+because that is the figure a clinic decides whether to chase anybody on and
+somebody looking at *Today* must not conclude they are square. Dropping it would
+have answered the report and lost the more important number.
+
+`finance.outstanding` on the tiles above stays all-time, deliberately: that tile
+has always meant "what is this hospital owed", and narrowing it to a week would
+quietly turn a debt figure into a recent-billing figure while reading
+identically.
+
+#### The period is the reader's choice, and three fixed windows could not express it
+
+Asked for in the same breath: *"instead of this month, could the customer select
+a date range, or a month and year — that will be good, to choose the data for
+which they want the dashboard to display."* A clinic reconciling August cannot do
+it on a card that only knows about now, and three windows is a card that only
+knows about now.
+
+So the three became **presets of a single chosen period**, and nothing was lost:
+today, a rolling week and this month are still one action each and resolve
+through the same `?from=&to=` the arbitrary case uses — one code path, rather
+than a fast one for the common periods and a separate one for the rest.
+
+**`resolvePeriod` is shared with lab statements rather than copied.** It was
+`private async statementPeriod` on `LabService`, which was right while statements
+were the only thing with a period; the alternative here was eighty-five lines of
+timezone boundary arithmetic in a second service. Two implementations of "which
+days does this period cover" do not produce a visible formatting difference —
+they produce two screens quoting different totals for the same named period.
+Fifth time this project has turned that into a module, after `resolveAuditTarget`,
+`resolveTreatingScope`, `course-quantity.ts` and `matchReferralItems`.
+`lab-statement.spec.ts`'s four assertions followed it rather than being loosened,
+because they were about the arithmetic and not about where it lived.
+
+**Its own endpoint, `GET /admin/reports/revenue`.** Parameters on
+`/admin/dashboard` would mean refetching appointments, occupancy, bed counts,
+staff and audit figures every time somebody changed a date, and a period control
+that re-renders the whole screen is one people learn not to touch.
+
+**The shared `PeriodPicker` is consumed untouched on both clients.**
+`statement-period.spec.ts` pins its three presets *by name* on both, so widening
+them for the admin card would change what a laboratory sees on another screen.
+Today and the month selector sit beside it instead — `type="month"` on the web,
+because it is a native month-and-year picker; month steppers on the phone,
+because there is room for one control and *"the month before the one I am looking
+at"* is the move somebody actually makes. Both derive the range from the chosen
+year and month rather than from "now", so neither consults the device clock to
+answer a question about August.
+
+**The server's resolution is what gets printed.** A preset computes "today" from
+the device's clock while the server resolves it in the hospital's timezone, and
+those differ by a day for anybody not sitting in their own clinic. The response
+carries `from`, `to` and a `label`, and both screens print that — so the
+difference is correctable rather than invisible. A whole calendar month comes
+back labelled *September 2026* rather than *1–30 September 2026*, since a heading
+naming the 30th invites the reader to wonder about the 31st.
+
+**Three of the four guards over this were verified by breaking them**, and one of
+the three faults was the reported bug itself — un-windowing `outstandingInPeriod`
+fails three assertions across two files. A fourth guard broke honestly on its
+own: `reports.spec.ts` asserted the `collectedLastSevenDays` trio against
+`admin.service.ts`, and those keys had moved into `financeBlock`. It now reads
+both files, because the property it protects — every collected figure has a
+refund and a net beside it — did not move.
+
+#### One period for the screen, and the figures that cannot have one
+
+The period control drove the revenue card **alone**, so the tiles above it
+reported today while the card below reported August. Reported by the product
+owner: *"you have applied the date range only for the below sections, streams
+like clinic and laboratory. This should be common to all the dashboards — even
+top sections where you have zero tests ordered today, kept today,
+outstanding."* The same fault as the unpaid column one change earlier, one
+level out: figures that do not move with the period, sitting among ones that
+do, unlabelled.
+
+So the screen holds one period and **every period-driven call gets the same
+query string**, computed once. Two controls on one screen are two answers to
+"which dates", and the reader believes whichever they looked at first.
+
+**`financeBlock` was deleted rather than renamed.** It built
+`collectedLastSevenDays` and two siblings, honest while the dashboard reported
+a fixed rolling week and a false name the moment the period became a parameter.
+Its three guards failed on the change rather than after it, which is what they
+were for. What replaced it is no function at all —
+`streamNamed(revenue, 'HOSPITAL').period`.
+
+**The response is split, because not every figure has a period version.**
+`overPeriod` moves with the dates; `rightNow` cannot. Bed occupancy is how many
+beds are full *at this moment*, and "occupancy for last month" would have to
+mean an average or a peak — a different figure wearing the same label. Lab queue
+depths, staff counts and unpriced medicines are the same: a backlog is a backlog
+or it has been cleared. Denied requests stay on a fixed 24 hours, because a
+spike only means anything against a recent baseline.
+
+Making those silently ignore the period is the reported bug. **Substituting an
+average would be worse** — a plausible number answering a question nobody
+asked, which is the error the finance report was rewritten to fix. So they are
+separated, and both clients head that section *"Right now — whatever period is
+selected above"*. `dashboard-period.spec.ts` asserts the split server-side, the
+single period on both clients, and that the wording is on screen rather than
+only in this file.
+
+**Every key named for a window it no longer covers was renamed.**
+`dispensesToday`, `ordersToday`, `unpricedSalesToday` became `dispenses`,
+`ordersPlaced`, `unpricedSales` inside `overPeriod`, where the period is stated
+once. A key named for the wrong window is what sent three incident reports in
+this project to the wrong feature.
+
+#### Who came in, who saw them, and what it came to
+
+Also asked for: *"how many patients registered or had an appointment, and how
+many patients a doctor has seen and how much total collection from those
+patients."* The dashboard had appointment counts and a doctor headcount with
+nothing joining them, so the question a clinic owner actually opens a dashboard
+with was answerable only by reading three screens and doing arithmetic.
+
+`patient-activity.ts` is a pure module: registrations, appointments,
+attendance, and a row per doctor with patients seen, consultations, billed and
+collected.
+
+- **`patientsSeen` is a distinct count and deliberately not the sum of the
+  rows.** One patient seen by two doctors is one patient in the hospital total
+  and one in each row. Summing the rows gives two, and a hospital total larger
+  than its own patient list is a figure nobody can explain — so the screen says
+  so where it prints it.
+- **SCHEDULED is not attendance**, for the reason `resolveTreatingScope`
+  refuses it: a diary entry would let tomorrow's bookings inflate today's seen.
+  CHECKED_IN is arrival without a consultation and counts as neither.
+- **Money comes from attended appointments only.** A no-show is revenue
+  invented from an empty chair.
+- **A doctor who saw nobody keeps their row, at zero** — exactly who an owner
+  reconciling a quiet week wants to see, and the payment-method-split argument
+  again.
+- **Billed sits beside collected**, because payment is never required before a
+  consultation and reporting only what was charged is how a clinic mistakes
+  invoices raised for money in the bank.
+- **No patient name anywhere on it.** The named drill-down is
+  `GET /admin/reports/consultations`, which carries
+  `ADMIN_CONSULTATION_LEDGER` as its own audit action precisely so *"who looked
+  up our patient list, and when"* stays answerable; the counts link there
+  rather than this endpoint growing names. `reason` is the field one careless
+  `include` away, and the spec asserts the word never appears in the module.
+
+#### What left the hospital, and to whom
+
+*"If a doctor prescribes to an outside pharmacy, we should track those
+separately from our clinic. What different pharmacies outside my hospital has
+that prescription gone to. Same for the tests."*
+
+`Prescription.destination` and `LabOrder.destination` have carried the answer
+since routing shipped and **nothing ever read it back** — the fifth field in
+this project written and never reported. `referrals-out.ts` groups both.
+
+- **EXTERNAL is its own row, not an unnamed partner.** It means the patient took
+  it away to fill wherever they chose: no partner, no code, nothing to name. A
+  row reading *Partner: (unknown)* would send somebody looking for a
+  partnership that was never meant to exist — and this is usually the figure an
+  owner has never seen, work walking out of the building with no further trace.
+- **The partner name comes from our own records.** `PharmacyPartner.label` and
+  `LabPartner.label` live in the sending hospital's scope, so naming a partner
+  needs no cross-tenant read and no policy exception. The list is not filtered
+  on `isActive`: removal is a soft delete precisely so *"where did this go"*
+  stays answerable, and a missing label names the tenant id rather than dropping
+  the row, because a count that silently disappears is worse than one labelled
+  awkwardly.
+- **A PARTNER row with nobody named counts as external** rather than being
+  dropped, so the parts still sum to the whole. A breakdown whose rows do not
+  add up to its own total is one a reader cannot use.
+- **`PartnerLabCharge.partnerName` is read off the charge**, not resolved from
+  the partnership — the notice captures it at accession for the reason
+  `DispenseLine.unitPrice` is captured. A relabelled or removed partnership must
+  not restate who charged what for work already done.
+- **`payableElsewhere` is kept apart from `unpriced`, and the clients never add
+  them.** Under `PATIENT_PAYS` no line is raised *on purpose*; an unpriced one
+  is a real loss. Third time in this project — blank is not zero for
+  `Medicine.sellingPrice` and `Doctor.consultationFee` either — and merging them
+  would make every "went out uncharged" figure report the deliberate case
+  forever, at which point people stop reading the figure that catches the real
+  ones.
+- **No drug name, no test name, no patient.** `referrals-out.spec.ts` asserts on
+  the *absence*, because a test that only checked the counts were right would
+  still pass if a drug name arrived beside them.
+
+**Three guards verified by breaking them**, and a fourth caught itself: the
+`overPeriod` slice assertion failed on its first run because the comment
+explaining why occupancy belongs in `rightNow` mentions the word. It strips
+comments before slicing now — fourth time in this repo that a guard has been
+satisfied by its own documentation.
+
 ### A per-doctor report is operational; a per-department one would not be
 
 `GET /admin/reports/doctors` gives headcount, appointments today and over seven
@@ -3593,6 +3892,14 @@ would have refused.
 
 ### Known issues
 
+- **The per-stream revenue figures have never run against a live database.** The arithmetic is unit-tested over fixtures and all three projects typecheck, but nothing has grouped real invoices of three kinds across a real month boundary in a non-UTC timezone — which is exactly the case `resolvePeriod` and `hospitalMonthRange` exist for. No migration is involved: every figure is derived from invoices, payments and refunds that already exist, so `npm run db:rls` is not needed and nothing has to be backfilled. Watch the first look for the thing a fixture cannot show: whether `invoice.items.taxAmount` is heavy enough to matter on a tenant with a year of pharmacy sales, since `revenueFor` fetches items for every invoice issued in the period **plus every open one whenever it was raised** — the `OR` that makes the all-time owed figure correct is also the one that makes the query grow with unpaid history rather than with the period.
+- **The dashboard's patient and referral figures have never run against a live database.** The arithmetic is unit-tested over fixtures — 27 assertions across `patient-activity.spec.ts` and `referrals-out.spec.ts` — and all three projects typecheck, but nothing has counted real appointments across a real month boundary in a non-UTC timezone, and nothing has grouped real prescriptions by a real partner tenant. No migration is involved: every figure is derived from columns that already exist, so `npm run db:rls` is not needed and nothing has to be backfilled.
+- **The dashboard now fetches appointments as rows rather than counting them.** `patientActivity` needs a distinct patient count and a per-doctor split, and neither is a `count()`. On a tenant with a busy month that is thousands of rows with four columns each, which is fine; on a *year* selected as a range it is not. It is the same unbounded-period gap as the revenue card below, and the same fix applies — the lab statement's `take` + one-row-over pattern — and is not applied to either yet.
+- **`stepMonth` on the phone steps from what the server last resolved**, held in a ref. That is right, and it means the arrows do nothing until the first response lands — a tap in the first few hundred milliseconds falls back to the device's current month. Harmless and worth knowing before somebody reports the arrows as unresponsive.
+- **A wide period is not refused on the revenue card.** The lab statement refuses rather than truncating, because a page short by whatever was cut is a wrong number a reader cannot spot. This card has no such cap: a range picker makes "the last two years" one action away, and the query would fetch every invoice and its items across it. The figures would still be right; the request would be slow. The statement's `take` + one-row-over pattern is the fix and is not applied here yet.
+- **`outstandingAllTime` is the same number on every row whatever the period**, which is correct and reads oddly the first time: changing the period moves seven columns and leaves the eighth alone. That is the point — it is the figure that ignores the period — and it is labelled, but somebody will still ask once.
+- **`FinanceReport`'s `pharmacy` and `lab` blocks are computed, serialised, and declared by no client.** The backend has returned them since the pharmacy shipped and neither `web/lib/types.ts` nor the reports screen has ever named them — so the 12-month per-stream trend exists in the response and is thrown away. The dashboard card covers today, the week and the month, which is what was asked for; the trend is the obvious next step and is absent rather than half-wired. Eighth instance of the family, and the first where the unreachable thing is a *field* rather than a route or a setting.
+- **Nothing reconciles the dashboard's combined total against the pharmacy or lab dashboards.** All three now read from the same windows and the same `Invoice.kind`, so they should agree — and if they drift, nothing says so. `/pharmacy/dashboard` counts sales from `DispenseEvent` while this counts billed from invoices, which is deliberate (a handover with no price still leaves the shelf) and means the two are *not* the same number by design. Worth knowing before somebody reports it as a bug.
 - **The vendor console's emailed recovery is the weakest link in the deployment by construction, and the three controls around it are not a substitute for a second factor.** A mailbox is now sufficient to take a console account, and the cooling-off only delays the part that reaches patient data. TOTP on `PlatformUser` is the real answer, it is absent rather than half-built, and it is the single highest-value thing left in this file.
 - **The reset notification goes to every other console account, so a one-person vendor gets none.** That is logged and nothing else — the control simply is not operating, and the deployment is exactly as safe as one mailbox. Worth knowing before the first hire rather than after.
 - **`platform_password_reset_tokens` needs `npm run db:rls`.** It is a new table carrying the *inverted* policy and gets none from the migration. Skipping it leaves RLS disabled on the one table whose rows are live links into accounts that can open a grant against any hospital.

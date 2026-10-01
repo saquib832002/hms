@@ -1128,49 +1128,242 @@ export interface StaffUser {
   doctor: { id: number; specialization: string; department: string | null } | null;
 }
 
+/** The three businesses a hospital here may run that take money. */
+export const REVENUE_STREAMS = ['HOSPITAL', 'PHARMACY', 'LAB'] as const;
+export type RevenueStream = (typeof REVENUE_STREAMS)[number];
+
+/** One stream, one window. Money is always a string; see `money-lines.ts`. */
+export interface WindowFigures {
+  billed: string;
+  tax: string;
+  collected: string;
+  refunded: string;
+  /** `collected − refunded`. Lead with this; keep the gross pair beside it. */
+  net: string;
+}
+
+/** What one line of business billed and collected over the chosen period. */
+export interface StreamRevenue {
+  /** `'ALL'` is the combined total across every stream. */
+  stream: RevenueStream | 'ALL';
+  /** Billed, collected, refunded, net and tax inside the chosen period. */
+  period: WindowFigures;
+  /**
+   * Of what this stream billed **in the period**, how much is still unpaid.
+   *
+   * Windowed, because everything else on the row is. Reported by the product
+   * owner: with *Today* selected the unpaid figure showed a months-old balance,
+   * and the row read as one period's figures while not being that.
+   */
+  outstandingInPeriod: string;
+  openInvoicesInPeriod: number;
+  /**
+   * Everything owed, whenever it was billed — and show it **labelled as such**.
+   *
+   * This is the figure that decides whether to chase anybody: an unpaid sale
+   * from last week is still money owed today, so a clinic looking at *Today*
+   * must not conclude it is square.
+   */
+  outstandingAllTime: string;
+  openInvoicesAllTime: number;
+  /**
+   * True where unpaid balances are a debtor to chase, false where they are an
+   * unreconciled till.
+   *
+   * The pharmacy is the false one, and a screen must say so rather than totting
+   * all three up under one "owed" heading. A counter sale is paid at the counter
+   * or it does not happen, it frequently has no patient to chase, and it is
+   * deliberately absent from the aging buckets. Label it differently.
+   */
+  chaseable: boolean;
+}
+
+/**
+ * `GET /admin/reports/revenue?from=&to=` or `?month=`, or neither for this
+ * month resolved on the server.
+ *
+ * `period` is what the server actually used, not what the client asked for —
+ * a preset computes "today" from the device's clock while the server resolves
+ * it in the hospital's timezone, and those differ by a day for anybody not
+ * sitting in their own clinic. Print this, never the local guess.
+ */
+export interface RevenueReport {
+  generatedAt: string;
+  timezone: string;
+  period: {
+    from: string;
+    to: string;
+    /** `September 2026` for a whole month, `1–15 September 2026` for a range. */
+    label: string;
+    wholeMonth: boolean;
+  };
+  streams: StreamRevenue[];
+}
+
+/** The label a screen shows for a stream. A hospital does not say "HOSPITAL". */
+export const REVENUE_STREAM_LABEL: Record<RevenueStream | 'ALL', string> = {
+  HOSPITAL: 'Clinic',
+  PHARMACY: 'Pharmacy',
+  LAB: 'Laboratory',
+  ALL: 'All streams',
+};
+
+/**
+ * Which module a stream needs before it is worth showing.
+ *
+ * `HOSPITAL` maps to no module on purpose: patients, staff, settings and the
+ * audit log are the floor of this product, so a hospital always sees its own
+ * takings even with every optional module removed.
+ */
+export const REVENUE_STREAM_MODULE: Record<RevenueStream, TenantModule | null> = {
+  HOSPITAL: null,
+  PHARMACY: 'PHARMACY',
+  LAB: 'LABORATORY',
+};
+
+/** A count that links into the named drill-down, per doctor. */
+export interface DoctorActivityRow {
+  doctorId: number;
+  name: string;
+  /** Distinct patients with an attended appointment in the period. */
+  patientsSeen: number;
+  /** Attended appointments — exceeds `patientsSeen` when somebody returned. */
+  consultations: number;
+  noShows: number;
+  billed: string;
+  collected: string;
+}
+
+export interface PatientActivity {
+  registered: number;
+  appointments: number;
+  attended: number;
+  noShows: number;
+  noShowRate: number;
+  /**
+   * Distinct patients across the hospital, and deliberately **not** the sum of
+   * `byDoctor`: one patient seen by two doctors is one patient here and one in
+   * each row. Do not total the rows to check this figure — they will not agree,
+   * and that is correct.
+   */
+  patientsSeen: number;
+  billed: string;
+  collected: string;
+  byDoctor: DoctorActivityRow[];
+}
+
+/** One partner that received referred work in the period. */
+export interface PartnerCount {
+  tenantId: number;
+  /** What this hospital calls them, from its own partnership row. */
+  label: string;
+  count: number;
+}
+
+export interface DestinationBreakdown {
+  inHouse: number;
+  /**
+   * Handed to the patient to fill anywhere. No partner and nothing to follow
+   * up — usually the figure an owner has never seen before.
+   */
+  external: number;
+  partner: number;
+  partners: PartnerCount[];
+  total: number;
+}
+
+export interface PartnerOwing {
+  tenantId: number;
+  label: string;
+  /** Raised in the period, settled or not. */
+  charged: string;
+  unsettled: string;
+  charges: number;
+}
+
+export interface ReferredBilling {
+  /** What this hospital charged the patient for work it sent elsewhere. */
+  charged: string;
+  /**
+   * Lines deliberately not ours to charge — `PATIENT_PAYS`, where the patient
+   * pays the laboratory directly. **Not the same as `unpriced`**, and a screen
+   * must not add them together: merging the two makes every "went out
+   * uncharged" figure report this forever, and people stop reading the figure
+   * that catches the real ones.
+   */
+  payableElsewhere: number;
+  /** Ours to charge, and nobody priced it. The genuine loss. */
+  unpriced: number;
+}
+
+export interface ReferralsOut {
+  prescriptions: DestinationBreakdown;
+  labOrders: DestinationBreakdown;
+  owedToPartners: PartnerOwing[];
+  referredBilling: ReferredBilling;
+}
+
+/**
+ * The admin dashboard, over a period the reader chose.
+ *
+ * THE SPLIT IS THE IMPORTANT PART OF THIS TYPE
+ * --------------------------------------------
+ * `overPeriod` moves with the dates. `rightNow` cannot and does not: bed
+ * occupancy is how many beds are full at this moment, and "occupancy for last
+ * month" would have to mean an average or a peak — a different figure wearing
+ * the same label. Lab queue depths, staff counts and unpriced medicines are the
+ * same: a backlog is a backlog or it has been cleared.
+ *
+ * A screen must render the two under separate headings and say that the dates
+ * do not apply to the second. Mixing them is the bug this split exists for: the
+ * period control used to drive the revenue card only, so "zero tests ordered
+ * today" sat above a card showing August with nothing saying so.
+ */
 export interface AdminDashboard {
   generatedAt: string;
   timezone: string;
-  appointments: {
-    today: number;
-    completedToday: number;
-    lastSevenDays: number;
-    noShowsLastSevenDays: number;
-    noShowRate: number;
+  /** What the server resolved. Print this, never the client's own guess. */
+  period: {
+    from: string;
+    to: string;
+    label: string;
+    wholeMonth: boolean;
   };
-  occupancy: { beds: number; occupied: number; available: number; percent: number };
-  finance: {
-    outstanding: string;
-    collectedLastSevenDays: string;
-    refundedLastSevenDays: string;
-    /** Lead with this one. See `FinanceReport.net`. */
-    netLastSevenDays: string;
-    openInvoices: number;
+  overPeriod: {
+    activity: PatientActivity;
+    /** The clinic's own books. The pharmacy's and lab's are in `RevenueReport`. */
+    finance: WindowFigures;
+    pharmacy: {
+      dispenses: number;
+      reversals: number;
+      /** Went out of the shop with nothing to charge for it. */
+      unpricedSales: number;
+    };
+    laboratory: { ordersPlaced: number };
+    referralsOut: ReferralsOut;
   };
-  staff: {
-    active: number;
-    lockedOut: number;
-    awaitingPasswordChange: number;
-    doctors: number;
-    /** Doctors with no consultation fee — reception's checkout refuses for these. */
-    doctorsWithoutFee: number;
-  };
-  security: { deniedRequestsLastDay: number };
-  /** `withoutPrice` is blank rather than zero — nobody has priced them. */
-  catalogue: { medicines: number; withoutPrice: number };
-  /**
-   * The hospital's own trade, for the parts of the product it bought.
-   *
-   * Always present in the response and rendered only where the module is. A
-   * pharmacy-only tenant read appointments, beds and doctors — all zero — and
-   * nothing about the shop it actually runs.
-   */
-  pharmacy: { dispensesToday: number; reversalsToday: number; unpricedSalesToday: number };
-  laboratory: {
-    ordersToday: number;
-    awaitingCollection: number;
-    onTheBench: number;
-    awaitingAuthorisation: number;
+  /** Point-in-time. The period above does not apply to anything in here. */
+  rightNow: {
+    occupancy: { beds: number; occupied: number; available: number; percent: number };
+    /** Everything owed, whenever it was billed — the figure you chase on. */
+    finance: { outstanding: string; openInvoices: number };
+    staff: {
+      active: number;
+      lockedOut: number;
+      awaitingPasswordChange: number;
+      doctors: number;
+      /** Reception's checkout refuses for these, in front of a patient. */
+      doctorsWithoutFee: number;
+    };
+    /** A fixed 24 hours, because a spike only means anything against now. */
+    security: { deniedRequestsLastDay: number };
+    catalogue: { medicines: number; withoutPrice: number };
+    laboratory: {
+      awaitingCollection: number;
+      onTheBench: number;
+      /** Resulted, not authorised — invisible to the doctor who asked. */
+      awaitingAuthorisation: number;
+    };
   };
 }
 

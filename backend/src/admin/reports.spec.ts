@@ -575,12 +575,37 @@ describe('every collected figure the API returns has a refund beside it', () => 
    * catches that. A new report that adds `collectedThisQuarter` and forgets the
    * refund is the same bug again, and it will look correct.
    */
-  const SERVICE = readFileSync(resolve(__dirname, './admin.service.ts'), 'utf8');
+  /*
+   * Both files. The dashboard's money figures are now read straight off a
+   * `StreamRevenue` in `revenue-streams.ts`, and `financeReport` still builds
+   * its own in `admin.service.ts`. The property this protects did not move —
+   * every collected figure the API returns has a refund and a net beside it —
+   * so the guard follows it rather than being loosened to whichever file
+   * happens to hold it today.
+   */
+  const SERVICE =
+    readFileSync(resolve(__dirname, './admin.service.ts'), 'utf8') +
+    readFileSync(resolve(__dirname, './revenue-streams.ts'), 'utf8');
 
-  it('pairs collectedLastSevenDays with a refunded and a net', () => {
-    expect(SERVICE).toContain('collectedLastSevenDays:');
-    expect(SERVICE).toContain('refundedLastSevenDays:');
-    expect(SERVICE).toContain('netLastSevenDays:');
+  it('pairs every collected figure with a refunded and a net', () => {
+    /*
+     * The twelve-month report keeps its own three blocks; the dashboard reads
+     * the period figures off the stream. Both have to carry the pair, because
+     * reporting only what arrived is how a day that took 5,000 and refunded 500
+     * reads as a day that took 5,000.
+     */
+    expect(SERVICE).toContain('collected: {');
+    expect(SERVICE).toContain('refunded: {');
+    expect(SERVICE).toContain('net: {');
+  });
+
+  it('pairs the period figures the same way', () => {
+    // The revenue card's own block, which is the one a reader now spends most
+    // of their time in. Gross in, gross out, net derived — all three or none.
+    const streams = readFileSync(resolve(__dirname, './revenue-streams.ts'), 'utf8');
+    expect(streams).toContain('collected: fromMinor(collectedMinor)');
+    expect(streams).toContain('refunded: fromMinor(refundedMinor)');
+    expect(streams).toContain('net: fromMinor(collectedMinor - refundedMinor)');
   });
 
   it('reads refunds from the Refund table, not from invoice balances', () => {
